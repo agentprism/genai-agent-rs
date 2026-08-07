@@ -28,9 +28,14 @@ pub struct BeforeToolCallResult {
     pub block: bool,
     /// Error text used when [`Self::block`] is `true`.
     ///
-    /// A default "Tool execution was blocked" message is used when this is `None`; a reason is
-    /// ignored when the call is not blocked.
+    /// A default "Tool execution was blocked" message is used when this is `None` or empty; a
+    /// reason is ignored when the call is not blocked.
     pub reason: Option<String>,
+    /// Whether a blocked call's synthesized error result requests loop termination.
+    ///
+    /// Only meaningful when [`Self::block`] is `true`. A multi-call batch still terminates only
+    /// when every finalized result requests it.
+    pub terminate: bool,
 }
 
 /// Explicit field-by-field overrides returned by an [`AfterToolCallHook`].

@@ -388,12 +388,18 @@ async fn prepare_tool_call(
         if let Some(before_result) = before_result
             && before_result.block
         {
-            return immediate_error(
-                tool_call,
-                before_result
-                    .reason
-                    .unwrap_or_else(|| "Tool execution was blocked".to_owned()),
-            );
+            // TS falsiness: an empty-string reason falls back to the default text.
+            let reason = before_result
+                .reason
+                .filter(|reason| !reason.is_empty())
+                .unwrap_or_else(|| "Tool execution was blocked".to_owned());
+            let mut outcome = immediate_error(tool_call, reason);
+            if before_result.terminate
+                && let ToolCallPreparation::Immediate(finalized) = &mut outcome
+            {
+                finalized.result.terminate = true;
+            }
+            return outcome;
         }
         hook_context.args
     } else {

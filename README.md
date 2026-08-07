@@ -13,7 +13,9 @@ crate.
 
 At the M1-M6 completion checkpoint, all **52/52** case-mapped upstream behaviors were green and
 the all-feature repository suite was **112/112** tests green. Eight proxy/streaming-JSON security
-regressions landed during release hardening; the current suite is **120/120** green.
+regressions landed during release hardening, and upstream additions (blocked-call termination and
+the reset-while-processing guard) plus TypeScript error-text pins grew the matrix to **55/55**
+mapped cases; the current suite is **128/128** green.
 
 ## Installation
 
@@ -158,12 +160,17 @@ continuation. Proxy construction can likewise return a local configuration error
 With `testing`, use `MockStreamFn` and `ScriptedStream` to exercise the real agent loop without API
 keys or network access. The repository's parity manifest is checked by
 `python3 scripts/check_test_parity.py`; its ordered fragments and aggregate must describe exactly the
-same 52 cases.
+same 55 cases.
 
 With `proxy`, `ProxyStreamFn` is a drop-in `StreamFn`. It authenticates to the normalized
 `/api/stream` endpoint with a bearer token and reconstructs compact SSE events into the same
-assistant stream. Whitespace-only SSE data is ignored. HTTP, SSE, wire-protocol, and cancellation
-failures follow the same in-band terminal model.
+assistant stream. The SSE event protocol matches the TypeScript proxy's compact events (snake-case
+tags, `contentIndex` fields, the `toolUse` terminal reason), but the request body does not: it is
+this crate's own `ProxyRequestV1` schema, not the TypeScript `proxy.ts` request contract (a pi-ai
+`Model` object, pi-schema messages, and an eleven-option subset), so a server built for the pi
+proxy request contract cannot serve this client without a translation layer. Whitespace-only SSE
+data is ignored. HTTP, SSE, wire-protocol, and cancellation failures follow the same in-band
+terminal model.
 
 The wire DTO excludes the proxy bearer token and resolved `ServiceTarget` endpoint/auth material;
 it is not generically secret-free. `ChatOptions::extra_headers` and `extra_body` are intentionally
@@ -182,10 +189,11 @@ sandbox for untrusted servers.
 
 | Area | Contract or deliberate difference |
 |---|---|
-| Mapped behavior | The pinned non-harness matrix is 52/52 green with no mapped divergence. The M1-M6 checkpoint contained 112 green tests; eight release-hardening regressions bring the current all-feature suite to 120/120. |
+| Mapped behavior | The pinned non-harness matrix is 55/55 green with no mapped divergence. The M1-M6 checkpoint contained 112 green tests; release-hardening regressions and upstream-parity additions bring the current all-feature suite to 128/128. |
 | Hook snapshots and failure contract | Async hook contexts own cloned transcript/context snapshots (the before-tool hook alone borrows its local context mutably so it can replace arguments). Hook return types are intentionally infallible rather than `Result`-shaped. A panic is a programming fault: `Agent` synthesizes an in-band failure lifecycle, spawned `agent_loop` reports `LoopError::TaskPanicked`, and direct `run_agent_loop` callers retain normal Rust unwind responsibility. |
 | Unbounded observation/update policy | Spawned loop events and internal parallel tool-update handoff are unbounded so observers cannot change execution ordering or deadlock tool tasks. Tool `UpdateSink::emit` is synchronous and returns whether the update was accepted; producers must choose a sensible update rate. Use the awaited loop API when consumer backpressure is required. |
 | Same-sink re-entry | `UpdateSink` serializes `emit` and `close` across clones and runs the callback while holding its gate. That callback must not call `emit`, `close`, or `is_closed` on the same sink or a clone; same-sink re-entry would deadlock. |
+| Proxy wire protocol | The compact SSE event protocol is TypeScript-compatible (snake-case tags, `contentIndex`, `toolUse`), but the request body is this crate's own `ProxyRequestV1` schema, not the pi `proxy.ts` request contract. Servers implementing the TypeScript request contract cannot serve this client without translation. |
 | Proxy trust boundary | Tool-argument parsing is capped, URL userinfo is rejected, and the built-in client does not redirect, but SSE/text buffering is unbounded. Production callers must use HTTPS and trust the endpoint; injected HTTP clients retain their caller-selected redirect policy. Extra request headers/body may carry secrets even though transport and resolved target credentials are excluded from the wire DTO. |
 | `genai` foundation limits | `ModelSpec` identifies a target but does not provide a catalog of context-window or price metadata. `AgentUsage` therefore tracks tokens, not monetary cost. User images are supported, but `genai::chat::ToolResponse` is text-only, so tool-result images become an `[image omitted]` marker when converted back to the model. |
 | Convenience exports | Telemetry helpers and UUID generation from the TypeScript package's convenience exports are intentionally not re-exported. Applications should select their own tracing/telemetry and UUID crates. |

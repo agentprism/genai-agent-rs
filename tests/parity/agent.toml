@@ -101,6 +101,13 @@ status = "green"
 
 [[case]]
 source_file = "pi/packages/agent/test/agent.test.ts"
+source_name = "should reject reset while processing without corrupting the transcript"
+rust_test = "tests/agent.rs::reset_rejects_while_processing_without_corrupting_the_transcript"
+milestone = "post-M6"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent.test.ts"
 source_name = "should throw when prompt() called while streaming"
 rust_test = "tests/agent.rs::prompt_rejects_while_streaming"
 milestone = "M4"

@@ -1,6 +1,7 @@
 //! Case-for-case port of `pi/packages/agent/test/agent.test.ts`.
 //!
-//! All 21 substantive black-box cases are enabled and green at the M1-M6 checkpoint.
+//! All 21 substantive black-box cases were enabled and green at the M1-M6 checkpoint; the
+//! reset-while-processing rejection case landed upstream afterwards and is ported here too.
 
 #![cfg(feature = "testing")]
 // Direct parity setup intentionally mirrors the upstream tests' incremental option mutation.
@@ -11,9 +12,9 @@ use rust_genai_agent::testing::{EventRecorder, MockStreamFn, ScriptedStream, fix
 use rust_genai_agent::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentMessage, AgentPrepareNextTurnHook,
     AgentShouldStopAfterTurnHook, AgentState, AgentTool, AgentToolCall, AgentToolResult,
-    AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, CancellationToken,
-    EventKind, FnTool, StopReason, StreamFn, StreamRequest, ThinkingLevel, ToolResultContent,
-    ToolSpec, UpdateSink, set_default_stream_fn,
+    AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, BusyContext,
+    CancellationToken, EventKind, FnTool, StopReason, StreamFn, StreamRequest, ThinkingLevel,
+    ToolResultContent, ToolSpec, UpdateSink, set_default_stream_fn,
 };
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -223,6 +224,24 @@ async fn thrown_run_failure_emits_full_lifecycle() {
     assert_eq!(last.stop_reason, StopReason::Error);
     assert_eq!(last.error_message.as_deref(), Some("provider exploded"));
     assert_eq!(state.error_message.as_deref(), Some("provider exploded"));
+}
+
+// Parity: agent.ts:570-572 — TS truthiness means an empty-string errorMessage on turn_end does
+// not populate state.errorMessage.
+#[tokio::test]
+async fn empty_error_message_does_not_populate_state() {
+    let (agent, _) = agent_with_streams(vec![script::in_band_error("")]);
+
+    agent.prompt("hello").await.unwrap();
+
+    let state = agent.state();
+    let AgentMessage::Assistant(last) = state.messages.last().expect("assistant terminal message")
+    else {
+        panic!("expected assistant message");
+    };
+    assert_eq!(last.stop_reason, StopReason::Error);
+    assert_eq!(last.error_message.as_deref(), Some(""));
+    assert!(state.error_message.is_none());
 }
 
 // TS: pi/packages/agent/test/agent.test.ts — `should await async subscribers before prompt resolves`
@@ -564,6 +583,67 @@ async fn abort_is_safe_while_idle() {
     assert!(!agent.state().is_streaming);
 }
 
+// TS: pi/packages/agent/test/agent.test.ts — `should reject reset while processing without corrupting the transcript`
+#[tokio::test]
+async fn reset_rejects_while_processing_without_corrupting_the_transcript() {
+    let release = Arc::new(Semaphore::new(0));
+    let release_for_stream = release.clone();
+    let stream_fn = Arc::new(MockStreamFn::from_fn(move |_request| {
+        let release = release_for_stream.clone();
+        ScriptedStream::from_driver(move |sender| async move {
+            let partial = AssistantMessage::new(fixtures::model_iden());
+            sender
+                .send(AssistantMessageEvent::Start { partial })
+                .expect("agent consumes stream start");
+            let permit = release.acquire().await.unwrap();
+            permit.forget();
+            let _ = sender.send(AssistantMessageEvent::Done {
+                reason: StopReason::Stop,
+                message: fixtures::text_msg("Done"),
+            });
+        })
+    }));
+    let agent = Agent::new(AgentConfig {
+        stream_fn: Some(stream_fn),
+        ..AgentConfig::default()
+    });
+
+    let running_agent = agent.clone();
+    let prompt = tokio::spawn(async move { running_agent.prompt("Hello").await });
+    wait_until(|| agent.state().is_streaming).await;
+
+    let error = agent.reset().unwrap_err();
+    assert!(matches!(error, AgentError::Busy(BusyContext::Reset)));
+    let state = agent.state();
+    assert!(state.is_streaming);
+    assert_eq!(
+        state
+            .messages
+            .iter()
+            .map(|message| message.role())
+            .collect::<Vec<_>>(),
+        ["user"]
+    );
+
+    release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(2), prompt)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    let state = agent.state();
+    assert!(!state.is_streaming);
+    assert_eq!(
+        state
+            .messages
+            .iter()
+            .map(|message| message.role())
+            .collect::<Vec<_>>(),
+        ["user", "assistant"]
+    );
+}
+
 // TS: pi/packages/agent/test/agent.test.ts — `should throw when prompt() called while streaming`
 #[tokio::test]
 async fn prompt_rejects_while_streaming() {
@@ -577,7 +657,7 @@ async fn prompt_rejects_while_streaming() {
     wait_until(|| agent.state().is_streaming).await;
 
     let error = agent.prompt("Second message").await.unwrap_err();
-    assert!(matches!(error, AgentError::Busy));
+    assert!(matches!(error, AgentError::Busy(BusyContext::Prompt)));
 
     agent.abort();
     tokio::time::timeout(Duration::from_secs(2), first_prompt)
@@ -600,7 +680,7 @@ async fn continue_rejects_while_streaming() {
     wait_until(|| agent.state().is_streaming).await;
 
     let error = agent.continue_().await.unwrap_err();
-    assert!(matches!(error, AgentError::Busy));
+    assert!(matches!(error, AgentError::Busy(BusyContext::Continue)));
 
     agent.abort();
     tokio::time::timeout(Duration::from_secs(2), first_prompt)
@@ -608,6 +688,28 @@ async fn continue_rejects_while_streaming() {
         .unwrap()
         .unwrap()
         .unwrap();
+}
+
+// Parity: agent.ts:335 (reset), agent.ts:353 (prompt), agent.ts:363 (continue), agent.ts:488
+// (guarded setters) — the four site-specific busy texts, byte for byte.
+#[test]
+fn busy_error_texts_match_the_typescript_strings() {
+    assert_eq!(
+        AgentError::Busy(BusyContext::Prompt).to_string(),
+        "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
+    );
+    assert_eq!(
+        AgentError::Busy(BusyContext::Continue).to_string(),
+        "Agent is already processing. Wait for completion before continuing."
+    );
+    assert_eq!(
+        AgentError::Busy(BusyContext::Reset).to_string(),
+        "Agent is already processing. Wait for completion before resetting."
+    );
+    assert_eq!(
+        AgentError::Busy(BusyContext::Other).to_string(),
+        "Agent is already processing."
+    );
 }
 
 // TS: pi/packages/agent/test/agent.test.ts — `continue() should process queued follow-up messages after an assistant turn`

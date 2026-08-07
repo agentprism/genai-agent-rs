@@ -1,7 +1,7 @@
 version = 1
 upstream_repository = "earendil-works/pi"
-upstream_commit = "6b461b75b39b5a19b378dc42fbfbd1655bc446a6"
-expected_cases = 52
+upstream_commit = "666d8972ff0b6da5067e05973249760964194769"
+expected_cases = 55
 
 # ---- agent_loop.toml ----
 # Port of all concrete `it(...)` cases in pi/packages/agent/test/agent-loop.test.ts.
@@ -116,6 +116,20 @@ source_file = "pi/packages/agent/test/agent-loop.test.ts"
 source_name = "should stop after a tool batch when every tool result sets terminate=true"
 rust_test = "tests/agent_loop.rs::stops_after_tool_batch_when_every_result_terminates"
 milestone = "M3"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should stop after a blocked tool call when beforeToolCall sets terminate=true"
+rust_test = "tests/agent_loop.rs::stops_after_blocked_call_when_before_hook_sets_terminate"
+milestone = "post-M6"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should continue after a mixed batch with one terminating blocked call"
+rust_test = "tests/agent_loop.rs::continues_after_mixed_batch_with_one_terminating_blocked_call"
+milestone = "post-M6"
 status = "green"
 
 [[case]]
@@ -253,6 +267,13 @@ source_file = "pi/packages/agent/test/agent.test.ts"
 source_name = "should handle abort controller"
 rust_test = "tests/agent.rs::abort_is_safe_while_idle"
 milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent.test.ts"
+source_name = "should reject reset while processing without corrupting the transcript"
+rust_test = "tests/agent.rs::reset_rejects_while_processing_without_corrupting_the_transcript"
+milestone = "post-M6"
 status = "green"
 
 [[case]]

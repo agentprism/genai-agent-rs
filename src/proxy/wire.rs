@@ -1,9 +1,13 @@
 //! Version-one request and compact-event DTOs for the proxy wire protocol.
 //!
-//! These types freeze the TypeScript-compatible JSON boundary independently of `genai`'s own
-//! serialization. Field names documented in backticks are their exact JSON spellings: request
-//! fields are camel-cased where specified, compact event `type` tags remain snake-cased, and the
-//! successful tool terminal reason is exactly `"toolUse"`.
+//! These types freeze this crate's JSON boundary independently of `genai`'s own serialization.
+//! Only the compact-event side is TypeScript-compatible: event `type` tags remain snake-cased,
+//! event fields such as `contentIndex` are camel-cased, and the successful tool terminal reason is
+//! exactly `"toolUse"`. The request side is this crate's own schema — [`ProxyRequestV1`] is not
+//! the TypeScript `proxy.ts` request body (a pi-ai `Model` object, the pi message schema, and an
+//! eleven-option `SimpleStreamOptions` subset), so servers implementing that contract cannot
+//! accept these requests without translation. Field names documented in backticks are their exact
+//! JSON spellings.
 //!
 //! The request DTO never contains the proxy bearer token and cannot represent a resolved
 //! `ModelSpec::Target`, so a service target's endpoint and credentials do not cross this boundary.
@@ -41,6 +45,10 @@ pub enum ProxyRequestError {
 }
 
 /// Version-one proxy POST body and stable protocol boundary.
+///
+/// This is this crate's own request schema, not the TypeScript proxy's: the pi `proxy.ts` client
+/// posts a pi-ai `Model` object, pi-schema messages, and an eleven-option `SimpleStreamOptions`
+/// subset, so a server implementing that contract cannot accept this body without translation.
 ///
 /// Transport authentication is supplied separately by [`ProxyStreamOptions`](super::ProxyStreamOptions)
 /// and is never serialized here. Conversion rejects `ModelSpec::Target` rather than serializing a

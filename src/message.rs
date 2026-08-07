@@ -346,11 +346,12 @@ fn convert_message_to_llm(message: &AgentMessage) -> Option<ChatMessage> {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            Some(ChatMessage::tool(ToolResponse {
-                call_id: result.tool_call_id.clone(),
-                fn_name: Some(result.tool_name.clone()),
-                content,
-            }))
+            // Constructor form instead of a struct literal so this compiles identically against
+            // upstream genai main and forks that append optional `ToolResponse` fields.
+            Some(ChatMessage::tool(
+                ToolResponse::new(result.tool_call_id.clone(), content)
+                    .with_fn_name(result.tool_name.clone()),
+            ))
         }
         AgentMessage::Custom(_) => None,
     }

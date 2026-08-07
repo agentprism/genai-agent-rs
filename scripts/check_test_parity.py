@@ -19,8 +19,8 @@ FRAGMENT_MANIFESTS = (
     ROOT / "tests" / "parity" / "e2e.toml",
 )
 SOURCE_COUNTS = {
-    "pi/packages/agent/test/agent-loop.test.ts": 21,
-    "pi/packages/agent/test/agent.test.ts": 21,
+    "pi/packages/agent/test/agent-loop.test.ts": 23,
+    "pi/packages/agent/test/agent.test.ts": 22,
     "pi/packages/agent/test/e2e.test.ts": 10,
 }
 VALID_STATUSES = {"pending", "active", "green", "divergence"}

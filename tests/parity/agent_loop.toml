@@ -114,6 +114,20 @@ status = "green"
 
 [[case]]
 source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should stop after a blocked tool call when beforeToolCall sets terminate=true"
+rust_test = "tests/agent_loop.rs::stops_after_blocked_call_when_before_hook_sets_terminate"
+milestone = "post-M6"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should continue after a mixed batch with one terminating blocked call"
+rust_test = "tests/agent_loop.rs::continues_after_mixed_batch_with_one_terminating_blocked_call"
+milestone = "post-M6"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
 source_name = "should continue after parallel tool calls when not all tool results terminate"
 rust_test = "tests/agent_loop.rs::continues_after_parallel_calls_when_not_all_results_terminate"
 milestone = "M3"

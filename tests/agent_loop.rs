@@ -1,6 +1,7 @@
 //! Case-by-case port of `pi/packages/agent/test/agent-loop.test.ts`.
 //!
-//! All 21 complete executable contracts are enabled and green at the M1-M6 checkpoint.
+//! All 21 complete executable contracts were enabled and green at the M1-M6 checkpoint; the two
+//! blocked-call termination cases landed upstream afterwards and are ported here too.
 
 #![cfg(feature = "testing")]
 
@@ -15,11 +16,12 @@ use genai::chat::{ChatMessage, ChatRole};
 use genai::{ModelIden, ModelSpec};
 use rust_genai_agent::testing::{EventRecorder, MockStreamFn, ScriptedStream};
 use rust_genai_agent::{
-    AfterToolCallResult, AgentContext, AgentEvent, AgentLoopConfig, AgentLoopTurnUpdate,
-    AgentMessage, AgentTool, AgentToolCall, AgentToolResult, AgentUsage, AssistantContent,
-    AssistantMessage, AssistantMessageEvent, BeforeToolCallResult, CustomMessage, EventKind,
-    FnTool, LoopError, StopReason, ToolExecutionMode, ToolResultContent, ToolSpec,
-    default_convert_to_llm, run_agent_loop, run_agent_loop_continue, set_default_stream_fn,
+    AfterToolCallResult, AgentContext, AgentError, AgentEvent, AgentLoopConfig,
+    AgentLoopTurnUpdate, AgentMessage, AgentTool, AgentToolCall, AgentToolResult, AgentUsage,
+    AssistantContent, AssistantMessage, AssistantMessageEvent, BeforeToolCallResult, CustomMessage,
+    EventKind, FnTool, LoopError, StopReason, ToolExecutionMode, ToolResultContent,
+    ToolResultMessage, ToolSpec, default_convert_to_llm, run_agent_loop, run_agent_loop_continue,
+    set_default_stream_fn,
 };
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -512,6 +514,84 @@ async fn executes_mutated_before_tool_call_args_without_revalidation() {
     .await;
 
     assert_eq!(*executed.lock().unwrap(), [json!(123)]);
+}
+
+/// Run one blocked tool call and return whether the tool executed plus its tool-result message.
+async fn blocked_tool_result(reason: Option<&str>) -> (Arc<AtomicBool>, ToolResultMessage) {
+    let executed = Arc::new(AtomicBool::new(false));
+    let executed_by_tool = executed.clone();
+    let tool = Arc::new(FnTool::from_value_fn(
+        tool_spec("echo", value_schema()),
+        move |args| {
+            let executed = executed_by_tool.clone();
+            async move {
+                executed.store(true, Ordering::SeqCst);
+                Ok(AgentToolResult::new(
+                    vec![ToolResultContent::text(format!(
+                        "echoed: {}",
+                        args["value"]
+                    ))],
+                    json!({}),
+                ))
+            }
+        },
+    ));
+    let reason = reason.map(str::to_owned);
+    let mut config = base_config();
+    config.before_tool_call = Some(Arc::new(move |_hook, _cancel| {
+        let reason = reason.clone();
+        Box::pin(async move {
+            Some(BeforeToolCallResult {
+                block: true,
+                reason,
+                terminate: false,
+            })
+        })
+    }));
+
+    let (messages, _events) = run_new(
+        vec![user("echo something")],
+        empty_context(vec![tool]),
+        config,
+        Some(mock(vec![
+            tool_response(
+                vec![call("tool-1", "echo", json!({ "value": "hello" }))],
+                StopReason::ToolUse,
+            ),
+            text_response("done"),
+        ])),
+    )
+    .await;
+
+    let result = messages
+        .iter()
+        .find_map(|message| match message {
+            AgentMessage::ToolResult(result) => Some(result.clone()),
+            _ => None,
+        })
+        .expect("a blocked call still produces a tool-result message");
+    (executed, result)
+}
+
+// Parity: agent-loop.ts:639 — `beforeResult.reason || "Tool execution was blocked"`. TS
+// falsiness means an empty-string reason falls back to the default text.
+#[tokio::test]
+async fn blocked_call_with_empty_reason_uses_default_text() {
+    let (executed, result) = blocked_tool_result(Some("")).await;
+
+    assert!(!executed.load(Ordering::SeqCst));
+    assert!(result.is_error);
+    assert_eq!(first_text(&result.content), "Tool execution was blocked");
+}
+
+// Parity: agent-loop.ts:639 — a non-empty reason is used verbatim.
+#[tokio::test]
+async fn blocked_call_with_nonempty_reason_uses_the_supplied_reason() {
+    let (executed, result) = blocked_tool_result(Some("nope")).await;
+
+    assert!(!executed.load(Ordering::SeqCst));
+    assert!(result.is_error);
+    assert_eq!(first_text(&result.content), "nope");
 }
 
 // TS: pi/packages/agent/test/agent-loop.test.ts
@@ -1116,6 +1196,119 @@ async fn stops_after_tool_batch_when_every_result_terminates() {
 }
 
 // TS: pi/packages/agent/test/agent-loop.test.ts
+// it("should stop after a blocked tool call when beforeToolCall sets terminate=true")
+#[tokio::test]
+async fn stops_after_blocked_call_when_before_hook_sets_terminate() {
+    let executed = Arc::new(AtomicBool::new(false));
+    let executed_by_tool = executed.clone();
+    let tool = Arc::new(FnTool::from_value_fn(
+        tool_spec("echo", value_schema()),
+        move |_args| {
+            let executed = executed_by_tool.clone();
+            async move {
+                executed.store(true, Ordering::SeqCst);
+                Ok(AgentToolResult::new(
+                    vec![ToolResultContent::text("should not execute")],
+                    json!({ "value": "unexpected" }),
+                ))
+            }
+        },
+    ));
+    let mut config = base_config();
+    config.before_tool_call = Some(Arc::new(|_hook, _cancel| {
+        Box::pin(async {
+            Some(BeforeToolCallResult {
+                block: true,
+                reason: Some("Blocked by policy".to_owned()),
+                terminate: true,
+            })
+        })
+    }));
+    let stream = mock(vec![
+        tool_response(
+            vec![call("tool-1", "echo", json!({ "value": "hello" }))],
+            StopReason::ToolUse,
+        ),
+        text_response("should not run"),
+    ]);
+
+    let (messages, _events) = run_new(
+        vec![user("echo something")],
+        empty_context(vec![tool]),
+        config,
+        Some(stream.clone()),
+    )
+    .await;
+
+    let result = messages
+        .iter()
+        .find_map(|message| match message {
+            AgentMessage::ToolResult(result) => Some(result.clone()),
+            _ => None,
+        })
+        .expect("the blocked call still produces a tool-result message");
+    assert!(!executed.load(Ordering::SeqCst));
+    assert_eq!(stream.call_count(), 1);
+    assert!(result.is_error);
+    assert_eq!(first_text(&result.content), "Blocked by policy");
+}
+
+// TS: pi/packages/agent/test/agent-loop.test.ts
+// it("should continue after a mixed batch with one terminating blocked call")
+#[tokio::test]
+async fn continues_after_mixed_batch_with_one_terminating_blocked_call() {
+    let executed = Arc::new(Mutex::new(Vec::<String>::new()));
+    let executed_by_tool = executed.clone();
+    let tool = Arc::new(FnTool::from_value_fn(
+        tool_spec("echo", value_schema()),
+        move |args| {
+            let executed = executed_by_tool.clone();
+            async move {
+                let value = args["value"].as_str().unwrap().to_owned();
+                executed.lock().unwrap().push(value.clone());
+                Ok(AgentToolResult::new(
+                    vec![ToolResultContent::text(format!("echoed: {value}"))],
+                    json!({ "value": value }),
+                ))
+            }
+        },
+    ));
+    let mut config = base_config();
+    config.tool_execution = ToolExecutionMode::Parallel;
+    config.before_tool_call = Some(Arc::new(|hook, _cancel| {
+        let is_first = hook.args["value"] == json!("first");
+        Box::pin(async move {
+            is_first.then(|| BeforeToolCallResult {
+                block: true,
+                reason: Some("Blocked first".to_owned()),
+                terminate: true,
+            })
+        })
+    }));
+    let stream = mock(vec![
+        tool_response(
+            vec![
+                call("tool-1", "echo", json!({ "value": "first" })),
+                call("tool-2", "echo", json!({ "value": "second" })),
+            ],
+            StopReason::ToolUse,
+        ),
+        text_response("done"),
+    ]);
+
+    run_new(
+        vec![user("echo both")],
+        empty_context(vec![tool]),
+        config,
+        Some(stream.clone()),
+    )
+    .await;
+
+    assert_eq!(*executed.lock().unwrap(), ["second"]);
+    assert_eq!(stream.call_count(), 2);
+}
+
+// TS: pi/packages/agent/test/agent-loop.test.ts
 // it("should continue after parallel tool calls when not all tool results terminate")
 #[tokio::test]
 async fn continues_after_parallel_calls_when_not_all_results_terminate() {
@@ -1217,6 +1410,15 @@ async fn continue_errors_when_context_has_no_messages() {
 
     assert!(matches!(error, LoopError::EmptyContext));
     assert_eq!(error.to_string(), "Cannot continue: no messages in context");
+}
+
+// Parity: pi agent stream-fn.ts:17 — the Rust-adapted spelling of the missing-default error text.
+// Both error enums must keep the identical string.
+#[test]
+fn no_default_stream_fn_error_text_is_pinned() {
+    let expected = "No default stream function configured. Pass stream_fn explicitly or call set_default_stream_fn().";
+    assert_eq!(LoopError::NoDefaultStreamFn.to_string(), expected);
+    assert_eq!(AgentError::NoDefaultStreamFn.to_string(), expected);
 }
 
 // TS: pi/packages/agent/test/agent-loop.test.ts

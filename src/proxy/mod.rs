@@ -19,8 +19,12 @@
 //! per invocation. SSE event/text framing and accumulated assistant text remain unbounded, so the
 //! endpoint must still be trusted as a network and resource boundary.
 //!
-//! Wire spellings match the TypeScript protocol: request fields use their specified camel-case
-//! names, compact event tags use their fixed spellings, and the tool terminal reason is `toolUse`.
+//! The compact EVENT protocol matches the TypeScript proxy: snake-case event tags, camel-case
+//! event fields such as `contentIndex`, and the `toolUse` tool terminal reason. The REQUEST body
+//! does not: it is this crate's own version-one schema ([`ProxyRequestV1`]) built from `genai`
+//! types, not the TypeScript `proxy.ts` request contract (a pi-ai `Model` object, the pi message
+//! schema, and an eleven-option `SimpleStreamOptions` subset). A server implementing the pi proxy
+//! request contract cannot serve this client without a translation layer.
 
 mod accumulator;
 mod client;

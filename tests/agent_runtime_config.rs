@@ -7,7 +7,7 @@ use rust_genai_agent::testing::{MockStreamFn, ScriptedStream, fixtures, script};
 use rust_genai_agent::{
     AfterToolCallHook, Agent, AgentConfig, AgentError, AgentPrepareNextTurnHook,
     AgentPrepareNextTurnWithContextHook, AgentShouldStopAfterTurnHook, BeforeToolCallHook,
-    ConvertToLlm, StreamFn, ThinkingLevel, ToolExecutionMode, TransformContextHook,
+    BusyContext, ConvertToLlm, StreamFn, ThinkingLevel, ToolExecutionMode, TransformContextHook,
     default_convert_to_llm,
 };
 use std::sync::Arc;
@@ -175,40 +175,43 @@ async fn every_runtime_config_setter_rejects_updates_during_an_active_run() {
 
     assert_eq!(
         agent.set_stream_fn(replacement_stream),
-        Err(AgentError::Busy)
+        Err(AgentError::Busy(BusyContext::Other))
     );
-    assert_eq!(agent.set_convert_to_llm(convert), Err(AgentError::Busy));
+    assert_eq!(
+        agent.set_convert_to_llm(convert),
+        Err(AgentError::Busy(BusyContext::Other))
+    );
     assert_eq!(
         agent.set_transform_context(Some(transform)),
-        Err(AgentError::Busy)
+        Err(AgentError::Busy(BusyContext::Other))
     );
     assert_eq!(
         agent.set_before_tool_call(Some(before)),
-        Err(AgentError::Busy)
+        Err(AgentError::Busy(BusyContext::Other))
     );
     assert_eq!(
         agent.set_after_tool_call(Some(after)),
-        Err(AgentError::Busy)
+        Err(AgentError::Busy(BusyContext::Other))
     );
     assert_eq!(
         agent.set_should_stop_after_turn(Some(should_stop)),
-        Err(AgentError::Busy)
+        Err(AgentError::Busy(BusyContext::Other))
     );
     assert_eq!(
         agent.set_prepare_next_turn(Some(prepare)),
-        Err(AgentError::Busy)
+        Err(AgentError::Busy(BusyContext::Other))
     );
     assert_eq!(
         agent.set_prepare_next_turn_with_context(Some(prepare_with_context)),
-        Err(AgentError::Busy)
+        Err(AgentError::Busy(BusyContext::Other))
     );
     assert_eq!(
         agent.set_tool_execution(ToolExecutionMode::Sequential),
-        Err(AgentError::Busy)
+        Err(AgentError::Busy(BusyContext::Other))
     );
     assert_eq!(
         agent.set_chat_options(ChatOptions::default()),
-        Err(AgentError::Busy)
+        Err(AgentError::Busy(BusyContext::Other))
     );
 
     release.add_permits(1);

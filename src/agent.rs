@@ -12,9 +12,9 @@
 use crate::{
     AfterToolCallHook, AgentContext, AgentError, AgentEvent, AgentLoopConfig, AgentMessage,
     AgentPrepareNextTurnHook, AgentPrepareNextTurnWithContextHook, AgentShouldStopAfterTurnHook,
-    AgentTool, AssistantContent, AssistantMessage, BeforeToolCallHook, ConvertToLlm, QueueMode,
-    StopReason, StreamFn, ThinkingLevel, ToolExecutionMode, TransformContextHook, UserContent,
-    UserMessage, default_convert_to_llm, get_default_stream_fn, run_agent_loop,
+    AgentTool, AssistantContent, AssistantMessage, BeforeToolCallHook, BusyContext, ConvertToLlm,
+    QueueMode, StopReason, StreamFn, ThinkingLevel, ToolExecutionMode, TransformContextHook,
+    UserContent, UserMessage, default_convert_to_llm, get_default_stream_fn, run_agent_loop,
     run_agent_loop_continue,
 };
 use futures::FutureExt;
@@ -846,9 +846,22 @@ impl Agent {
     /// Clear the transcript, transient run state, error text, and both message queues.
     ///
     /// The system prompt, model, thinking level, tools, runtime configuration, and listeners are
-    /// preserved. This does not cancel an active run or emit events; reset while idle to avoid later
-    /// events repopulating the cleared state.
-    pub fn reset(&self) {
+    /// preserved. Reset does not cancel or emit events; like the runtime-configuration setters it
+    /// serializes with run admission and is rejected while a run is active.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError::Busy`] with [`BusyContext::Reset`] while a prompt or continuation is
+    /// active; state and queues are left untouched.
+    pub fn reset(&self) -> Result<(), AgentError> {
+        let active = self
+            .inner
+            .active_run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if active.is_some() {
+            return Err(AgentError::Busy(BusyContext::Reset));
+        }
         let mut state = self.write_state();
         state.messages.clear();
         state.is_streaming = false;
@@ -857,6 +870,8 @@ impl Agent {
         state.error_message = None;
         drop(state);
         self.clear_all_queues();
+        drop(active);
+        Ok(())
     }
 
     /// Start a new run by appending text, one message, or a message batch to the transcript.
@@ -933,7 +948,7 @@ impl Agent {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if active.is_some() {
-            return Err(AgentError::Busy);
+            return Err(AgentError::Busy(BusyContext::Prompt));
         }
         let stream_fn = self.resolve_stream_fn()?;
         let run = self.activate_run(&mut active);
@@ -947,7 +962,7 @@ impl Agent {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if active.is_some() {
-            return Err(AgentError::Busy);
+            return Err(AgentError::Busy(BusyContext::Continue));
         }
 
         let last = self
@@ -1234,10 +1249,15 @@ impl Agent {
                 AgentEvent::ToolExecutionEnd { tool_call_id, .. } => {
                     state.pending_tool_calls.remove(tool_call_id);
                 }
+                // TS truthiness: an empty-string errorMessage does not populate state.
                 AgentEvent::TurnEnd {
                     message: AgentMessage::Assistant(message),
                     ..
-                } if message.error_message.is_some() => {
+                } if message
+                    .error_message
+                    .as_deref()
+                    .is_some_and(|m| !m.is_empty()) =>
+                {
                     state.error_message = message.error_message.clone();
                 }
                 AgentEvent::AgentEnd { .. } => {
@@ -1295,7 +1315,7 @@ impl Agent {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if active.is_some() {
-            return Err(AgentError::Busy);
+            return Err(AgentError::Busy(BusyContext::Other));
         }
 
         let mut config = self

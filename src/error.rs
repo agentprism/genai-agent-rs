@@ -18,13 +18,45 @@ pub enum LoopError {
     #[error("Cannot continue from message role: assistant")]
     ContinueFromAssistant,
     /// Neither the invocation nor the process supplied a provider stream function.
-    #[error("no stream function was supplied and no process default is installed")]
+    #[error(
+        "No default stream function configured. Pass stream_fn explicitly or call set_default_stream_fn()."
+    )]
     NoDefaultStreamFn,
     /// A task spawned by the event-stream convenience API panicked or ended without publishing.
     ///
     /// The string is the recovered panic payload or a defensive diagnostic.
     #[error("agent loop task panicked: {0}")]
     TaskPanicked(String),
+}
+
+/// The admission path that rejected a call because another run was active.
+///
+/// Carried by [`AgentError::Busy`], this selects the exact message text; each string matches the
+/// corresponding site-specific TypeScript error byte for byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BusyContext {
+    /// A new prompt was rejected while a run was active.
+    Prompt,
+    /// A continuation was rejected while a run was active.
+    Continue,
+    /// A reset was rejected while a run was active.
+    Reset,
+    /// A guarded operation such as a runtime-configuration setter was rejected while a run was
+    /// active.
+    Other,
+}
+
+impl std::fmt::Display for BusyContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Prompt => {
+                "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
+            }
+            Self::Continue => "Agent is already processing. Wait for completion before continuing.",
+            Self::Reset => "Agent is already processing. Wait for completion before resetting.",
+            Self::Other => "Agent is already processing.",
+        })
+    }
 }
 
 /// Admission and continuation errors returned by the stateful [`crate::Agent`] facade.
@@ -35,9 +67,10 @@ pub enum LoopError {
 pub enum AgentError {
     /// Another prompt or continuation is active.
     ///
-    /// Guarded runtime-configuration setters also return this variant while a run is active.
-    #[error("agent is already processing a prompt")]
-    Busy,
+    /// The payload records which admission path rejected the call and selects the message text.
+    /// Guarded runtime-configuration setters return [`BusyContext::Other`] while a run is active.
+    #[error("{0}")]
+    Busy(BusyContext),
     /// [`crate::Agent::continue_`] was called without any transcript messages.
     #[error("No messages to continue from")]
     EmptyContext,
@@ -45,7 +78,9 @@ pub enum AgentError {
     #[error("Cannot continue from message role: assistant")]
     ContinueFromAssistant,
     /// Neither this agent nor the process has a provider stream function installed.
-    #[error("no stream function was supplied and no process default is installed")]
+    #[error(
+        "No default stream function configured. Pass stream_fn explicitly or call set_default_stream_fn()."
+    )]
     NoDefaultStreamFn,
 }
 
