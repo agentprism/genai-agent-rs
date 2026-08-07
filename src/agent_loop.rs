@@ -513,6 +513,7 @@ where
     };
     let request = StreamRequest::new(config.model.clone(), llm_context)
         .with_options(config.chat_options.clone())
+        .with_transport(config.transport)
         .with_cancellation(cancel.clone());
     let mut response = stream_fn.stream(request).await;
     let final_result = response.result_handle();

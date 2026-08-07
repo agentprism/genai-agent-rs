@@ -7,8 +7,8 @@ use rust_genai_agent::testing::{MockStreamFn, ScriptedStream, fixtures, script};
 use rust_genai_agent::{
     AfterToolCallHook, Agent, AgentConfig, AgentError, AgentPrepareNextTurnHook,
     AgentPrepareNextTurnWithContextHook, AgentShouldStopAfterTurnHook, BeforeToolCallHook,
-    BusyContext, ConvertToLlm, StreamFn, ThinkingLevel, ToolExecutionMode, TransformContextHook,
-    default_convert_to_llm,
+    BusyContext, ConvertToLlm, StreamFn, ThinkingBudgets, ThinkingLevel, ToolExecutionMode,
+    TransformContextHook, Transport, default_convert_to_llm,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -56,6 +56,103 @@ async fn thinking_budget_is_forwarded_to_stream_request_options() {
         calls[0].options.reasoning_effort.as_ref(),
         Some(ReasoningEffort::Budget(4_096))
     ));
+}
+
+#[tokio::test]
+async fn thinking_budget_map_resolves_named_levels_with_xhigh_and_max_clamping() {
+    let cases: [(ThinkingLevel, u32); 6] = [
+        (ThinkingLevel::Minimal, 100),
+        (ThinkingLevel::Low, 200),
+        (ThinkingLevel::Medium, 300),
+        (ThinkingLevel::High, 400),
+        // xhigh and max clamp through the `high` entry, mirroring pi-ai's clampReasoning.
+        (ThinkingLevel::XHigh, 400),
+        (ThinkingLevel::Max, 400),
+    ];
+    let stream = Arc::new(MockStreamFn::from_streams(
+        cases.iter().map(|_| script::text_response("ok")).collect(),
+    ));
+    let agent = Agent::new(AgentConfig {
+        stream_fn: Some(stream.clone()),
+        thinking_budgets: Some(ThinkingBudgets {
+            minimal: Some(100),
+            low: Some(200),
+            medium: Some(300),
+            high: Some(400),
+        }),
+        ..AgentConfig::default()
+    });
+
+    for (level, _) in cases {
+        agent.set_thinking_level(level);
+        agent.prompt("go").await.unwrap();
+    }
+
+    let calls = stream.calls();
+    assert_eq!(calls.len(), cases.len());
+    for (index, (_, expected)) in cases.into_iter().enumerate() {
+        assert!(
+            matches!(
+                calls[index].options.reasoning_effort.as_ref(),
+                Some(ReasoningEffort::Budget(budget)) if *budget == expected
+            ),
+            "case {index} resolved to {:?}",
+            calls[index].options.reasoning_effort
+        );
+    }
+}
+
+#[tokio::test]
+async fn explicit_thinking_budget_bypasses_the_budget_map() {
+    let stream = Arc::new(MockStreamFn::from_streams(vec![script::text_response(
+        "ok",
+    )]));
+    let agent = Agent::new(AgentConfig {
+        stream_fn: Some(stream.clone()),
+        thinking_budgets: Some(ThinkingBudgets {
+            high: Some(400),
+            ..ThinkingBudgets::default()
+        }),
+        ..AgentConfig::default()
+    });
+
+    agent.set_thinking_level(ThinkingLevel::Budget(4_096));
+    agent.prompt("go").await.unwrap();
+
+    let calls = stream.calls();
+    assert!(matches!(
+        calls[0].options.reasoning_effort.as_ref(),
+        Some(ReasoningEffort::Budget(4_096))
+    ));
+}
+
+#[tokio::test]
+async fn named_level_without_budget_entry_falls_back_to_named_reasoning_effort() {
+    let stream = Arc::new(MockStreamFn::from_streams(vec![script::text_response(
+        "ok",
+    )]));
+    let agent = Agent::new(AgentConfig {
+        stream_fn: Some(stream.clone()),
+        // Only `high` is configured, so there is no implicit budget for `low`.
+        thinking_budgets: Some(ThinkingBudgets {
+            high: Some(400),
+            ..ThinkingBudgets::default()
+        }),
+        ..AgentConfig::default()
+    });
+
+    agent.set_thinking_level(ThinkingLevel::Low);
+    agent.prompt("go").await.unwrap();
+
+    let calls = stream.calls();
+    assert_eq!(
+        calls[0]
+            .options
+            .reasoning_effort
+            .as_ref()
+            .map(ReasoningEffort::variant_name),
+        Some("low")
+    );
 }
 
 #[tokio::test]
@@ -210,9 +307,108 @@ async fn every_runtime_config_setter_rejects_updates_during_an_active_run() {
         Err(AgentError::Busy(BusyContext::Other))
     );
     assert_eq!(
+        agent.set_thinking_budgets(Some(ThinkingBudgets {
+            high: Some(400),
+            ..ThinkingBudgets::default()
+        })),
+        Err(AgentError::Busy(BusyContext::Other))
+    );
+    assert_eq!(
         agent.set_chat_options(ChatOptions::default()),
         Err(AgentError::Busy(BusyContext::Other))
     );
+
+    release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(2), prompt)
+        .await
+        .expect("prompt settles after release")
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn transport_defaults_to_auto_and_is_forwarded_to_the_stream_request() {
+    let stream = Arc::new(MockStreamFn::from_streams(vec![script::text_response(
+        "ok",
+    )]));
+    let agent = Agent::new(AgentConfig {
+        stream_fn: Some(stream.clone()),
+        ..AgentConfig::default()
+    });
+
+    assert_eq!(agent.transport(), Transport::Auto);
+    agent.prompt("go").await.unwrap();
+
+    let calls = stream.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].transport, Transport::Auto);
+}
+
+#[tokio::test]
+async fn configured_transport_is_forwarded_and_live_reassignable_between_runs() {
+    let stream = Arc::new(MockStreamFn::from_streams(vec![
+        script::text_response("one"),
+        script::text_response("two"),
+    ]));
+    let agent = Agent::new(AgentConfig {
+        stream_fn: Some(stream.clone()),
+        transport: Transport::WebsocketCached,
+        ..AgentConfig::default()
+    });
+
+    assert_eq!(agent.transport(), Transport::WebsocketCached);
+    agent.prompt("one").await.unwrap();
+
+    // The setter is unguarded; a value set between runs is observed by the next run.
+    agent.set_transport(Transport::Sse);
+    assert_eq!(agent.transport(), Transport::Sse);
+    agent.prompt("two").await.unwrap();
+
+    let calls = stream.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].transport, Transport::WebsocketCached);
+    assert_eq!(calls[1].transport, Transport::Sse);
+}
+
+#[tokio::test]
+async fn set_transport_is_unguarded_during_an_active_run() {
+    let entered = Arc::new(Semaphore::new(0));
+    let release = Arc::new(Semaphore::new(0));
+    let stream = Arc::new(MockStreamFn::from_fn({
+        let entered = entered.clone();
+        let release = release.clone();
+        move |_request| {
+            let entered = entered.clone();
+            let release = release.clone();
+            ScriptedStream::from_driver(move |sender| async move {
+                entered.add_permits(1);
+                let permit = release.acquire().await.unwrap();
+                permit.forget();
+                sender
+                    .send(rust_genai_agent::AssistantMessageEvent::Done {
+                        reason: rust_genai_agent::StopReason::Stop,
+                        message: fixtures::text_msg("done"),
+                    })
+                    .expect("agent consumes terminal event");
+            })
+        }
+    }));
+    let agent = Agent::new(AgentConfig {
+        stream_fn: Some(stream),
+        ..AgentConfig::default()
+    });
+
+    let running_agent = agent.clone();
+    let prompt = tokio::spawn(async move { running_agent.prompt("block").await });
+    let permit = tokio::time::timeout(Duration::from_secs(2), entered.acquire())
+        .await
+        .expect("stream function was entered")
+        .unwrap();
+    permit.forget();
+
+    // Unlike the guarded runtime-config setters, this succeeds mid-run and returns nothing.
+    agent.set_transport(Transport::Websocket);
+    assert_eq!(agent.transport(), Transport::Websocket);
 
     release.add_permits(1);
     tokio::time::timeout(Duration::from_secs(2), prompt)

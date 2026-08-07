@@ -83,6 +83,77 @@ impl ThinkingLevel {
     }
 }
 
+/// Per-named-level reasoning-token budgets used to resolve a [`ThinkingLevel`] to an explicit
+/// provider budget.
+///
+/// This mirrors pi-ai's `ThinkingBudgets` map (`packages/ai/src/types.ts`). Two deliberate
+/// differences keep the port honest:
+///
+/// - **No implicit default budget table.** pi-ai seeds a default `{minimal, low, medium, high}`
+///   table and overlays the caller's map on top; here a level resolves to a budget only when its
+///   own entry is explicitly configured. An unconfigured level therefore falls back to the named
+///   reasoning effort rather than to a hardcoded token count.
+/// - **No maxTokens-fitting step.** pi-ai additionally shrinks a resolved budget so it fits inside
+///   the response ceiling (`adjustMaxTokensForThinking`). That step requires a model catalog
+///   (context window / max output tokens), which this crate does not carry, so it is omitted.
+///
+/// Following pi-ai's `clampReasoning`, the extra-high and maximum levels resolve through the
+/// [`Self::high`] entry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ThinkingBudgets {
+    /// Token budget for [`ThinkingLevel::Minimal`].
+    pub minimal: Option<u32>,
+    /// Token budget for [`ThinkingLevel::Low`].
+    pub low: Option<u32>,
+    /// Token budget for [`ThinkingLevel::Medium`].
+    pub medium: Option<u32>,
+    /// Token budget for [`ThinkingLevel::High`], and — via `clampReasoning` — for
+    /// [`ThinkingLevel::XHigh`] and [`ThinkingLevel::Max`].
+    pub high: Option<u32>,
+}
+
+impl ThinkingBudgets {
+    /// Resolve a named level to its configured token budget, or `None` when no entry applies.
+    ///
+    /// [`ThinkingLevel::Minimal`], [`ThinkingLevel::Low`], and [`ThinkingLevel::Medium`] map to
+    /// their own fields. [`ThinkingLevel::High`], [`ThinkingLevel::XHigh`], and
+    /// [`ThinkingLevel::Max`] all resolve through [`Self::high`], mirroring pi-ai's `clampReasoning`
+    /// (`xhigh`/`max` → `high`). [`ThinkingLevel::Off`] and [`ThinkingLevel::Budget`] carry no
+    /// named budget and return `None`.
+    pub fn resolve(&self, level: ThinkingLevel) -> Option<u32> {
+        match level {
+            ThinkingLevel::Minimal => self.minimal,
+            ThinkingLevel::Low => self.low,
+            ThinkingLevel::Medium => self.medium,
+            ThinkingLevel::High | ThinkingLevel::XHigh | ThinkingLevel::Max => self.high,
+            ThinkingLevel::Off | ThinkingLevel::Budget(_) => None,
+        }
+    }
+}
+
+/// Preferred provider transport advisory forwarded to the stream function.
+///
+/// This mirrors the TypeScript `Transport` contract (`packages/ai/src/types.ts`). It is purely
+/// advisory: providers that do not support an alternate transport ignore it, and the TS contract
+/// states that ignoring it is compliant. The production [`crate::GenaiStreamFn`] is SSE-only and
+/// therefore ignores this option; custom [`crate::StreamFn`] implementations may honor it.
+///
+/// The serde spellings match the TypeScript union members verbatim (`"sse"`, `"websocket"`,
+/// `"websocket-cached"`, `"auto"`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Transport {
+    /// Server-sent events transport.
+    Sse,
+    /// A WebSocket transport.
+    Websocket,
+    /// A cache-aware WebSocket transport.
+    WebsocketCached,
+    /// Let the provider choose its transport.
+    #[default]
+    Auto,
+}
+
 /// Owned conversation snapshot passed into a low-level loop invocation.
 ///
 /// The loop mutates its private copy as messages are produced. Hook contexts receive further
@@ -175,6 +246,11 @@ pub struct AgentLoopConfig {
     pub after_tool_call: Option<AfterToolCallHook>,
     /// Execution policy for each assistant message's tool-call batch.
     pub tool_execution: ToolExecutionMode,
+    /// Preferred provider transport advisory forwarded onto each [`crate::StreamRequest`].
+    ///
+    /// The loop copies this value; it does not interpret it. Honoring it is a stream-function
+    /// concern, and the SSE-only [`crate::GenaiStreamFn`] ignores it.
+    pub transport: Transport,
     /// Provider options cloned into each stream request.
     pub chat_options: ChatOptions,
 }
@@ -200,6 +276,7 @@ impl std::fmt::Debug for AgentLoopConfig {
             .field("before_tool_call", &self.before_tool_call.is_some())
             .field("after_tool_call", &self.after_tool_call.is_some())
             .field("tool_execution", &self.tool_execution)
+            .field("transport", &self.transport)
             .field("chat_options", &self.chat_options)
             .finish_non_exhaustive()
     }
@@ -219,6 +296,7 @@ impl AgentLoopConfig {
             before_tool_call: None,
             after_tool_call: None,
             tool_execution: ToolExecutionMode::Parallel,
+            transport: Transport::Auto,
             chat_options: ChatOptions::default(),
         }
     }
@@ -234,6 +312,12 @@ impl AgentLoopConfig {
         self.tool_execution = mode;
         self
     }
+
+    /// Replace the preferred provider transport advisory.
+    pub fn with_transport(mut self, transport: Transport) -> Self {
+        self.transport = transport;
+        self
+    }
 }
 
 impl Default for AgentLoopConfig {
@@ -242,5 +326,64 @@ impl Default for AgentLoopConfig {
             ModelSpec::from_iden(crate::assistant::unknown_model_iden()),
             default_convert_to_llm(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thinking_budgets_resolve_named_levels_and_clamp_xhigh_and_max() {
+        let budgets = ThinkingBudgets {
+            minimal: Some(100),
+            low: Some(200),
+            medium: Some(300),
+            high: Some(400),
+        };
+        assert_eq!(budgets.resolve(ThinkingLevel::Minimal), Some(100));
+        assert_eq!(budgets.resolve(ThinkingLevel::Low), Some(200));
+        assert_eq!(budgets.resolve(ThinkingLevel::Medium), Some(300));
+        assert_eq!(budgets.resolve(ThinkingLevel::High), Some(400));
+        // xhigh and max clamp through the high entry, mirroring pi-ai's clampReasoning.
+        assert_eq!(budgets.resolve(ThinkingLevel::XHigh), Some(400));
+        assert_eq!(budgets.resolve(ThinkingLevel::Max), Some(400));
+        // Off and explicit budgets carry no named budget.
+        assert_eq!(budgets.resolve(ThinkingLevel::Off), None);
+        assert_eq!(budgets.resolve(ThinkingLevel::Budget(999)), None);
+    }
+
+    #[test]
+    fn thinking_budgets_resolve_returns_none_for_unconfigured_named_levels() {
+        // No implicit default budget table: an unconfigured entry stays None.
+        let budgets = ThinkingBudgets {
+            high: Some(400),
+            ..ThinkingBudgets::default()
+        };
+        assert_eq!(budgets.resolve(ThinkingLevel::Minimal), None);
+        assert_eq!(budgets.resolve(ThinkingLevel::Low), None);
+        assert_eq!(budgets.resolve(ThinkingLevel::Medium), None);
+        assert_eq!(budgets.resolve(ThinkingLevel::High), Some(400));
+    }
+
+    #[test]
+    fn transport_defaults_to_auto() {
+        assert_eq!(Transport::default(), Transport::Auto);
+    }
+
+    #[test]
+    fn transport_serde_uses_typescript_kebab_case_spellings() {
+        for (transport, spelling) in [
+            (Transport::Sse, "\"sse\""),
+            (Transport::Websocket, "\"websocket\""),
+            (Transport::WebsocketCached, "\"websocket-cached\""),
+            (Transport::Auto, "\"auto\""),
+        ] {
+            assert_eq!(serde_json::to_string(&transport).unwrap(), spelling);
+            assert_eq!(
+                serde_json::from_str::<Transport>(spelling).unwrap(),
+                transport
+            );
+        }
     }
 }

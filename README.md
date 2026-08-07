@@ -15,7 +15,8 @@ At the M1-M6 completion checkpoint, all **52/52** case-mapped upstream behaviors
 the all-feature repository suite was **112/112** tests green. Eight proxy/streaming-JSON security
 regressions landed during release hardening, and upstream additions (blocked-call termination and
 the reset-while-processing guard) plus TypeScript error-text pins grew the matrix to **55/55**
-mapped cases; the current suite is **128/128** green.
+mapped cases. Subsequent production-parity batches (the `thinking_budgets` map and the `transport`
+advisory) keep the mapped matrix at **55/55**; the current suite is **139/139** green.
 
 ## Installation
 
@@ -126,10 +127,17 @@ execution, and validation or execution failures become error tool-result message
 parallel by default; preflight remains in source order, completion events use completion order, and
 persisted result messages use source order. A sequential override on any call makes the entire batch
 sequential. Updates emitted after a tool settles are ignored. `ThinkingLevel` supports named
-reasoning levels and `ThinkingLevel::Budget(u32)` for a provider-specific reasoning-token budget.
+reasoning levels and `ThinkingLevel::Budget(u32)` for a provider-specific reasoning-token budget. An
+optional `ThinkingBudgets` map resolves a named level to an explicit `ReasoningEffort::Budget` per
+run (`xhigh`/`max` clamp through the `high` entry); an unconfigured level falls back to the named
+effort, and an explicit `ThinkingLevel::Budget` always bypasses the map. A `Transport` advisory
+(`sse`, `websocket`, `websocket-cached`, `auto`; default `auto`) is forwarded onto each
+`StreamRequest` for custom stream functions to honor; `GenaiStreamFn` is SSE-only and ignores it.
 
-Stream-function, hook, `ChatOptions`, and tool-execution runtime setters are between-run only. They
-return `AgentError::Busy` rather than changing configuration during an active run.
+Stream-function, hook, `ChatOptions`, tool-execution, and `thinking_budgets` runtime setters are
+between-run only. They return `AgentError::Busy` rather than changing configuration during an active
+run. `set_transport` is deliberately unguarded, mirroring the TypeScript CLI's live reassignment of
+`agent.transport`; a value set mid-run is observed by the next run.
 
 ### Queues and cancellation
 
@@ -189,13 +197,15 @@ sandbox for untrusted servers.
 
 | Area | Contract or deliberate difference |
 |---|---|
-| Mapped behavior | The pinned non-harness matrix is 55/55 green with no mapped divergence. The M1-M6 checkpoint contained 112 green tests; release-hardening regressions and upstream-parity additions bring the current all-feature suite to 128/128. |
+| Mapped behavior | The pinned non-harness matrix is 55/55 green with no mapped divergence. The M1-M6 checkpoint contained 112 green tests; release-hardening regressions and upstream/production-parity additions bring the current all-feature suite to 139/139. |
 | Hook snapshots and failure contract | Async hook contexts own cloned transcript/context snapshots (the before-tool hook alone borrows its local context mutably so it can replace arguments). Hook return types are intentionally infallible rather than `Result`-shaped. A panic is a programming fault: `Agent` synthesizes an in-band failure lifecycle, spawned `agent_loop` reports `LoopError::TaskPanicked`, and direct `run_agent_loop` callers retain normal Rust unwind responsibility. |
 | Unbounded observation/update policy | Spawned loop events and internal parallel tool-update handoff are unbounded so observers cannot change execution ordering or deadlock tool tasks. Tool `UpdateSink::emit` is synchronous and returns whether the update was accepted; producers must choose a sensible update rate. Use the awaited loop API when consumer backpressure is required. |
 | Same-sink re-entry | `UpdateSink` serializes `emit` and `close` across clones and runs the callback while holding its gate. That callback must not call `emit`, `close`, or `is_closed` on the same sink or a clone; same-sink re-entry would deadlock. |
 | Proxy wire protocol | The compact SSE event protocol is TypeScript-compatible (snake-case tags, `contentIndex`, `toolUse`), but the request body is this crate's own `ProxyRequestV1` schema, not the pi `proxy.ts` request contract. Servers implementing the TypeScript request contract cannot serve this client without translation. |
 | Proxy trust boundary | Tool-argument parsing is capped, URL userinfo is rejected, and the built-in client does not redirect, but SSE/text buffering is unbounded. Production callers must use HTTPS and trust the endpoint; injected HTTP clients retain their caller-selected redirect policy. Extra request headers/body may carry secrets even though transport and resolved target credentials are excluded from the wire DTO. |
 | `genai` foundation limits | `ModelSpec` identifies a target but does not provide a catalog of context-window or price metadata. `AgentUsage` therefore tracks tokens, not monetary cost. User images are supported, but `genai::chat::ToolResponse` is text-only, so tool-result images become an `[image omitted]` marker when converted back to the model. |
+| Thinking-budget resolution | The `ThinkingBudgets` map mirrors pi-ai's per-level budgets and `clampReasoning` (`xhigh`/`max` → `high`), but has **no implicit default budget table** (an entry must be configured or the named level falls back) and omits pi-ai's maxTokens-fitting step, which is impossible without the model catalog `genai` does not carry. |
+| Transport advisory | `Transport` is accepted and forwarded on every `StreamRequest`, but the SSE-only `GenaiStreamFn` ignores it. The TypeScript contract states providers that do not support a requested transport ignore it, so ignoring it is compliant; custom `StreamFn` implementations may honor it. |
 | Convenience exports | Telemetry helpers and UUID generation from the TypeScript package's convenience exports are intentionally not re-exported. Applications should select their own tracing/telemetry and UUID crates. |
 | Excluded packages | `src/harness/**` and `src/node.ts` are outside this crate. There is no durable-session/compaction harness and no Node binding hidden behind a feature. |
 

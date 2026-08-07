@@ -5,7 +5,9 @@
 //! production adapter, while [`set_default_stream_fn`] configures the fallback shared by all agents
 //! in the process.
 
-use crate::{AssistantAccumulator, AssistantMessage, AssistantMessageEventStream, StopReason};
+use crate::{
+    AssistantAccumulator, AssistantMessage, AssistantMessageEventStream, StopReason, Transport,
+};
 use async_trait::async_trait;
 use futures::StreamExt;
 use genai::adapter::AdapterKind;
@@ -52,17 +54,25 @@ pub struct StreamRequest {
     pub context: LlmContext,
     /// Per-invocation provider options.
     pub options: ChatOptions,
+    /// Preferred provider transport advisory for this invocation.
+    ///
+    /// A custom [`StreamFn`] may honor this hint. The production [`GenaiStreamFn`] ignores it
+    /// because genai speaks SSE only; the TypeScript contract states that providers which do not
+    /// support the requested transport ignore it, so ignoring it is compliant.
+    pub transport: Transport,
     /// Cooperative cancellation token for setup and streaming.
     pub cancel: CancellationToken,
 }
 
 impl StreamRequest {
-    /// Construct a request with default chat options and a fresh cancellation token.
+    /// Construct a request with default chat options, the default transport, and a fresh
+    /// cancellation token.
     pub fn new(model: impl Into<ModelSpec>, context: LlmContext) -> Self {
         Self {
             model: model.into(),
             context,
             options: ChatOptions::default(),
+            transport: Transport::default(),
             cancel: CancellationToken::new(),
         }
     }
@@ -70,6 +80,12 @@ impl StreamRequest {
     /// Replace the per-invocation chat options.
     pub fn with_options(mut self, options: ChatOptions) -> Self {
         self.options = options;
+        self
+    }
+
+    /// Replace the preferred provider transport advisory.
+    pub fn with_transport(mut self, transport: Transport) -> Self {
+        self.transport = transport;
         self
     }
 
@@ -142,6 +158,9 @@ impl StreamFn for GenaiStreamFn {
             model,
             context,
             options,
+            // genai speaks SSE only, so the transport advisory is intentionally ignored here. The
+            // TypeScript contract makes ignoring an unsupported transport compliant.
+            transport: _,
             cancel,
         } = request;
         let error_model = model_iden_for_error(&model);

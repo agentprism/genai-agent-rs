@@ -13,14 +13,14 @@ use crate::{
     AfterToolCallHook, AgentContext, AgentError, AgentEvent, AgentLoopConfig, AgentMessage,
     AgentPrepareNextTurnHook, AgentPrepareNextTurnWithContextHook, AgentShouldStopAfterTurnHook,
     AgentTool, AssistantContent, AssistantMessage, BeforeToolCallHook, BusyContext, ConvertToLlm,
-    QueueMode, StopReason, StreamFn, ThinkingLevel, ToolExecutionMode, TransformContextHook,
-    UserContent, UserMessage, default_convert_to_llm, get_default_stream_fn, run_agent_loop,
-    run_agent_loop_continue,
+    QueueMode, StopReason, StreamFn, ThinkingBudgets, ThinkingLevel, ToolExecutionMode,
+    TransformContextHook, Transport, UserContent, UserMessage, default_convert_to_llm,
+    get_default_stream_fn, run_agent_loop, run_agent_loop_continue,
 };
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use genai::adapter::AdapterKind;
-use genai::chat::ChatOptions;
+use genai::chat::{ChatOptions, ReasoningEffort};
 use genai::{ModelIden, ModelSpec};
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -146,10 +146,23 @@ pub struct AgentConfig {
     pub follow_up_mode: QueueMode,
     /// Tool-call batch execution policy.
     pub tool_execution: ToolExecutionMode,
+    /// Optional per-named-level reasoning-token budgets.
+    ///
+    /// When present, a named [`AgentState::thinking_level`] whose entry is configured resolves to
+    /// [`ReasoningEffort::Budget`] for a run; an unconfigured level falls back to the named
+    /// reasoning effort. An explicit [`ThinkingLevel::Budget`] always bypasses this map. See
+    /// [`ThinkingBudgets`] for the resolution table and the deliberate omissions relative to pi-ai.
+    pub thinking_budgets: Option<ThinkingBudgets>,
+    /// Preferred provider transport advisory forwarded to the stream function.
+    ///
+    /// Defaults to [`Transport::Auto`]. The SSE-only [`GenaiStreamFn`] ignores it; custom stream
+    /// functions may honor it.
+    pub transport: Transport,
     /// Base provider chat options.
     ///
     /// Per-run snapshots overwrite `prompt_cache_key` from [`Self::session_id`] and
-    /// `reasoning_effort` from [`AgentState::thinking_level`].
+    /// `reasoning_effort` from [`AgentState::thinking_level`] (optionally through
+    /// [`Self::thinking_budgets`]).
     pub chat_options: ChatOptions,
 }
 
@@ -177,6 +190,8 @@ impl std::fmt::Debug for AgentConfig {
             .field("steering_mode", &self.steering_mode)
             .field("follow_up_mode", &self.follow_up_mode)
             .field("tool_execution", &self.tool_execution)
+            .field("thinking_budgets", &self.thinking_budgets)
+            .field("transport", &self.transport)
             .field("chat_options", &self.chat_options)
             .finish_non_exhaustive()
     }
@@ -198,6 +213,8 @@ impl Default for AgentConfig {
             steering_mode: QueueMode::OneAtATime,
             follow_up_mode: QueueMode::OneAtATime,
             tool_execution: ToolExecutionMode::Parallel,
+            thinking_budgets: None,
+            transport: Transport::Auto,
             chat_options: ChatOptions::default(),
         }
     }
@@ -213,6 +230,18 @@ impl AgentConfig {
     /// Replace the state used to construct the agent.
     pub fn with_initial_state(mut self, state: AgentState) -> Self {
         self.initial_state = state;
+        self
+    }
+
+    /// Set the per-named-level reasoning-token budgets used to resolve the thinking level.
+    pub fn with_thinking_budgets(mut self, thinking_budgets: ThinkingBudgets) -> Self {
+        self.thinking_budgets = Some(thinking_budgets);
+        self
+    }
+
+    /// Set the preferred provider transport advisory forwarded to the stream function.
+    pub fn with_transport(mut self, transport: Transport) -> Self {
+        self.transport = transport;
         self
     }
 }
@@ -642,6 +671,18 @@ impl Agent {
         })
     }
 
+    /// Set or clear the per-named-level reasoning-token budgets for the next run.
+    ///
+    /// Runtime configuration may only be changed between runs; this returns
+    /// [`AgentError::Busy`] while a prompt or continuation is active. The next run resolves its
+    /// snapshotted [`ThinkingLevel`] through these budgets (see [`ThinkingBudgets`]).
+    pub fn set_thinking_budgets(
+        &self,
+        thinking_budgets: Option<ThinkingBudgets>,
+    ) -> Result<(), AgentError> {
+        self.update_runtime_config(move |config| config.thinking_budgets = thinking_budgets)
+    }
+
     /// Register an awaited event listener and return its RAII registration.
     ///
     /// Registration does not emit a state snapshot. For every later event, the agent updates state
@@ -801,6 +842,29 @@ impl Agent {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         config.session_id = session_id.clone();
         config.chat_options.prompt_cache_key = session_id;
+    }
+
+    /// Clone the preferred provider transport advisory forwarded to the stream function.
+    pub fn transport(&self) -> Transport {
+        self.inner
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .transport
+    }
+
+    /// Replace the preferred provider transport advisory.
+    ///
+    /// Unlike the guarded runtime-configuration setters, this setter is deliberately **not**
+    /// [`AgentError::Busy`]-guarded: it mirrors the TypeScript CLI, which live-reassigns
+    /// `agent.transport` from its settings UI while runs may be in flight. A run in progress keeps
+    /// the transport captured in its loop snapshot; a value set here is observed by the next run.
+    pub fn set_transport(&self, transport: Transport) {
+        self.inner
+            .config
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .transport = transport;
     }
 
     /// Clone the active run's cancellation token, or return `None` while idle.
@@ -1126,7 +1190,8 @@ impl Agent {
 
         let mut chat_options = runtime.chat_options.clone();
         chat_options.prompt_cache_key = runtime.session_id.clone();
-        chat_options.reasoning_effort = state.thinking_level.reasoning_effort();
+        chat_options.reasoning_effort =
+            resolve_reasoning_effort(state.thinking_level, runtime.thinking_budgets.as_ref());
 
         let should_stop_after_turn = runtime.should_stop_after_turn.map(|hook| {
             let cancel = run.cancel.clone();
@@ -1185,6 +1250,7 @@ impl Agent {
             before_tool_call: runtime.before_tool_call,
             after_tool_call: runtime.after_tool_call,
             tool_execution: runtime.tool_execution,
+            transport: runtime.transport,
             chat_options,
         }
     }
@@ -1334,6 +1400,29 @@ impl Agent {
             .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Resolve the `reasoning_effort` chat option from the snapshotted thinking level and the optional
+/// per-level budget map.
+///
+/// - [`ThinkingLevel::Off`] yields `None` (no reasoning-effort option is set).
+/// - An explicit [`ThinkingLevel::Budget`] always wins and is forwarded unchanged as
+///   [`ReasoningEffort::Budget`], bypassing the map entirely.
+/// - A named level resolves to [`ReasoningEffort::Budget`] when its budget entry is configured
+///   (with `xhigh`/`max` clamping through the `high` entry, per pi-ai's `clampReasoning`), and
+///   otherwise falls back to the named level's own reasoning effort.
+fn resolve_reasoning_effort(
+    level: ThinkingLevel,
+    budgets: Option<&ThinkingBudgets>,
+) -> Option<ReasoningEffort> {
+    match level {
+        ThinkingLevel::Off => None,
+        ThinkingLevel::Budget(tokens) => Some(ReasoningEffort::Budget(tokens)),
+        named => match budgets.and_then(|budgets| budgets.resolve(named)) {
+            Some(budget) => Some(ReasoningEffort::Budget(budget)),
+            None => named.reasoning_effort(),
+        },
     }
 }
 
