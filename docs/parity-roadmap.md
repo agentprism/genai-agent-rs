@@ -1,0 +1,57 @@
+# Parity roadmap
+
+Production-scoped follow-up work from the faithfulness verification of this crate against
+`@earendil-works/pi-agent-core` (pi commit `6b461b75b39b5a19b378dc42fbfbd1655bc446a6`).
+
+Scope rule: an item qualifies only if the behavior **ships in production** through the pi CLI
+(`pi/packages/coding-agent`), the sole production consumer of the package's non-harness surface.
+Features that are merely exported (declared-only) are listed under "Dropped" with evidence.
+
+Verification summary: the ported core is faithful — all 52 upstream non-harness test cases are
+mapped and green, and every production-critical behavior (awaited-listener run settlement,
+`prepareNextTurnWithContext` refresh, queue drain modes + `continue()` semantics, the tool
+pipeline including `prepareArguments`/per-tool sequential/blocked-`terminate`/`addedToolNames`/
+`tool_execution_update`, `message_update` partials, copy-on-assign state, the `length`-stop
+failure path) is already correct. The items below are the remaining gaps.
+
+## 1. Do now — production-shipped, no upstream `genai` changes
+
+| Item | Production evidence (pi) | Design | Effort |
+|---|---|---|---|
+| `AgentUsage.cost` + injectable `PriceCatalog` trait | `$` footer (`footer.ts:142-144`), `/usage` breakdown (`usage-totals.ts`), cache economics (`cache-stats.ts:78-81`); pi-ai computes cost from the model catalog (`models.ts:878-898`) | Optional `cost: Option<AgentCost>` on `AgentUsage`; `PriceCatalog` trait (rates + tiers, pi tier rule: highest matching input threshold applies to whole request) applied where usage is finalized (`GenaiStreamFn` / agent facade). `None` unless a catalog is configured. Catalog data stays app-supplied. | M |
+| `AgentUsage.cache_write_1h_tokens` + `reasoning_tokens` | Summed in production compaction (`compaction.ts:105-109`); `cacheWrite1h` drives Anthropic 2× 1h-cache pricing (`models.ts:890-895`) | Two optional fields; the data already exists in `genai::chat::Usage` details and is currently dropped by the `From` impl (`assistant.rs:41-67`). Caveat: genai zero-elides `reasoning_tokens`, so `Some(0)` is unreachable — document. | S |
+| `thinking_budgets` per-level map | Passed at the production `new Agent(...)` site (`sdk.ts:358`) from settings | `ThinkingBudgets {minimal, low, medium, high}` on `AgentConfig`; resolve named level → `ReasoningEffort::Budget` with pi-ai clamping (`xhigh`/`max` → `high`); explicit `ThinkingLevel::Budget(n)` bypasses the map; no implicit default table. maxTokens-fitting is impossible without a model catalog — document. | S |
+| `transport` advisory option | Passed at construction (`sdk.ts:357`) and live-reassigned from settings UI (`interactive-mode.ts:4454`) | `Transport {Sse, Websocket, WebsocketCached, Auto}` accepted and forwarded; `GenaiStreamFn` ignores it (TS contract: unsupporting providers ignore it — compliant). Unguarded setter, matching how the CLI reassigns it. | S |
+| Behavioral parity batch | Blocked-tool path is production-used via extension `tool_call` hook (`agent-session.ts:480-499`) | (a) empty-string block reason falls back to `"Tool execution was blocked"` (`tool_exec.rs:392-397`, mirror TS `\|\|` falsiness); (b) empty-string `error_message` must not populate state (`agent.rs:1237-1241`); (c) three site-specific busy texts via `AgentError::Busy(BusyContext)`; (d) `NoDefaultStreamFn` message text parity. | S |
+| Proxy documentation correction | — (honesty fix) | `src/proxy/mod.rs:22-23` and README claim request-wire compatibility with the TS protocol; false — the V1 request schema is crate-defined. Correct the claims. Docs only. | S |
+| Release mechanics | — | Bundle all of the above in one 0.2.0; add `#[non_exhaustive]` + builders to `AgentConfig`, `AgentLoopConfig`, `StreamRequest`, `AgentUsage`, `AgentError` so later parity work is semver-minor. Optional in same release: serde wire renames (`toolUse`, `contentIndex`, `"toolResult"`, `thinking_end` field `content`) with `alias` for read-compat — only if TS-JSON interop is a goal. | S |
+
+## 2. Upstream-gated — production-shipped, requires `rust-genai` changes (PR in flight)
+
+Target repo: `jeremychone/rust-genai`, via the `agentprism` fork. One PR, one commit per block.
+
+| Block | Production evidence (pi) | Upstream change | Follow-up here |
+|---|---|---|---|
+| Headers on streaming HTTP errors | `maxRetryDelayMs` passed at construction (`sdk.ts:359`); pi-ai retry policy reads `retry-after-ms`/`retry-after`/`x-should-retry` headers and caps server-requested delays (`provider-retry.ts`) | Streaming-path HTTP failure surfaces response headers (today the streaming error carries only status/body — non-streaming `webc` keeps headers, streaming does not) | Cancel-aware retry layer inside `GenaiStreamFn` (peek first event, retry handshake only, never mid-stream), pi-exact cap message; `max_retries`/`max_retry_delay_ms` config (M) |
+| `ToolResponse` binary parts | Production tool results carry images; `afterToolCall` normalizes them (`agent-session.ts:501-532`) | Optional binary attachments on `ToolResponse`; Anthropic emits image blocks inside `tool_result`; string-only adapters degrade at the adapter level | Converter attaches parts instead of the `"[image omitted]"` marker (`message.rs:339-353`) (S) |
+| Exec interceptors (`onPayload`/`onResponse`) | Extension bridge hooks `before_provider_request`/`after_provider_response` wired at the production construction site (`sdk.ts:331-348`) | Per-request payload interceptor (may replace the provider payload before send) + response observer (status + headers, before body consumption). genai today has no interceptor and the streaming HTTP send is lazy — needs threading through the stream setup | `on_payload`/`on_response` hooks on `AgentConfig` + `StreamRequest`, invoked by `GenaiStreamFn`; proxy honors them directly (M) |
+
+## 3. Dropped — no production consumer (do not build without new evidence)
+
+| Item | Why dropped |
+|---|---|
+| `getApiKey` per-call resolution | Declared-only: never passed or assigned in coding-agent; auth resolves in `ModelRuntime.prepareRequest`. (Design exists — needs no upstream change — if a consumer appears.) |
+| Deferred responses (`stopReason: "deferred"`, `DeferredHandle`, fetch/cancel) | Unreachable in the production non-harness path: only pi-ai's synthetic test provider implements it; the non-harness loop has no deferred branch. `deferredToolsMode: "kimi"` is an unrelated `addedToolNames` compat flag. |
+| `pi-proxy` wire module (`streamProxy` compatibility) | `streamProxy` has zero production callers in pi's entire history; no server anywhere implements `POST /api/stream`; its intended in-repo consumer (`web-ui`) was removed without adopting it. Only the doc correction (§1) remains warranted. |
+| `constrainedSampling` grammar modes | No production tool uses grammar constraints; genai's `custom_format` already covers OpenAI grammar tools if needed later. |
+| Redacted thinking, `responseModel`, `diagnostics` | No identified production consumer in coding-agent; first two also upstream-gated. |
+| `shouldStopAfterTurn`, `prepareNextTurn` (no-context), global `toolExecution: "sequential"`, `reset()`, `waitForIdle()`, `prompt(string, images)` | Declared-only in production; already ported anyway — no action. |
+| Mid-run hook mutability, construction-time stream-fn capture, bug-for-bug hang reproduction | Production assigns hooks between construction and first run only (compatible with the documented Busy policy); the TS behaviors Rust hardens away are hangs/unhandled rejections. Mechanisms documented in the investigation if ever mandated. |
+
+## References
+
+- Verification + designs: session investigation reports (agent loop, Agent facade, proxy, type
+  layer, harness feasibility, production-usage audit), 2026-08-06.
+- Parity manifest: `tests/parity_manifest.toml` (52/52 mapped, pinned upstream commit).
+- Harness port feasibility (out of scope, design study only): separate
+  `rust-genai-agent-harness` crate, ~10–14 engineer-weeks, JSONL interop achievable.

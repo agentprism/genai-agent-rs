@@ -1,0 +1,29 @@
+[package]
+name = "rust-genai-agent"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+description = "Provider-neutral streaming agent loops and tools for rust-genai"
+readme = "README.md"
+documentation = "https://docs.rs/rust-genai-agent"
+keywords = ["ai", "agents", "llm", "generative-ai", "rust-genai"]
+categories = ["asynchronous", "api-bindings"]
+
+[features]
+default = []
+testing = []
+proxy = ["dep:reqwest", "dep:eventsource-stream", "tokio/net", "tokio/io-util"]
+
+[dependencies]
+genai = { version = "0.7.0-beta.18", path = "../rust-genai" }
+async-trait = "0.1"
+eventsource-stream = { version = "0.2.3", optional = true }
+futures = "0.3"
+jsonschema = { version = "0.49", default-features = false }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream"], optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }

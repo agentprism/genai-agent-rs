@@ -1,0 +1,379 @@
+version = 1
+upstream_repository = "earendil-works/pi"
+upstream_commit = "6b461b75b39b5a19b378dc42fbfbd1655bc446a6"
+expected_cases = 52
+
+# ---- agent_loop.toml ----
+# Port of all concrete `it(...)` cases in pi/packages/agent/test/agent-loop.test.ts.
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "uses the configured default when a legacy caller omits streamFn"
+rust_test = "tests/agent_loop.rs::uses_configured_default_when_stream_fn_is_none"
+milestone = "M2"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should emit events with AgentMessage types"
+rust_test = "tests/agent_loop.rs::emits_events_with_agent_message_types"
+milestone = "M2"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should handle custom message types via convertToLlm"
+rust_test = "tests/agent_loop.rs::handles_custom_message_types_via_convert_to_llm"
+milestone = "M2"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should apply transformContext before convertToLlm"
+rust_test = "tests/agent_loop.rs::applies_transform_context_before_convert_to_llm"
+milestone = "M2"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should handle tool calls and results"
+rust_test = "tests/agent_loop.rs::handles_tool_calls_and_results"
+milestone = "M3"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should not execute tool calls from a length-truncated assistant message"
+rust_test = "tests/agent_loop.rs::does_not_execute_tool_calls_from_length_truncated_message"
+milestone = "M3"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should execute mutated beforeToolCall args without revalidation"
+rust_test = "tests/agent_loop.rs::executes_mutated_before_tool_call_args_without_revalidation"
+milestone = "M3"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should prepare tool arguments for validation"
+rust_test = "tests/agent_loop.rs::prepares_tool_arguments_for_validation"
+milestone = "M2"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should emit tool_execution_end in completion order but persist tool results in source order"
+rust_test = "tests/agent_loop.rs::tool_execution_end_is_completion_order_results_are_source_order"
+milestone = "M3"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should inject queued messages after all tool calls complete"
+rust_test = "tests/agent_loop.rs::injects_queued_messages_after_all_tool_calls_complete"
+milestone = "M2"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should force sequential execution when a tool has executionMode=sequential even with default parallel config"
+rust_test = "tests/agent_loop.rs::sequential_tool_override_forces_sequential_with_default_parallel_config"
+milestone = "M3"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should force sequential execution when one of multiple tools has executionMode=sequential"
+rust_test = "tests/agent_loop.rs::one_sequential_tool_forces_whole_batch_sequential"
+milestone = "M3"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should allow parallel execution when all tools have executionMode=parallel"
+rust_test = "tests/agent_loop.rs::all_parallel_tools_allow_parallel_execution"
+milestone = "M3"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should use prepareNextTurn snapshot before continuing"
+rust_test = "tests/agent_loop.rs::uses_prepare_next_turn_snapshot_before_continuing"
+milestone = "M2"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should stop after the current turn when shouldStopAfterTurn returns true"
+rust_test = "tests/agent_loop.rs::stops_after_current_turn_when_should_stop_after_turn_is_true"
+milestone = "M2"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should stop after a tool batch when every tool result sets terminate=true"
+rust_test = "tests/agent_loop.rs::stops_after_tool_batch_when_every_result_terminates"
+milestone = "M3"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should continue after parallel tool calls when not all tool results terminate"
+rust_test = "tests/agent_loop.rs::continues_after_parallel_calls_when_not_all_results_terminate"
+milestone = "M3"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should allow afterToolCall to mark a tool batch as terminating"
+rust_test = "tests/agent_loop.rs::after_tool_call_can_mark_batch_as_terminating"
+milestone = "M3"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should throw when context has no messages"
+rust_test = "tests/agent_loop.rs::continue_errors_when_context_has_no_messages"
+milestone = "M2"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should continue from existing context without emitting user message events"
+rust_test = "tests/agent_loop.rs::continues_existing_context_without_user_message_events"
+milestone = "M2"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should allow custom message types as last message (caller responsibility)"
+rust_test = "tests/agent_loop.rs::allows_custom_message_as_last_message_for_continuation"
+milestone = "M2"
+status = "green"
+
+# ---- agent.toml ----
+# Stateful Agent parity cases ported one-for-one from pi-agent.
+# All stateful Agent parity cases are implemented and passing.
+
+[[case]]
+source_file = "pi/packages/agent/test/agent.test.ts"
+source_name = "uses the configured default when a legacy caller omits streamFn"
+rust_test = "tests/agent.rs::legacy_omitted_stream_fn_uses_configured_default"
+milestone = "M5"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent.test.ts"
+source_name = "should create an agent instance with default state"
+rust_test = "tests/agent.rs::creates_agent_with_default_state"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent.test.ts"
+source_name = "should create an agent instance with custom initial state"
+rust_test = "tests/agent.rs::creates_agent_with_custom_initial_state"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent.test.ts"
+source_name = "should subscribe to events"
+rust_test = "tests/agent.rs::subscribes_and_unsubscribes_to_events"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent.test.ts"
+source_name = "emits full lifecycle events for thrown run failures"
+rust_test = "tests/agent.rs::thrown_run_failure_emits_full_lifecycle"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent.test.ts"
+source_name = "should await async subscribers before prompt resolves"
+rust_test = "tests/agent.rs::prompt_awaits_async_subscribers"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent.test.ts"
+source_name = "waitForIdle should wait for async subscribers"
+rust_test = "tests/agent.rs::wait_for_idle_awaits_async_subscribers"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent.test.ts"
+source_name = "should pass the active abort signal to subscribers"
+rust_test = "tests/agent.rs::subscribers_receive_active_cancellation_token"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent.test.ts"
+source_name = "should ignore tool updates after the tool execution settles"
+rust_test = "tests/agent.rs::ignores_tool_updates_after_execution_settles"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent.test.ts"
+source_name = "should ignore a settled parallel tool update while another tool is still running"
+rust_test = "tests/agent.rs::ignores_settled_parallel_tool_update_while_other_tool_runs"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent.test.ts"
+source_name = "should update state with mutators"
+rust_test = "tests/agent.rs::state_mutators_replace_and_copy"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent.test.ts"
+source_name = "should support steering message queue"
+rust_test = "tests/agent.rs::supports_steering_message_queue"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent.test.ts"
+source_name = "should support follow-up message queue"
+rust_test = "tests/agent.rs::supports_follow_up_message_queue"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent.test.ts"
+source_name = "should handle abort controller"
+rust_test = "tests/agent.rs::abort_is_safe_while_idle"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent.test.ts"
+source_name = "should throw when prompt() called while streaming"
+rust_test = "tests/agent.rs::prompt_rejects_while_streaming"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent.test.ts"
+source_name = "should throw when continue() called while streaming"
+rust_test = "tests/agent.rs::continue_rejects_while_streaming"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent.test.ts"
+source_name = "continue() should process queued follow-up messages after an assistant turn"
+rust_test = "tests/agent.rs::continue_processes_queued_follow_up_after_assistant_turn"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent.test.ts"
+source_name = "continue() should keep one-at-a-time steering semantics from assistant tail"
+rust_test = "tests/agent.rs::continue_preserves_one_at_a_time_steering_from_assistant_tail"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent.test.ts"
+source_name = "keeps legacy prepareNextTurn signal callback behavior"
+rust_test = "tests/agent.rs::forwards_legacy_prepare_next_turn_cancellation_token"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent.test.ts"
+source_name = "forwards shouldStopAfterTurn through AgentOptions"
+rust_test = "tests/agent.rs::forwards_should_stop_after_turn_through_options"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent.test.ts"
+source_name = "forwards sessionId to streamFunction options"
+rust_test = "tests/agent.rs::forwards_session_id_to_stream_options"
+milestone = "M4"
+status = "green"
+
+# ---- e2e.toml ----
+# Port of pi-agent's faux-provider end-to-end matrix.
+# Each entry maps one concrete Vitest case to a passing Rust parity test.
+
+[[case]]
+source_file = "pi/packages/agent/test/e2e.test.ts"
+source_name = "handles a basic text prompt"
+rust_test = "tests/e2e_scripted.rs::handles_a_basic_text_prompt"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/e2e.test.ts"
+source_name = "executes tools and tracks pending tool calls"
+rust_test = "tests/e2e_scripted.rs::executes_tools_and_tracks_pending_tool_calls"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/e2e.test.ts"
+source_name = "handles abort during streaming"
+rust_test = "tests/e2e_scripted.rs::handles_abort_during_streaming"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/e2e.test.ts"
+source_name = "emits lifecycle updates while streaming"
+rust_test = "tests/e2e_scripted.rs::emits_lifecycle_updates_while_streaming"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/e2e.test.ts"
+source_name = "maintains context across multiple turns"
+rust_test = "tests/e2e_scripted.rs::maintains_context_across_multiple_turns"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/e2e.test.ts"
+source_name = "preserves thinking content blocks"
+rust_test = "tests/e2e_scripted.rs::preserves_thinking_content_blocks"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/e2e.test.ts"
+source_name = "throws when no messages in context"
+rust_test = "tests/e2e_scripted.rs::continue_throws_when_no_messages_in_context"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/e2e.test.ts"
+source_name = "throws when last message is assistant"
+rust_test = "tests/e2e_scripted.rs::continue_throws_when_last_message_is_assistant"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/e2e.test.ts"
+source_name = "continues and gets a response when last message is user"
+rust_test = "tests/e2e_scripted.rs::continues_and_gets_a_response_when_last_message_is_user"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/e2e.test.ts"
+source_name = "continues and processes tool results"
+rust_test = "tests/e2e_scripted.rs::continues_and_processes_tool_results"
+milestone = "M4"
+status = "green"
