@@ -6,7 +6,8 @@
 //! in the process.
 
 use crate::{
-    AssistantAccumulator, AssistantMessage, AssistantMessageEventStream, StopReason, Transport,
+    AssistantAccumulator, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream,
+    PriceCatalog, StopReason, Transport, compute_cost,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -124,20 +125,37 @@ where
 ///
 /// Capture options are forced on every invocation because `StreamEnd` is the authoritative source
 /// for final content, parsed tool arguments, usage, stop reason, and response id.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GenaiStreamFn {
     /// `genai` client used for provider execution.
     pub client: Client,
     /// Options inherited by invocations unless their corresponding request field overrides them.
     pub base_options: ChatOptions,
+    /// Optional model price catalog used to attach monetary cost at stream finalization.
+    ///
+    /// When set, the authoritative terminal message's usage gets [`crate::AgentUsage::cost`]
+    /// populated via [`compute_cost`] for the models the catalog prices. When absent, cost stays
+    /// `None`.
+    pub price_catalog: Option<Arc<dyn PriceCatalog>>,
+}
+
+impl std::fmt::Debug for GenaiStreamFn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GenaiStreamFn")
+            .field("client", &self.client)
+            .field("base_options", &self.base_options)
+            .field("price_catalog", &self.price_catalog.is_some())
+            .finish()
+    }
 }
 
 impl GenaiStreamFn {
-    /// Construct an adapter with default base chat options.
+    /// Construct an adapter with default base chat options and no price catalog.
     pub fn new(client: Client) -> Self {
         Self {
             client,
             base_options: ChatOptions::default(),
+            price_catalog: None,
         }
     }
 
@@ -147,6 +165,16 @@ impl GenaiStreamFn {
     /// and reasoning capture is forced on after option merging.
     pub fn with_base_options(mut self, options: ChatOptions) -> Self {
         self.base_options = options;
+        self
+    }
+
+    /// Install a model price catalog.
+    ///
+    /// With a catalog set, the final assistant message produced by an invocation has its usage
+    /// cost computed and attached at stream finalization (see [`attach_cost`]). Models the catalog
+    /// does not price, and every invocation while no catalog is set, leave the cost `None`.
+    pub fn with_price_catalog(mut self, price_catalog: Arc<dyn PriceCatalog>) -> Self {
+        self.price_catalog = Some(price_catalog);
         self
     }
 }
@@ -217,7 +245,35 @@ impl StreamFn for GenaiStreamFn {
             },
         );
 
+        // Attach monetary cost to the authoritative terminal message once its captured usage has
+        // become an `AgentUsage`. Non-terminal snapshots and unpriced models are left untouched.
+        let price_catalog = self.price_catalog.clone();
+        let stream = stream.map(move |mut event| {
+            if let Some(catalog) = price_catalog.as_deref() {
+                attach_cost(catalog, &mut event);
+            }
+            event
+        });
+
         AssistantMessageEventStream::from_stream(stream)
+    }
+}
+
+/// Compute and attach monetary cost to a terminal assistant event's authoritative message.
+///
+/// This is the finalization hook applied by [`GenaiStreamFn`] when a price catalog is configured,
+/// exposed so applications building custom [`StreamFn`] implementations can reuse the exact same
+/// behavior. Non-terminal events are left unchanged. For a terminal event, the catalog is queried
+/// for the message's model: when the model is priced, [`crate::AgentUsage::cost`] is set via
+/// [`compute_cost`]; when it is not, the cost stays `None`.
+pub fn attach_cost(catalog: &dyn PriceCatalog, event: &mut AssistantMessageEvent) {
+    let message = match event {
+        AssistantMessageEvent::Done { message, .. } => message,
+        AssistantMessageEvent::Error { error, .. } => error,
+        _ => return,
+    };
+    if let Some(model_cost) = catalog.cost_model(&message.model) {
+        message.usage.cost = Some(compute_cost(&message.usage, &model_cost));
     }
 }
 
@@ -328,5 +384,133 @@ pub(crate) fn stream_error_model(model: &ModelSpec) -> ModelIden {
         crate::assistant::unknown_model_iden()
     } else {
         model
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        AgentUsage, AssistantContent, AssistantMessage, ModelCost, ModelCostRates, StopReason,
+    };
+    use futures::StreamExt;
+    use genai::ModelIden;
+    use genai::adapter::AdapterKind;
+
+    /// Price catalog that prices exactly one model name.
+    struct SingleModelCatalog {
+        model_name: String,
+        cost: ModelCost,
+    }
+
+    impl PriceCatalog for SingleModelCatalog {
+        fn cost_model(&self, model: &ModelIden) -> Option<ModelCost> {
+            (model.model_name.as_str() == self.model_name).then(|| self.cost.clone())
+        }
+    }
+
+    fn priced_catalog(model_name: &str) -> SingleModelCatalog {
+        SingleModelCatalog {
+            model_name: model_name.to_owned(),
+            cost: ModelCost::new(ModelCostRates {
+                input: 3.0,
+                output: 15.0,
+                cache_read: 0.3,
+                cache_write: 3.75,
+                cache_write_1h: None,
+            }),
+        }
+    }
+
+    fn done_event(model: ModelIden, usage: AgentUsage) -> AssistantMessageEvent {
+        let mut message = AssistantMessage::completed(
+            model,
+            vec![AssistantContent::text("ok")],
+            StopReason::Stop,
+        );
+        message.usage = usage;
+        AssistantMessageEvent::Done {
+            reason: StopReason::Stop,
+            message,
+        }
+    }
+
+    fn one_m_in_one_m_out() -> AgentUsage {
+        AgentUsage {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            ..AgentUsage::default()
+        }
+    }
+
+    #[test]
+    fn attach_cost_sets_cost_on_priced_terminal_message() {
+        let model = ModelIden::new(AdapterKind::Anthropic, "claude-test");
+        let catalog = priced_catalog("claude-test");
+        let mut event = done_event(model, one_m_in_one_m_out());
+
+        attach_cost(&catalog, &mut event);
+
+        let cost = event
+            .terminal_message()
+            .unwrap()
+            .usage
+            .cost
+            .expect("cost attached");
+        // 1M input at $3/M + 1M output at $15/M.
+        assert!((cost.total - 18.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn attach_cost_leaves_unpriced_model_cost_none() {
+        let model = ModelIden::new(AdapterKind::Anthropic, "some-other-model");
+        let catalog = priced_catalog("claude-test");
+        let mut event = done_event(model, one_m_in_one_m_out());
+
+        attach_cost(&catalog, &mut event);
+
+        assert!(event.terminal_message().unwrap().usage.cost.is_none());
+    }
+
+    #[test]
+    fn attach_cost_ignores_non_terminal_events() {
+        let model = ModelIden::new(AdapterKind::Anthropic, "claude-test");
+        let catalog = priced_catalog("claude-test");
+        let mut event = AssistantMessageEvent::Start {
+            partial: AssistantMessage::new(model),
+        };
+
+        attach_cost(&catalog, &mut event);
+
+        assert!(event.partial().usage.cost.is_none());
+    }
+
+    /// Exercises the exact finalization wiring `GenaiStreamFn::stream` uses: `attach_cost` mapped
+    /// over the raw event stream before it is wrapped, so the published terminal message carries
+    /// cost. The full method needs a live `genai` client, so this covers the seam's cost path
+    /// without one.
+    #[tokio::test]
+    async fn cost_attaches_through_stream_finalization_wiring() {
+        let model = ModelIden::new(AdapterKind::Anthropic, "claude-test");
+        let catalog: Arc<dyn PriceCatalog> = Arc::new(priced_catalog("claude-test"));
+        let events = vec![
+            AssistantMessageEvent::Start {
+                partial: AssistantMessage::new(model.clone()),
+            },
+            done_event(model, one_m_in_one_m_out()),
+        ];
+
+        let catalog_for_map = catalog.clone();
+        let mapped = futures::stream::iter(events).map(move |mut event| {
+            attach_cost(catalog_for_map.as_ref(), &mut event);
+            event
+        });
+        let mut stream = AssistantMessageEventStream::from_stream(mapped);
+        let result = stream.result_handle();
+        while stream.next().await.is_some() {}
+
+        let message = result.get().await.expect("terminal message");
+        let cost = message.usage.cost.expect("cost attached at finalization");
+        assert!((cost.total - 18.0).abs() < 1e-9);
     }
 }

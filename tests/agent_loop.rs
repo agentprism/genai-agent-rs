@@ -343,6 +343,7 @@ async fn handles_tool_calls_and_results() {
         cache_read_tokens: 3,
         cache_write_tokens: 4,
         total_tokens: 10,
+        ..Default::default()
     };
     let patched_usage = AgentUsage {
         input_tokens: 5,
@@ -350,6 +351,7 @@ async fn handles_tool_calls_and_results() {
         cache_read_tokens: 7,
         cache_write_tokens: 8,
         total_tokens: 26,
+        ..Default::default()
     };
     let tool = Arc::new(FnTool::from_value_fn(
         tool_spec("echo", value_schema()),

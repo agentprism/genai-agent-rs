@@ -13,9 +13,9 @@ use crate::{
     AfterToolCallHook, AgentContext, AgentError, AgentEvent, AgentLoopConfig, AgentMessage,
     AgentPrepareNextTurnHook, AgentPrepareNextTurnWithContextHook, AgentShouldStopAfterTurnHook,
     AgentTool, AssistantContent, AssistantMessage, BeforeToolCallHook, BusyContext, ConvertToLlm,
-    QueueMode, StopReason, StreamFn, ThinkingBudgets, ThinkingLevel, ToolExecutionMode,
-    TransformContextHook, Transport, UserContent, UserMessage, default_convert_to_llm,
-    get_default_stream_fn, run_agent_loop, run_agent_loop_continue,
+    PriceCatalog, QueueMode, StopReason, StreamFn, ThinkingBudgets, ThinkingLevel,
+    ToolExecutionMode, TransformContextHook, Transport, UserContent, UserMessage,
+    default_convert_to_llm, get_default_stream_fn, run_agent_loop, run_agent_loop_continue,
 };
 use futures::FutureExt;
 use futures::future::BoxFuture;
@@ -164,6 +164,15 @@ pub struct AgentConfig {
     /// `reasoning_effort` from [`AgentState::thinking_level`] (optionally through
     /// [`Self::thinking_budgets`]).
     pub chat_options: ChatOptions,
+    /// Optional model price catalog carried for the application's convenience.
+    ///
+    /// This crate's facade does not construct stream functions, so it does not itself apply the
+    /// catalog. It is a place to keep pricing alongside the rest of an agent's configuration; the
+    /// application is expected to install the same catalog on the [`crate::GenaiStreamFn`] it
+    /// builds (via [`crate::GenaiStreamFn::with_price_catalog`]) and pass that stream function as
+    /// [`Self::stream_fn`]. Cost is attached at stream finalization by that stream function, never
+    /// by the facade.
+    pub price_catalog: Option<Arc<dyn PriceCatalog>>,
 }
 
 /// Compatibility name matching the upstream TypeScript constructor documentation.
@@ -193,6 +202,7 @@ impl std::fmt::Debug for AgentConfig {
             .field("thinking_budgets", &self.thinking_budgets)
             .field("transport", &self.transport)
             .field("chat_options", &self.chat_options)
+            .field("price_catalog", &self.price_catalog.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -216,6 +226,7 @@ impl Default for AgentConfig {
             thinking_budgets: None,
             transport: Transport::Auto,
             chat_options: ChatOptions::default(),
+            price_catalog: None,
         }
     }
 }
@@ -244,9 +255,26 @@ impl AgentConfig {
         self.transport = transport;
         self
     }
+
+    /// Carry a model price catalog alongside the agent configuration.
+    ///
+    /// This is a convenience store only: the facade does not apply it. Install the same catalog on
+    /// the [`crate::GenaiStreamFn`] passed as [`Self::stream_fn`] to have cost attached at stream
+    /// finalization.
+    pub fn with_price_catalog(mut self, price_catalog: Arc<dyn PriceCatalog>) -> Self {
+        self.price_catalog = Some(price_catalog);
+        self
+    }
 }
 
 /// Text, single-message, or message-batch input accepted by [`Agent::prompt`].
+///
+/// The single-message variant carries an `AgentMessage` by value, matching the by-value
+/// convenience of the `From` conversions below. `AgentUsage` now carries optional cost and
+/// token-split fields, so this variant crossed the `large_enum_variant` heuristic; the size
+/// asymmetry is accepted here exactly as it is for [`crate::AgentEvent`], rather than boxing the
+/// public prompt payload.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum PromptInput {
     /// Construct one user message from text followed by additional user-content parts.

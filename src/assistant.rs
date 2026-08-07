@@ -10,8 +10,30 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Estimated monetary cost of a response, in the catalog's currency (conventionally USD).
+///
+/// Every component is a dollar amount, not a token count. This is populated only when a
+/// [`crate::PriceCatalog`] is configured and prices the response's model; see
+/// [`crate::compute_cost`]. When no catalog applies, [`AgentUsage::cost`] stays `None`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentCost {
+    /// Cost attributed to fresh (non-cached) input tokens.
+    pub input: f64,
+    /// Cost attributed to generated output tokens.
+    pub output: f64,
+    /// Cost attributed to cache-read (cache-hit) input tokens.
+    pub cache_read: f64,
+    /// Cost attributed to cache-write (cache-creation) input tokens, across retention splits.
+    pub cache_write: f64,
+    /// Sum of the component costs.
+    pub total: f64,
+}
+
 /// Normalized token accounting for an assistant or tool result.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// [`AgentUsage`] no longer derives `Eq`: [`Self::cost`] carries floating-point dollar amounts,
+/// which have no total equality. Value comparisons continue to use [`PartialEq`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentUsage {
     /// Tokens consumed by the provider input, including the prompt and transcript.
     pub input_tokens: u64,
@@ -21,8 +43,23 @@ pub struct AgentUsage {
     pub cache_read_tokens: u64,
     /// Input tokens written to a provider prompt cache.
     pub cache_write_tokens: u64,
+    /// Subset of [`Self::cache_write_tokens`] written with 1h retention, when the provider reports
+    /// the split (only Anthropic does today; mirrors TS `Usage.cacheWrite1h`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h_tokens: Option<u64>,
+    /// Reasoning/thinking tokens reported by the provider, when available. This is a subset of
+    /// [`Self::output_tokens`] (mirrors TS `Usage.reasoning`).
+    ///
+    /// genai zero-elides this counter (its `zero_as_none` deserializer maps `0` to `None`), so a
+    /// value reaching this field through genai is always strictly positive: `Some(0)` is
+    /// unreachable via the [`From`] impl below.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
     /// Provider-reported total tokens, or the input/output sum when none was reported.
     pub total_tokens: u64,
+    /// Estimated monetary cost of the response, populated only by a configured price catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<AgentCost>,
 }
 
 impl AgentUsage {
@@ -33,7 +70,10 @@ impl AgentUsage {
             output_tokens,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            cache_write_1h_tokens: None,
+            reasoning_tokens: None,
             total_tokens: input_tokens + output_tokens,
+            cost: None,
         }
     }
 }
@@ -54,15 +94,34 @@ impl From<genai::chat::Usage> for AgentUsage {
             .and_then(|details| details.cache_creation_tokens)
             .unwrap_or_default()
             .max(0) as u64;
+        // Subset of cache-write tokens with 1h retention, nested under the cache-creation TTL
+        // breakdown. Negatives are clamped to 0 like the counters above; genai zero-elides this
+        // field on deserialize, so `Some(0)` never survives to here.
+        let cache_write_1h_tokens = value
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|details| details.cache_creation_details.as_ref())
+            .and_then(|details| details.ephemeral_1h_tokens)
+            .map(|tokens| tokens.max(0) as u64);
+        // Reasoning tokens are a subset of the output count. genai zero-elides this counter, so a
+        // reported value is always strictly positive.
+        let reasoning_tokens = value
+            .completion_tokens_details
+            .as_ref()
+            .and_then(|details| details.reasoning_tokens)
+            .map(|tokens| tokens.max(0) as u64);
         Self {
             input_tokens,
             output_tokens,
             cache_read_tokens,
             cache_write_tokens,
+            cache_write_1h_tokens,
+            reasoning_tokens,
             total_tokens: value
                 .total_tokens
                 .unwrap_or((input_tokens + output_tokens) as i32)
                 .max(0) as u64,
+            cost: None,
         }
     }
 }
@@ -428,4 +487,61 @@ pub(crate) fn timestamp_ms() -> i64 {
 
 pub(crate) fn unknown_model_iden() -> ModelIden {
     ModelIden::new(AdapterKind::Ollama, "unknown")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use genai::chat::{CacheCreationDetails, CompletionTokensDetails, PromptTokensDetails, Usage};
+
+    #[test]
+    fn usage_from_genai_maps_cache_write_1h_and_reasoning_tokens() {
+        let usage = Usage {
+            prompt_tokens: Some(100),
+            prompt_tokens_details: Some(PromptTokensDetails {
+                cache_creation_tokens: Some(50),
+                cache_creation_details: Some(CacheCreationDetails {
+                    ephemeral_5m_tokens: Some(30),
+                    ephemeral_1h_tokens: Some(20),
+                }),
+                cached_tokens: Some(10),
+                ..Default::default()
+            }),
+            completion_tokens: Some(40),
+            completion_tokens_details: Some(CompletionTokensDetails {
+                reasoning_tokens: Some(25),
+                ..Default::default()
+            }),
+            total_tokens: Some(150),
+        };
+
+        let agent = AgentUsage::from(usage);
+
+        assert_eq!(agent.input_tokens, 100);
+        assert_eq!(agent.output_tokens, 40);
+        assert_eq!(agent.cache_read_tokens, 10);
+        assert_eq!(agent.cache_write_tokens, 50);
+        assert_eq!(agent.cache_write_1h_tokens, Some(20));
+        assert_eq!(agent.reasoning_tokens, Some(25));
+        assert_eq!(agent.total_tokens, 150);
+        // Cost is never derived by the From impl; only a price catalog populates it.
+        assert_eq!(agent.cost, None);
+    }
+
+    #[test]
+    fn usage_from_genai_leaves_new_fields_none_without_details() {
+        let usage = Usage {
+            prompt_tokens: Some(5),
+            completion_tokens: Some(3),
+            ..Default::default()
+        };
+
+        let agent = AgentUsage::from(usage);
+
+        assert_eq!(agent.cache_write_1h_tokens, None);
+        assert_eq!(agent.reasoning_tokens, None);
+        assert_eq!(agent.cost, None);
+        // Total falls back to input + output when the provider reports none.
+        assert_eq!(agent.total_tokens, 8);
+    }
 }

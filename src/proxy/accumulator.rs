@@ -582,12 +582,17 @@ impl ProxyAccumulator {
 }
 
 fn agent_usage(usage: ProxyUsage) -> AgentUsage {
+    // The proxy wire carries no 1h-retention split, reasoning breakdown, or monetary cost, so
+    // those extended fields stay absent.
     AgentUsage {
         input_tokens: usage.input,
         output_tokens: usage.output,
         cache_read_tokens: usage.cache_read,
         cache_write_tokens: usage.cache_write,
+        cache_write_1h_tokens: None,
+        reasoning_tokens: None,
         total_tokens: usage.total_tokens,
+        cost: None,
     }
 }
 

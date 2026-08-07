@@ -706,8 +706,9 @@ pub struct ProxyUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     /// Optional provider-reported monetary cost serialized as `"cost"`.
     ///
-    /// The proxy assistant accumulator currently maps token counts into `AgentUsage`; monetary cost
-    /// remains wire metadata and is not represented by that local usage type.
+    /// The proxy assistant accumulator maps only token counts into `AgentUsage` and leaves
+    /// `AgentUsage::cost` unset: this wire cost is not carried across. Cost on `AgentUsage` is
+    /// populated only by a configured [`crate::PriceCatalog`] at the `GenaiStreamFn` seam.
     pub cost: Option<ProxyUsageCost>,
 }
 

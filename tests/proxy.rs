@@ -970,6 +970,7 @@ async fn byte_fragmented_sse_reconstructs_text_thinking_tools_signatures_and_usa
             cache_read_tokens: 2,
             cache_write_tokens: 1,
             total_tokens: 18,
+            ..Default::default()
         }
     );
     assert_eq!(
