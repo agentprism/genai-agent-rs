@@ -36,6 +36,12 @@ Target repo: `jeremychone/rust-genai`, via the `agentprism` fork. One PR, one co
 | `ToolResponse` binary parts | Production tool results carry images; `afterToolCall` normalizes them (`agent-session.ts:501-532`) | Optional binary attachments on `ToolResponse`, covering all adapters per the pi-ai reference behavior: native blocks where the wire supports them (Anthropic `tool_result`; Gemini 3+ `functionResponse.parts`), and a follow-up user message ("Attached image(s) from tool result:" + image parts, with a "(see attached image)" placeholder in the tool slot) on string-only wires (OpenAI-compatible, older Gemini) — `openai-completions.ts:1243-1315`, `google-shared.ts:189-210` | Converter attaches parts instead of the `"[image omitted]"` marker (`message.rs:339-353`) (S) |
 | Exec interceptors (`onPayload`/`onResponse`) | Extension bridge hooks `before_provider_request`/`after_provider_response` wired at the production construction site (`sdk.ts:331-348`) | Per-request payload interceptor (may replace the provider payload before send) + response observer (status + headers, before body consumption). genai today has no interceptor and the streaming HTTP send is lazy — needs threading through the stream setup | `on_payload`/`on_response` hooks on `AgentConfig` + `StreamRequest`, invoked by `GenaiStreamFn`; proxy honors them directly (M) |
 
+## 2b. Backend gap — production-shipped in pi, unreachable from the Rust stack today
+
+| Item | Production evidence (pi) | Design options |
+|---|---|---|
+| OpenAI Codex backend (ChatGPT-plan) | pi-ai's dedicated `openai-codex-responses` provider: base URL `https://chatgpt.com/backend-api`, ChatGPT OAuth auth, WebSocket transport with SSE fallback; the CLI's settings migrate a legacy `websockets` boolean to the `transport` enum, showing real production use | genai has no Codex adapter — codex-named models route to the standard OpenAI Responses adapter (`adapter_kind.rs:210,216`), which is the wrong endpoint/auth/transport for this backend. Options: (a) new genai adapter incl. a WebSocket transport genai entirely lacks (L, upstream); (b) a self-contained `CodexStreamFn` in this crate behind the `StreamFn` boundary (no upstream changes; pragmatic first step) |
+
 ## 3. Dropped — no production consumer (do not build without new evidence)
 
 | Item | Why dropped |
