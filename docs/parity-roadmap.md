@@ -62,5 +62,6 @@ Target repo: `jeremychone/rust-genai`, via the `agentprism` fork. One PR, one co
 - Verification + designs: session investigation reports (agent loop, Agent facade, proxy, type
   layer, harness feasibility, production-usage audit), 2026-08-06.
 - Parity manifest: `tests/parity_manifest.toml` (52/52 mapped, pinned upstream commit).
-- Harness port feasibility (out of scope, design study only): separate
-  `rust-genai-agent-harness` crate, ~10–14 engineer-weeks, JSONL interop achievable.
+- Harness port feasibility (out of scope, design study only): see
+  [`harness-port-design.md`](harness-port-design.md) — separate `rust-genai-agent-harness`
+  crate, ~10–14 engineer-weeks, JSONL interop achievable.
