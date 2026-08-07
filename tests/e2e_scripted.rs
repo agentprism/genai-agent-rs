@@ -27,21 +27,21 @@ fn test_agent(
     streams: Vec<ScriptedStream>,
 ) -> (Arc<Agent>, Arc<MockStreamFn>) {
     let stream_fn = Arc::new(MockStreamFn::from_streams(streams));
-    let agent = Agent::new(AgentConfig {
-        initial_state: AgentState {
-            system_prompt: system_prompt.to_owned(),
-            model: fixtures::model(),
-            thinking_level,
-            tools,
-            messages: Vec::new(),
-            is_streaming: false,
-            streaming_message: None,
-            pending_tool_calls: HashSet::new(),
-            error_message: None,
-        },
-        stream_fn: Some(stream_fn.clone()),
-        ..AgentConfig::default()
-    });
+    let agent = Agent::new(
+        AgentConfig::default()
+            .with_initial_state(AgentState {
+                system_prompt: system_prompt.to_owned(),
+                model: fixtures::model(),
+                thinking_level,
+                tools,
+                messages: Vec::new(),
+                is_streaming: false,
+                streaming_message: None,
+                pending_tool_calls: HashSet::new(),
+                error_message: None,
+            })
+            .with_stream_fn(stream_fn.clone()),
+    );
     (Arc::new(agent), stream_fn)
 }
 

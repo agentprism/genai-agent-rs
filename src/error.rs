@@ -10,6 +10,7 @@ use thiserror::Error;
 /// Errors raised by the low-level loop for guards, missing runtime pieces, or a spawned-task
 /// contract violation.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LoopError {
     /// A continuation was requested with an empty transcript.
     #[error("Cannot continue: no messages in context")]
@@ -64,6 +65,7 @@ impl std::fmt::Display for BusyContext {
 /// A successful admission returns `Ok(())` even when the run later ends with an in-band provider,
 /// tool, cancellation, or recovered loop failure.
 #[derive(Debug, Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AgentError {
     /// Another prompt or continuation is active.
     ///

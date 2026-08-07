@@ -100,6 +100,7 @@ impl ThinkingLevel {
 /// Following pi-ai's `clampReasoning`, the extra-high and maximum levels resolve through the
 /// [`Self::high`] entry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ThinkingBudgets {
     /// Token budget for [`ThinkingLevel::Minimal`].
     pub minimal: Option<u32>,
@@ -113,6 +114,30 @@ pub struct ThinkingBudgets {
 }
 
 impl ThinkingBudgets {
+    /// Set the [`ThinkingLevel::Minimal`] token budget.
+    pub const fn with_minimal(mut self, tokens: u32) -> Self {
+        self.minimal = Some(tokens);
+        self
+    }
+
+    /// Set the [`ThinkingLevel::Low`] token budget.
+    pub const fn with_low(mut self, tokens: u32) -> Self {
+        self.low = Some(tokens);
+        self
+    }
+
+    /// Set the [`ThinkingLevel::Medium`] token budget.
+    pub const fn with_medium(mut self, tokens: u32) -> Self {
+        self.medium = Some(tokens);
+        self
+    }
+
+    /// Set the [`ThinkingLevel::High`] token budget (also used for `xhigh`/`max` via `clampReasoning`).
+    pub const fn with_high(mut self, tokens: u32) -> Self {
+        self.high = Some(tokens);
+        self
+    }
+
     /// Resolve a named level to its configured token budget, or `None` when no entry applies.
     ///
     /// [`ThinkingLevel::Minimal`], [`ThinkingLevel::Low`], and [`ThinkingLevel::Medium`] map to
@@ -142,6 +167,7 @@ impl ThinkingBudgets {
 /// `"websocket-cached"`, `"auto"`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum Transport {
     /// Server-sent events transport.
     Sse,
@@ -216,6 +242,7 @@ impl AgentContext {
 /// signatures; they must communicate their documented decisions through return values rather than
 /// panic.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct AgentLoopConfig {
     /// Model used for provider requests unless a prepare-next-turn update replaces it.
     pub model: ModelSpec,
@@ -316,6 +343,54 @@ impl AgentLoopConfig {
     /// Replace the preferred provider transport advisory.
     pub fn with_transport(mut self, transport: Transport) -> Self {
         self.transport = transport;
+        self
+    }
+
+    /// Install the provider-boundary transcript transform.
+    pub fn with_transform_context(mut self, transform_context: TransformContextHook) -> Self {
+        self.transform_context = Some(transform_context);
+        self
+    }
+
+    /// Install the post-turn graceful-stop predicate.
+    pub fn with_should_stop_after_turn(
+        mut self,
+        should_stop_after_turn: ShouldStopAfterTurnHook,
+    ) -> Self {
+        self.should_stop_after_turn = Some(should_stop_after_turn);
+        self
+    }
+
+    /// Install the post-turn context/model/reasoning preparation hook.
+    pub fn with_prepare_next_turn(mut self, prepare_next_turn: PrepareNextTurnHook) -> Self {
+        self.prepare_next_turn = Some(prepare_next_turn);
+        self
+    }
+
+    /// Install the steering-message source polled before the initial response and between turns.
+    pub fn with_get_steering_messages(mut self, get_steering_messages: QueueMessagesHook) -> Self {
+        self.get_steering_messages = Some(get_steering_messages);
+        self
+    }
+
+    /// Install the follow-up-message source polled when the loop would otherwise finish.
+    pub fn with_get_follow_up_messages(
+        mut self,
+        get_follow_up_messages: QueueMessagesHook,
+    ) -> Self {
+        self.get_follow_up_messages = Some(get_follow_up_messages);
+        self
+    }
+
+    /// Install the pre-execution tool hook.
+    pub fn with_before_tool_call(mut self, before_tool_call: BeforeToolCallHook) -> Self {
+        self.before_tool_call = Some(before_tool_call);
+        self
+    }
+
+    /// Install the post-execution tool hook.
+    pub fn with_after_tool_call(mut self, after_tool_call: AfterToolCallHook) -> Self {
+        self.after_tool_call = Some(after_tool_call);
         self
     }
 }

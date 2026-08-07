@@ -337,22 +337,14 @@ async fn applies_transform_context_before_convert_to_llm() {
 async fn handles_tool_calls_and_results() {
     let executed = Arc::new(Mutex::new(Vec::<String>::new()));
     let executed_by_tool = executed.clone();
-    let tool_usage = AgentUsage {
-        input_tokens: 1,
-        output_tokens: 2,
-        cache_read_tokens: 3,
-        cache_write_tokens: 4,
-        total_tokens: 10,
-        ..Default::default()
-    };
-    let patched_usage = AgentUsage {
-        input_tokens: 5,
-        output_tokens: 6,
-        cache_read_tokens: 7,
-        cache_write_tokens: 8,
-        total_tokens: 26,
-        ..Default::default()
-    };
+    let tool_usage = AgentUsage::new(1, 2)
+        .with_cache_read_tokens(3)
+        .with_cache_write_tokens(4)
+        .with_total_tokens(10);
+    let patched_usage = AgentUsage::new(5, 6)
+        .with_cache_read_tokens(7)
+        .with_cache_write_tokens(8)
+        .with_total_tokens(26);
     let tool = Arc::new(FnTool::from_value_fn(
         tool_spec("echo", value_schema()),
         move |args| {

@@ -24,10 +24,7 @@ use tokio::sync::Semaphore;
 
 fn agent_with_streams(streams: Vec<ScriptedStream>) -> (Agent, Arc<MockStreamFn>) {
     let stream_fn = Arc::new(MockStreamFn::from_streams(streams));
-    let agent = Agent::new(AgentConfig {
-        stream_fn: Some(stream_fn.clone()),
-        ..AgentConfig::default()
-    });
+    let agent = Agent::new(AgentConfig::default().with_stream_fn(stream_fn.clone()));
     (agent, stream_fn)
 }
 
@@ -36,11 +33,11 @@ fn agent_with_state_and_streams(
     streams: Vec<ScriptedStream>,
 ) -> (Agent, Arc<MockStreamFn>) {
     let stream_fn = Arc::new(MockStreamFn::from_streams(streams));
-    let agent = Agent::new(AgentConfig {
-        initial_state: state,
-        stream_fn: Some(stream_fn.clone()),
-        ..AgentConfig::default()
-    });
+    let agent = Agent::new(
+        AgentConfig::default()
+            .with_initial_state(state)
+            .with_stream_fn(stream_fn.clone()),
+    );
     (agent, stream_fn)
 }
 
@@ -124,12 +121,9 @@ async fn legacy_omitted_stream_fn_uses_configured_default() {
     let previous = set_default_stream_fn(Some(fallback.clone()));
     let _restore = DefaultStreamRestore(previous);
 
-    // Idiomatic adaptation of `Reflect.construct(Agent, [{}])`: `None` requests the
-    // process default without weakening the typed Rust constructor.
-    let agent = Agent::new(AgentConfig {
-        stream_fn: None,
-        ..AgentConfig::default()
-    });
+    // Idiomatic adaptation of `Reflect.construct(Agent, [{}])`: the default config leaves
+    // `stream_fn` unset (`None`), so admission resolves the process default.
+    let agent = Agent::new(AgentConfig::default());
     agent.prompt("Hello").await.unwrap();
 
     assert_eq!(fallback.call_count(), 1);
@@ -195,10 +189,7 @@ async fn subscribes_and_unsubscribes_to_events() {
 // TS: pi/packages/agent/test/agent.test.ts — `emits full lifecycle events for thrown run failures`
 #[tokio::test]
 async fn thrown_run_failure_emits_full_lifecycle() {
-    let agent = Agent::new(AgentConfig {
-        stream_fn: Some(Arc::new(PanickingStreamFn)),
-        ..AgentConfig::default()
-    });
+    let agent = Agent::new(AgentConfig::default().with_stream_fn(Arc::new(PanickingStreamFn)));
     let events = EventRecorder::new();
     let _subscription = agent.subscribe(events.listener());
 
@@ -335,10 +326,7 @@ async fn wait_for_idle_awaits_async_subscribers() {
 #[tokio::test]
 async fn subscribers_receive_active_cancellation_token() {
     let stream_fn = abort_aware_stream_fn();
-    let agent = Agent::new(AgentConfig {
-        stream_fn: Some(stream_fn),
-        ..AgentConfig::default()
-    });
+    let agent = Agent::new(AgentConfig::default().with_stream_fn(stream_fn));
     let received = Arc::new(Mutex::new(None::<CancellationToken>));
     let observed = received.clone();
     let _subscription = agent.subscribe_fn(move |event, cancel| {
@@ -603,10 +591,7 @@ async fn reset_rejects_while_processing_without_corrupting_the_transcript() {
             });
         })
     }));
-    let agent = Agent::new(AgentConfig {
-        stream_fn: Some(stream_fn),
-        ..AgentConfig::default()
-    });
+    let agent = Agent::new(AgentConfig::default().with_stream_fn(stream_fn));
 
     let running_agent = agent.clone();
     let prompt = tokio::spawn(async move { running_agent.prompt("Hello").await });
@@ -648,10 +633,7 @@ async fn reset_rejects_while_processing_without_corrupting_the_transcript() {
 #[tokio::test]
 async fn prompt_rejects_while_streaming() {
     let stream_fn = abort_aware_stream_fn();
-    let agent = Agent::new(AgentConfig {
-        stream_fn: Some(stream_fn),
-        ..AgentConfig::default()
-    });
+    let agent = Agent::new(AgentConfig::default().with_stream_fn(stream_fn));
     let running_agent = agent.clone();
     let first_prompt = tokio::spawn(async move { running_agent.prompt("First message").await });
     wait_until(|| agent.state().is_streaming).await;
@@ -671,10 +653,7 @@ async fn prompt_rejects_while_streaming() {
 #[tokio::test]
 async fn continue_rejects_while_streaming() {
     let stream_fn = abort_aware_stream_fn();
-    let agent = Agent::new(AgentConfig {
-        stream_fn: Some(stream_fn),
-        ..AgentConfig::default()
-    });
+    let agent = Agent::new(AgentConfig::default().with_stream_fn(stream_fn));
     let running_agent = agent.clone();
     let first_prompt = tokio::spawn(async move { running_agent.prompt("First message").await });
     wait_until(|| agent.state().is_streaming).await;
@@ -794,12 +773,12 @@ async fn forwards_legacy_prepare_next_turn_cancellation_token() {
     ]));
     let mut state = AgentState::default();
     state.tools = vec![noop];
-    let agent = Agent::new(AgentConfig {
-        initial_state: state,
-        stream_fn: Some(stream_fn.clone()),
-        prepare_next_turn: Some(prepare_next_turn),
-        ..AgentConfig::default()
-    });
+    let agent = Agent::new(
+        AgentConfig::default()
+            .with_initial_state(state)
+            .with_stream_fn(stream_fn.clone())
+            .with_prepare_next_turn(prepare_next_turn),
+    );
 
     agent.prompt("start").await.unwrap();
 
@@ -834,12 +813,12 @@ async fn forwards_should_stop_after_turn_through_options() {
     ]));
     let mut state = AgentState::default();
     state.tools = vec![noop];
-    let agent = Agent::new(AgentConfig {
-        initial_state: state,
-        stream_fn: Some(stream_fn.clone()),
-        should_stop_after_turn: Some(should_stop),
-        ..AgentConfig::default()
-    });
+    let agent = Agent::new(
+        AgentConfig::default()
+            .with_initial_state(state)
+            .with_stream_fn(stream_fn.clone())
+            .with_should_stop_after_turn(should_stop),
+    );
 
     agent.prompt("start").await.unwrap();
 
@@ -858,11 +837,11 @@ async fn forwards_session_id_to_stream_options() {
         script::text_response("ok"),
         script::text_response("ok again"),
     ]));
-    let agent = Agent::new(AgentConfig {
-        stream_fn: Some(stream_fn.clone()),
-        session_id: Some("session-abc".into()),
-        ..AgentConfig::default()
-    });
+    let agent = Agent::new(
+        AgentConfig::default()
+            .with_stream_fn(stream_fn.clone())
+            .with_session_id("session-abc"),
+    );
 
     agent.prompt("hello").await.unwrap();
     assert_eq!(

@@ -48,6 +48,7 @@ impl LlmContext {
 
 /// One invocation captured at the sole provider boundary.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct StreamRequest {
     /// Model name, identity, or fully targeted provider selection.
     pub model: ModelSpec,

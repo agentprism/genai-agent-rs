@@ -111,6 +111,7 @@ pub type AgentListener =
 /// [`Agent::new`] clones the initial state and retains callback handles for later per-run snapshots.
 /// Dedicated runtime setters can replace those handles only while the agent is idle.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct AgentConfig {
     /// Initial persistent state.
     ///
@@ -263,6 +264,88 @@ impl AgentConfig {
     /// finalization.
     pub fn with_price_catalog(mut self, price_catalog: Arc<dyn PriceCatalog>) -> Self {
         self.price_catalog = Some(price_catalog);
+        self
+    }
+
+    /// Replace the transcript conversion used at each provider boundary.
+    pub fn with_convert_to_llm(mut self, convert_to_llm: ConvertToLlm) -> Self {
+        self.convert_to_llm = convert_to_llm;
+        self
+    }
+
+    /// Install the provider-boundary transcript transform.
+    pub fn with_transform_context(mut self, transform_context: TransformContextHook) -> Self {
+        self.transform_context = Some(transform_context);
+        self
+    }
+
+    /// Install the pre-execution tool hook.
+    pub fn with_before_tool_call(mut self, before_tool_call: BeforeToolCallHook) -> Self {
+        self.before_tool_call = Some(before_tool_call);
+        self
+    }
+
+    /// Install the post-execution tool hook.
+    pub fn with_after_tool_call(mut self, after_tool_call: AfterToolCallHook) -> Self {
+        self.after_tool_call = Some(after_tool_call);
+        self
+    }
+
+    /// Install the post-turn graceful-stop predicate.
+    pub fn with_should_stop_after_turn(
+        mut self,
+        should_stop_after_turn: AgentShouldStopAfterTurnHook,
+    ) -> Self {
+        self.should_stop_after_turn = Some(should_stop_after_turn);
+        self
+    }
+
+    /// Install the legacy next-turn hook that receives only the active cancellation token.
+    ///
+    /// When both preparation hooks are set, [`Self::prepare_next_turn_with_context`] takes
+    /// precedence.
+    pub fn with_prepare_next_turn(mut self, prepare_next_turn: AgentPrepareNextTurnHook) -> Self {
+        self.prepare_next_turn = Some(prepare_next_turn);
+        self
+    }
+
+    /// Install the context-aware next-turn hook, which takes precedence over
+    /// [`Self::prepare_next_turn`].
+    pub fn with_prepare_next_turn_with_context(
+        mut self,
+        prepare_next_turn_with_context: AgentPrepareNextTurnWithContextHook,
+    ) -> Self {
+        self.prepare_next_turn_with_context = Some(prepare_next_turn_with_context);
+        self
+    }
+
+    /// Set the cache-affinity/session identifier mapped to `ChatOptions::prompt_cache_key`.
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    /// Set the initial steering-queue drain policy.
+    pub fn with_steering_mode(mut self, steering_mode: QueueMode) -> Self {
+        self.steering_mode = steering_mode;
+        self
+    }
+
+    /// Set the initial follow-up-queue drain policy.
+    pub fn with_follow_up_mode(mut self, follow_up_mode: QueueMode) -> Self {
+        self.follow_up_mode = follow_up_mode;
+        self
+    }
+
+    /// Set the tool-call batch execution policy.
+    pub fn with_tool_execution(mut self, tool_execution: ToolExecutionMode) -> Self {
+        self.tool_execution = tool_execution;
+        self
+    }
+
+    /// Replace the base provider chat options.
+    pub fn with_chat_options(mut self, chat_options: ChatOptions) -> Self {
+        self.chat_options = chat_options;
         self
     }
 }

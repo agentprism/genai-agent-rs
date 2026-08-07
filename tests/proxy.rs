@@ -964,14 +964,10 @@ async fn byte_fragmented_sse_reconstructs_text_thinking_tools_signatures_and_usa
     assert_eq!(result.provider_stop_reason.as_deref(), Some("tool_calls"));
     assert_eq!(
         result.usage,
-        rust_genai_agent::AgentUsage {
-            input_tokens: 9,
-            output_tokens: 6,
-            cache_read_tokens: 2,
-            cache_write_tokens: 1,
-            total_tokens: 18,
-            ..Default::default()
-        }
+        rust_genai_agent::AgentUsage::new(9, 6)
+            .with_cache_read_tokens(2)
+            .with_cache_write_tokens(1)
+            .with_total_tokens(18)
     );
     assert_eq!(
         result.content,

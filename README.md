@@ -15,8 +15,11 @@ At the M1-M6 completion checkpoint, all **52/52** case-mapped upstream behaviors
 the all-feature repository suite was **112/112** tests green. Eight proxy/streaming-JSON security
 regressions landed during release hardening, and upstream additions (blocked-call termination and
 the reset-while-processing guard) plus TypeScript error-text pins grew the matrix to **55/55**
-mapped cases. Subsequent production-parity batches (the `thinking_budgets` map and the `transport`
-advisory) keep the mapped matrix at **55/55**; the current suite is **139/139** green.
+mapped cases. Subsequent production-parity batches — the `thinking_budgets` map, the `transport`
+advisory, and `AgentUsage` cost/cache-write-1h/reasoning accounting with an injectable
+`PriceCatalog` — keep the mapped matrix at **55/55**. The 0.2.0 release wrap-up adds
+`#[non_exhaustive]` plus complete builder coverage to the public config, usage, and error types,
+and the current suite is **149/149** green.
 
 ## Installation
 
@@ -24,7 +27,7 @@ The minimum supported Rust version is 1.88.
 
 ```toml
 [dependencies]
-rust-genai-agent = "0.1.0"
+rust-genai-agent = "0.2.0"
 genai = "0.7.0-beta.18"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
@@ -38,7 +41,7 @@ The feature layers are intentionally small:
 | Proxy transport | `proxy` | `ProxyStreamFn`, authenticated HTTP/SSE client, and the versioned proxy wire types |
 
 Enable only what the consumer needs, for example
-`rust-genai-agent = { version = "0.1.0", features = ["proxy"] }`.
+`rust-genai-agent = { version = "0.2.0", features = ["proxy"] }`.
 
 ## Quick start
 
@@ -207,6 +210,7 @@ sandbox for untrusted servers.
 | Cost accounting | `AgentUsage` also carries `cache_write_1h_tokens` and `reasoning_tokens` (both mapped from `genai::chat::Usage` details; genai zero-elides `reasoning_tokens`, so `Some(0)` is unreachable through it). `AgentCost` + the injectable `PriceCatalog` port pi-ai's model-catalog cost step (`models.ts` `calculateCost`): the highest tier whose `input_tokens_above` is strictly below the request's `input + cache_read + cache_write` count prices the whole request. pi-ai's hardcoded Anthropic "1h writes at 2x base input" rule is generalized to an explicit `cache_write_1h` rate (falling back to `cache_write` when unset). Cost is attached at stream finalization by `GenaiStreamFn::with_price_catalog`; `AgentConfig::price_catalog` is a convenience store the application installs on the stream function it builds — the facade constructs no stream functions and applies no catalog itself. |
 | Thinking-budget resolution | The `ThinkingBudgets` map mirrors pi-ai's per-level budgets and `clampReasoning` (`xhigh`/`max` → `high`), but has **no implicit default budget table** (an entry must be configured or the named level falls back) and omits pi-ai's maxTokens-fitting step, which is impossible without the model catalog `genai` does not carry. |
 | Transport advisory | `Transport` is accepted and forwarded on every `StreamRequest`, but the SSE-only `GenaiStreamFn` ignores it. The TypeScript contract states providers that do not support a requested transport ignore it, so ignoring it is compliant; custom `StreamFn` implementations may honor it. |
+| API evolution | The public configuration, usage, and error types (`AgentConfig`, `AgentLoopConfig`, `StreamRequest`, `AgentUsage`, `AgentCost`, `ThinkingBudgets`, `Transport`, `AgentError`, `LoopError`) are `#[non_exhaustive]` with complete `with_*` builder coverage, so adding fields or variants stays semver-minor. Construct them through `Default`/`new` plus builders instead of struct literals. `AgentState` is intentionally left exhaustive so applications can keep using functional-update construction (`..AgentState::default()`). |
 | Convenience exports | Telemetry helpers and UUID generation from the TypeScript package's convenience exports are intentionally not re-exported. Applications should select their own tracing/telemetry and UUID crates. |
 | Excluded packages | `src/harness/**` and `src/node.ts` are outside this crate. There is no durable-session/compaction harness and no Node binding hidden behind a feature. |
 

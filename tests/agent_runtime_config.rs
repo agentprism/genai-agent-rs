@@ -41,11 +41,11 @@ async fn thinking_budget_is_forwarded_to_stream_request_options() {
     let stream = Arc::new(MockStreamFn::from_streams(vec![script::text_response(
         "ok",
     )]));
-    let agent = Agent::new(AgentConfig {
-        stream_fn: Some(stream.clone()),
-        chat_options: ChatOptions::default().with_reasoning_effort(ReasoningEffort::High),
-        ..AgentConfig::default()
-    });
+    let agent = Agent::new(
+        AgentConfig::default()
+            .with_stream_fn(stream.clone())
+            .with_chat_options(ChatOptions::default().with_reasoning_effort(ReasoningEffort::High)),
+    );
 
     agent.set_thinking_level(ThinkingLevel::Budget(4_096));
     agent.prompt("budget please").await.unwrap();
@@ -72,16 +72,17 @@ async fn thinking_budget_map_resolves_named_levels_with_xhigh_and_max_clamping()
     let stream = Arc::new(MockStreamFn::from_streams(
         cases.iter().map(|_| script::text_response("ok")).collect(),
     ));
-    let agent = Agent::new(AgentConfig {
-        stream_fn: Some(stream.clone()),
-        thinking_budgets: Some(ThinkingBudgets {
-            minimal: Some(100),
-            low: Some(200),
-            medium: Some(300),
-            high: Some(400),
-        }),
-        ..AgentConfig::default()
-    });
+    let agent = Agent::new(
+        AgentConfig::default()
+            .with_stream_fn(stream.clone())
+            .with_thinking_budgets(
+                ThinkingBudgets::default()
+                    .with_minimal(100)
+                    .with_low(200)
+                    .with_medium(300)
+                    .with_high(400),
+            ),
+    );
 
     for (level, _) in cases {
         agent.set_thinking_level(level);
@@ -107,14 +108,11 @@ async fn explicit_thinking_budget_bypasses_the_budget_map() {
     let stream = Arc::new(MockStreamFn::from_streams(vec![script::text_response(
         "ok",
     )]));
-    let agent = Agent::new(AgentConfig {
-        stream_fn: Some(stream.clone()),
-        thinking_budgets: Some(ThinkingBudgets {
-            high: Some(400),
-            ..ThinkingBudgets::default()
-        }),
-        ..AgentConfig::default()
-    });
+    let agent = Agent::new(
+        AgentConfig::default()
+            .with_stream_fn(stream.clone())
+            .with_thinking_budgets(ThinkingBudgets::default().with_high(400)),
+    );
 
     agent.set_thinking_level(ThinkingLevel::Budget(4_096));
     agent.prompt("go").await.unwrap();
@@ -131,15 +129,12 @@ async fn named_level_without_budget_entry_falls_back_to_named_reasoning_effort()
     let stream = Arc::new(MockStreamFn::from_streams(vec![script::text_response(
         "ok",
     )]));
-    let agent = Agent::new(AgentConfig {
-        stream_fn: Some(stream.clone()),
-        // Only `high` is configured, so there is no implicit budget for `low`.
-        thinking_budgets: Some(ThinkingBudgets {
-            high: Some(400),
-            ..ThinkingBudgets::default()
-        }),
-        ..AgentConfig::default()
-    });
+    // Only `high` is configured, so there is no implicit budget for `low`.
+    let agent = Agent::new(
+        AgentConfig::default()
+            .with_stream_fn(stream.clone())
+            .with_thinking_budgets(ThinkingBudgets::default().with_high(400)),
+    );
 
     agent.set_thinking_level(ThinkingLevel::Low);
     agent.prompt("go").await.unwrap();
@@ -163,10 +158,7 @@ async fn replacing_stream_function_applies_to_the_next_run() {
     let replacement = Arc::new(MockStreamFn::from_streams(vec![script::text_response(
         "replacement",
     )]));
-    let agent = Agent::new(AgentConfig {
-        stream_fn: Some(original.clone()),
-        ..AgentConfig::default()
-    });
+    let agent = Agent::new(AgentConfig::default().with_stream_fn(original.clone()));
 
     agent.prompt("first").await.unwrap();
     agent
@@ -195,12 +187,12 @@ async fn replacing_hook_and_chat_options_applies_to_the_next_run() {
     let stream = Arc::new(MockStreamFn::from_streams(vec![script::text_response(
         "ok",
     )]));
-    let agent = Agent::new(AgentConfig {
-        stream_fn: Some(stream.clone()),
-        transform_context: Some(old_hook),
-        session_id: Some("session-stays-stable".into()),
-        ..AgentConfig::default()
-    });
+    let agent = Agent::new(
+        AgentConfig::default()
+            .with_stream_fn(stream.clone())
+            .with_transform_context(old_hook)
+            .with_session_id("session-stays-stable"),
+    );
 
     agent.set_transform_context(Some(new_hook)).unwrap();
     agent
@@ -242,10 +234,7 @@ async fn every_runtime_config_setter_rejects_updates_during_an_active_run() {
             })
         }
     }));
-    let agent = Agent::new(AgentConfig {
-        stream_fn: Some(stream),
-        ..AgentConfig::default()
-    });
+    let agent = Agent::new(AgentConfig::default().with_stream_fn(stream));
 
     let running_agent = agent.clone();
     let prompt = tokio::spawn(async move { running_agent.prompt("block").await });
@@ -307,10 +296,7 @@ async fn every_runtime_config_setter_rejects_updates_during_an_active_run() {
         Err(AgentError::Busy(BusyContext::Other))
     );
     assert_eq!(
-        agent.set_thinking_budgets(Some(ThinkingBudgets {
-            high: Some(400),
-            ..ThinkingBudgets::default()
-        })),
+        agent.set_thinking_budgets(Some(ThinkingBudgets::default().with_high(400))),
         Err(AgentError::Busy(BusyContext::Other))
     );
     assert_eq!(
@@ -331,10 +317,7 @@ async fn transport_defaults_to_auto_and_is_forwarded_to_the_stream_request() {
     let stream = Arc::new(MockStreamFn::from_streams(vec![script::text_response(
         "ok",
     )]));
-    let agent = Agent::new(AgentConfig {
-        stream_fn: Some(stream.clone()),
-        ..AgentConfig::default()
-    });
+    let agent = Agent::new(AgentConfig::default().with_stream_fn(stream.clone()));
 
     assert_eq!(agent.transport(), Transport::Auto);
     agent.prompt("go").await.unwrap();
@@ -350,11 +333,11 @@ async fn configured_transport_is_forwarded_and_live_reassignable_between_runs() 
         script::text_response("one"),
         script::text_response("two"),
     ]));
-    let agent = Agent::new(AgentConfig {
-        stream_fn: Some(stream.clone()),
-        transport: Transport::WebsocketCached,
-        ..AgentConfig::default()
-    });
+    let agent = Agent::new(
+        AgentConfig::default()
+            .with_stream_fn(stream.clone())
+            .with_transport(Transport::WebsocketCached),
+    );
 
     assert_eq!(agent.transport(), Transport::WebsocketCached);
     agent.prompt("one").await.unwrap();
@@ -393,10 +376,7 @@ async fn set_transport_is_unguarded_during_an_active_run() {
             })
         }
     }));
-    let agent = Agent::new(AgentConfig {
-        stream_fn: Some(stream),
-        ..AgentConfig::default()
-    });
+    let agent = Agent::new(AgentConfig::default().with_stream_fn(stream));
 
     let running_agent = agent.clone();
     let prompt = tokio::spawn(async move { running_agent.prompt("block").await });

@@ -16,6 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// [`crate::PriceCatalog`] is configured and prices the response's model; see
 /// [`crate::compute_cost`]. When no catalog applies, [`AgentUsage::cost`] stays `None`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AgentCost {
     /// Cost attributed to fresh (non-cached) input tokens.
     pub input: f64,
@@ -29,11 +30,48 @@ pub struct AgentCost {
     pub total: f64,
 }
 
+impl AgentCost {
+    /// Set the fresh (non-cached) input component cost.
+    pub fn with_input(mut self, input: f64) -> Self {
+        self.input = input;
+        self
+    }
+
+    /// Set the generated-output component cost.
+    pub fn with_output(mut self, output: f64) -> Self {
+        self.output = output;
+        self
+    }
+
+    /// Set the cache-read component cost.
+    pub fn with_cache_read(mut self, cache_read: f64) -> Self {
+        self.cache_read = cache_read;
+        self
+    }
+
+    /// Set the cache-write component cost.
+    pub fn with_cache_write(mut self, cache_write: f64) -> Self {
+        self.cache_write = cache_write;
+        self
+    }
+
+    /// Set the aggregate cost.
+    ///
+    /// This is an independent field rather than a derived value: [`compute_cost`](crate::compute_cost)
+    /// sets it to the sum of the components, and callers constructing an [`AgentCost`] by hand supply
+    /// the intended total.
+    pub fn with_total(mut self, total: f64) -> Self {
+        self.total = total;
+        self
+    }
+}
+
 /// Normalized token accounting for an assistant or tool result.
 ///
 /// [`AgentUsage`] no longer derives `Eq`: [`Self::cost`] carries floating-point dollar amounts,
 /// which have no total equality. Value comparisons continue to use [`PartialEq`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AgentUsage {
     /// Tokens consumed by the provider input, including the prompt and transcript.
     pub input_tokens: u64,
@@ -75,6 +113,45 @@ impl AgentUsage {
             total_tokens: input_tokens + output_tokens,
             cost: None,
         }
+    }
+
+    /// Set the cache-read (cache-hit) input token count.
+    pub const fn with_cache_read_tokens(mut self, cache_read_tokens: u64) -> Self {
+        self.cache_read_tokens = cache_read_tokens;
+        self
+    }
+
+    /// Set the cache-write (cache-creation) input token count.
+    pub const fn with_cache_write_tokens(mut self, cache_write_tokens: u64) -> Self {
+        self.cache_write_tokens = cache_write_tokens;
+        self
+    }
+
+    /// Set the 1h-retention subset of the cache-write token count.
+    pub const fn with_cache_write_1h_tokens(mut self, cache_write_1h_tokens: u64) -> Self {
+        self.cache_write_1h_tokens = Some(cache_write_1h_tokens);
+        self
+    }
+
+    /// Set the reasoning/thinking token count (a subset of [`Self::output_tokens`]).
+    pub const fn with_reasoning_tokens(mut self, reasoning_tokens: u64) -> Self {
+        self.reasoning_tokens = Some(reasoning_tokens);
+        self
+    }
+
+    /// Override the provider-reported total token count.
+    ///
+    /// [`Self::new`] seeds this with `input_tokens + output_tokens`; use this builder when the
+    /// provider reports a different total.
+    pub const fn with_total_tokens(mut self, total_tokens: u64) -> Self {
+        self.total_tokens = total_tokens;
+        self
+    }
+
+    /// Attach an estimated monetary cost.
+    pub const fn with_cost(mut self, cost: AgentCost) -> Self {
+        self.cost = Some(cost);
+        self
     }
 }
 
