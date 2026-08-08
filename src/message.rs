@@ -271,9 +271,10 @@ pub type ConvertToLlm =
 /// Construct the default provider-message converter.
 ///
 /// User text and images become user content parts. Assistant text, reasoning, signatures, and tool
-/// calls are preserved. Tool-result text blocks are joined with newlines, while each image becomes
-/// the literal placeholder `[image omitted]`; tool metadata is not sent. [`CustomMessage`] values
-/// are intentionally filtered out.
+/// calls are preserved. Tool-result text blocks are joined with newlines into the `ToolResponse`
+/// content, while each image becomes a [`genai::chat::Binary`] attachment in `ToolResponse::parts`
+/// (base64 data, media type, and optional name preserved); tool metadata is not sent.
+/// [`CustomMessage`] values are intentionally filtered out.
 pub fn default_convert_to_llm() -> ConvertToLlm {
     Arc::new(|messages| Box::pin(async move { convert_messages_to_llm(&messages) }))
 }
@@ -337,22 +338,126 @@ fn convert_message_to_llm(message: &AgentMessage) -> Option<ChatMessage> {
             Some(ChatMessage::assistant(MessageContent::from_parts(parts)))
         }
         AgentMessage::ToolResult(result) => {
-            let content = result
-                .content
-                .iter()
-                .map(|part| match part {
-                    ToolResultContent::Text { text } => text.clone(),
-                    ToolResultContent::Image { .. } => "[image omitted]".to_string(),
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            // Constructor form instead of a struct literal so this compiles identically against
-            // upstream genai main and forks that append optional `ToolResponse` fields.
-            Some(ChatMessage::tool(
-                ToolResponse::new(result.tool_call_id.clone(), content)
-                    .with_fn_name(result.tool_name.clone()),
-            ))
+            let mut texts = Vec::new();
+            let mut binaries = Vec::new();
+            for part in &result.content {
+                match part {
+                    ToolResultContent::Text { text } => texts.push(text.clone()),
+                    ToolResultContent::Image {
+                        data,
+                        mime_type,
+                        name,
+                    } => binaries.push(Binary::from_base64(
+                        mime_type.clone(),
+                        data.clone(),
+                        name.clone(),
+                    )),
+                }
+            }
+            // Text blocks join into `content` exactly as before; images ride as native binary
+            // attachments in `ToolResponse::parts`. The `parts` field and `with_parts` builder
+            // require the agentprism genai fork (upstream PR #277); text-only results leave
+            // `parts` unset so their serialization is unchanged.
+            let mut response = ToolResponse::new(result.tool_call_id.clone(), texts.join("\n"))
+                .with_fn_name(result.tool_name.clone());
+            if !binaries.is_empty() {
+                response = response.with_parts(binaries);
+            }
+            Some(ChatMessage::tool(response))
         }
         AgentMessage::Custom(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use genai::chat::{BinarySource, ChatRole};
+
+    const PNG_DATA: &str = "aGVsbG8tcG5n";
+    const PNG_MIME: &str = "image/png";
+
+    fn convert_tool_result(message: ToolResultMessage) -> ToolResponse {
+        let mut converted = convert_messages_to_llm(&[AgentMessage::ToolResult(message)]);
+        assert_eq!(converted.len(), 1);
+        let chat_message = converted.remove(0);
+        assert_eq!(chat_message.role, ChatRole::Tool);
+        let mut responses = chat_message.content.into_tool_responses();
+        assert_eq!(responses.len(), 1);
+        responses.remove(0)
+    }
+
+    fn assert_base64(source: &BinarySource, expected: &str) {
+        match source {
+            BinarySource::Base64(data) => assert_eq!(data.as_ref(), expected),
+            BinarySource::Url(url) => panic!("expected base64 source, got url {url}"),
+        }
+    }
+
+    #[test]
+    fn tool_result_text_and_image_becomes_content_plus_binary_part() {
+        let message = ToolResultMessage::new(
+            "call-1",
+            "screenshot",
+            vec![
+                ToolResultContent::text("captured the page"),
+                ToolResultContent::Image {
+                    data: PNG_DATA.into(),
+                    mime_type: PNG_MIME.into(),
+                    name: Some("page.png".into()),
+                },
+            ],
+        );
+
+        let response = convert_tool_result(message);
+
+        assert_eq!(response.call_id, "call-1");
+        assert_eq!(response.fn_name.as_deref(), Some("screenshot"));
+        assert_eq!(response.content, "captured the page");
+        let parts = response
+            .parts
+            .expect("image should attach as a binary part");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].content_type, PNG_MIME);
+        assert_eq!(parts[0].name.as_deref(), Some("page.png"));
+        assert_base64(&parts[0].source, PNG_DATA);
+    }
+
+    #[test]
+    fn tool_result_image_only_becomes_empty_content_with_binary_part() {
+        let message = ToolResultMessage::new(
+            "call-2",
+            "screenshot",
+            vec![ToolResultContent::image(PNG_DATA, PNG_MIME)],
+        );
+
+        let response = convert_tool_result(message);
+
+        assert_eq!(response.content, "");
+        assert!(!response.content.contains("[image omitted]"));
+        let parts = response
+            .parts
+            .expect("image should attach as a binary part");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].content_type, PNG_MIME);
+        assert_eq!(parts[0].name, None);
+        assert_base64(&parts[0].source, PNG_DATA);
+    }
+
+    #[test]
+    fn tool_result_text_only_joins_content_and_leaves_parts_unset() {
+        let message = ToolResultMessage::new(
+            "call-3",
+            "reader",
+            vec![
+                ToolResultContent::text("line one"),
+                ToolResultContent::text("line two"),
+            ],
+        );
+
+        let response = convert_tool_result(message);
+
+        assert_eq!(response.content, "line one\nline two");
+        assert!(response.parts.is_none());
     }
 }

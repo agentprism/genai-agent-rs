@@ -28,9 +28,14 @@ The minimum supported Rust version is 1.88.
 ```toml
 [dependencies]
 rust-genai-agent = "0.2.0"
-genai = "0.7.0-beta.18"
+genai = { git = "https://github.com/agentprism/rust-genai", branch = "feat/exec-interceptors-error-headers-tool-parts" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
+
+> **Note:** this release line builds against the [agentprism `genai` fork](https://github.com/agentprism/rust-genai)
+> as a git dependency until upstream [PR #277](https://github.com/jeremychone/rust-genai/pull/277)
+> merges. The crate uses APIs that PR introduces (for example `ToolResponse::parts`), so a plain
+> crates.io `genai` version field cannot resolve them.
 
 The feature layers are intentionally small:
 
@@ -200,13 +205,13 @@ sandbox for untrusted servers.
 
 | Area | Contract or deliberate difference |
 |---|---|
-| Mapped behavior | The pinned non-harness matrix is 55/55 green with no mapped divergence. The M1-M6 checkpoint contained 112 green tests; release-hardening regressions and upstream/production-parity additions bring the current all-feature suite to 149/149. |
+| Mapped behavior | The pinned non-harness matrix is 55/55 green with no mapped divergence. The M1-M6 checkpoint contained 112 green tests; release-hardening regressions and upstream/production-parity additions bring the current all-feature suite to 152/152. |
 | Hook snapshots and failure contract | Async hook contexts own cloned transcript/context snapshots (the before-tool hook alone borrows its local context mutably so it can replace arguments). Hook return types are intentionally infallible rather than `Result`-shaped. A panic is a programming fault: `Agent` synthesizes an in-band failure lifecycle, spawned `agent_loop` reports `LoopError::TaskPanicked`, and direct `run_agent_loop` callers retain normal Rust unwind responsibility. |
 | Unbounded observation/update policy | Spawned loop events and internal parallel tool-update handoff are unbounded so observers cannot change execution ordering or deadlock tool tasks. Tool `UpdateSink::emit` is synchronous and returns whether the update was accepted; producers must choose a sensible update rate. Use the awaited loop API when consumer backpressure is required. |
 | Same-sink re-entry | `UpdateSink` serializes `emit` and `close` across clones and runs the callback while holding its gate. That callback must not call `emit`, `close`, or `is_closed` on the same sink or a clone; same-sink re-entry would deadlock. |
 | Proxy wire protocol | The compact SSE event protocol is TypeScript-compatible (snake-case tags, `contentIndex`, `toolUse`), but the request body is this crate's own `ProxyRequestV1` schema, not the pi `proxy.ts` request contract. Servers implementing the TypeScript request contract cannot serve this client without translation. |
 | Proxy trust boundary | Tool-argument parsing is capped, URL userinfo is rejected, and the built-in client does not redirect, but SSE/text buffering is unbounded. Production callers must use HTTPS and trust the endpoint; injected HTTP clients retain their caller-selected redirect policy. Extra request headers/body may carry secrets even though transport and resolved target credentials are excluded from the wire DTO. |
-| `genai` foundation limits | `ModelSpec` identifies a target but `genai` carries no context-window or price catalog. Token accounting is native, but monetary cost is opt-in: `AgentUsage::cost` stays `None` unless an application supplies a `PriceCatalog`. User images are supported, but `genai::chat::ToolResponse` is text-only, so tool-result images become an `[image omitted]` marker when converted back to the model. |
+| `genai` foundation limits | `ModelSpec` identifies a target but `genai` carries no context-window or price catalog. Token accounting is native, but monetary cost is opt-in: `AgentUsage::cost` stays `None` unless an application supplies a `PriceCatalog`. User and tool-result images are supported: user images become content parts, and tool-result images attach as `genai::chat::ToolResponse` binary `parts` (an agentprism-fork API until upstream PR #277 merges; see Installation). |
 | Cost accounting | `AgentUsage` also carries `cache_write_1h_tokens` and `reasoning_tokens` (both mapped from `genai::chat::Usage` details; genai zero-elides `reasoning_tokens`, so `Some(0)` is unreachable through it). `AgentCost` + the injectable `PriceCatalog` port pi-ai's model-catalog cost step (`models.ts` `calculateCost`): the highest tier whose `input_tokens_above` is strictly below the request's `input + cache_read + cache_write` count prices the whole request. pi-ai's hardcoded Anthropic "1h writes at 2x base input" rule is generalized to an explicit `cache_write_1h` rate (falling back to `cache_write` when unset). Cost is attached at stream finalization by `GenaiStreamFn::with_price_catalog`; `AgentConfig::price_catalog` is a convenience store the application installs on the stream function it builds — the facade constructs no stream functions and applies no catalog itself. |
 | Thinking-budget resolution | The `ThinkingBudgets` map mirrors pi-ai's per-level budgets and `clampReasoning` (`xhigh`/`max` → `high`), but has **no implicit default budget table** (an entry must be configured or the named level falls back) and omits pi-ai's maxTokens-fitting step, which is impossible without the model catalog `genai` does not carry. |
 | Transport advisory | `Transport` is accepted and forwarded on every `StreamRequest`, but the SSE-only `GenaiStreamFn` ignores it. The TypeScript contract states providers that do not support a requested transport ignore it, so ignoring it is compliant; custom `StreamFn` implementations may honor it. |

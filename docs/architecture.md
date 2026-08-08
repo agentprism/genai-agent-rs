@@ -256,7 +256,7 @@ pub struct Agent { /* state: RwLock<AgentState>, listeners, queues, active run h
 | # | Topic | Decision |
 |---|---|---|
 | 1 | **Tool-call streaming granularity** | genai `ToolCallChunk` = cumulative snapshot with raw-JSON-string args → salvage-parse per chunk; final parse at `StreamEnd`. Preserves pi's toolcall_delta UX. |
-| 2 | **Images in tool results** | genai `ToolResponse.content` is `String`. v1: join text parts, replace image parts with `[image omitted]` marker; revisit if genai widens `ToolResponse`. |
+| 2 | **Images in tool results** | The agentprism genai fork widens `ToolResponse` with optional binary `parts` (upstream PR #277): text parts join into `content`, image parts attach as `Binary` attachments. (v1 replaced images with an `[image omitted]` marker while `ToolResponse` was text-only.) |
 | 3 | **`getApiKey` per-call** | Not per-call in genai; expiring tokens are handled natively via `Client::builder().with_auth_resolver_async_fn`. Document as the pattern; no agent-level hook. |
 | 4 | **`onPayload` / `onResponse`** | No genai equivalent. Omit in v1 (response inspection partially covered by `capture_raw_body`). Candidate upstream addition. |
 | 5 | **Cost accounting in `Usage`** | genai has no price catalog → `AgentUsage` carries token counts only; `cost` omitted. |
