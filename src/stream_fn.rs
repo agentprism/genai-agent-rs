@@ -7,13 +7,18 @@
 
 use crate::{
     AssistantAccumulator, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream,
-    PriceCatalog, StopReason, Transport, compute_cost,
+    OnPayloadHook, OnResponseHook, PriceCatalog, StopReason, StreamResponseInfo, Transport,
+    compute_cost,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
+use futures::future::BoxFuture;
 use genai::adapter::AdapterKind;
 use genai::chat::{ChatMessage, ChatOptions, ChatRequest, Tool};
-use genai::{Client, ModelIden, ModelSpec};
+use genai::{Client, ClientBuilder, ModelIden, ModelSpec, PayloadInterceptor, ResponseObserver};
+use reqwest::StatusCode;
+use reqwest::header::HeaderMap;
+use serde_json::Value;
 use std::collections::VecDeque;
 use std::sync::{Arc, OnceLock, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -47,7 +52,7 @@ impl LlmContext {
 }
 
 /// One invocation captured at the sole provider boundary.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct StreamRequest {
     /// Model name, identity, or fully targeted provider selection.
@@ -62,19 +67,51 @@ pub struct StreamRequest {
     /// because genai speaks SSE only; the TypeScript contract states that providers which do not
     /// support the requested transport ignore it, so ignoring it is compliant.
     pub transport: Transport,
+    /// Optional pre-send payload hook for this invocation (pi's `onPayload`).
+    ///
+    /// The agent loop forwards the configured hook here so custom [`StreamFn`] implementations
+    /// and the `proxy`-feature `ProxyStreamFn` can honor it per request. The production
+    /// [`GenaiStreamFn`] ignores this field: the genai fork's payload interceptor is
+    /// client-level, so it must be installed at construction time via
+    /// [`GenaiStreamFn::with_exec_hooks`] (pass the same hook in both places).
+    pub on_payload: Option<OnPayloadHook>,
+    /// Optional response observation hook for this invocation (pi's `onResponse`).
+    ///
+    /// The agent loop forwards the configured hook here so custom [`StreamFn`] implementations
+    /// and the `proxy`-feature `ProxyStreamFn` can honor it per request. The production
+    /// [`GenaiStreamFn`] ignores this field: the genai fork's response observer is client-level,
+    /// so it must be installed at construction time via [`GenaiStreamFn::with_exec_hooks`] (pass
+    /// the same hook in both places).
+    pub on_response: Option<OnResponseHook>,
     /// Cooperative cancellation token for setup and streaming.
     pub cancel: CancellationToken,
 }
 
+impl std::fmt::Debug for StreamRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamRequest")
+            .field("model", &self.model)
+            .field("context", &self.context)
+            .field("options", &self.options)
+            .field("transport", &self.transport)
+            .field("on_payload", &self.on_payload.is_some())
+            .field("on_response", &self.on_response.is_some())
+            .field("cancel", &self.cancel)
+            .finish_non_exhaustive()
+    }
+}
+
 impl StreamRequest {
-    /// Construct a request with default chat options, the default transport, and a fresh
-    /// cancellation token.
+    /// Construct a request with default chat options, the default transport, no exec hooks, and a
+    /// fresh cancellation token.
     pub fn new(model: impl Into<ModelSpec>, context: LlmContext) -> Self {
         Self {
             model: model.into(),
             context,
             options: ChatOptions::default(),
             transport: Transport::default(),
+            on_payload: None,
+            on_response: None,
             cancel: CancellationToken::new(),
         }
     }
@@ -88,6 +125,18 @@ impl StreamRequest {
     /// Replace the preferred provider transport advisory.
     pub fn with_transport(mut self, transport: Transport) -> Self {
         self.transport = transport;
+        self
+    }
+
+    /// Install the per-invocation pre-send payload hook (see [`StreamRequest::on_payload`]).
+    pub fn with_on_payload(mut self, on_payload: OnPayloadHook) -> Self {
+        self.on_payload = Some(on_payload);
+        self
+    }
+
+    /// Install the per-invocation response observation hook (see [`StreamRequest::on_response`]).
+    pub fn with_on_response(mut self, on_response: OnResponseHook) -> Self {
+        self.on_response = Some(on_response);
         self
     }
 
@@ -126,6 +175,10 @@ where
 ///
 /// Capture options are forced on every invocation because `StreamEnd` is the authoritative source
 /// for final content, parsed tool arguments, usage, stop reason, and response id.
+///
+/// `on_payload`/`on_response` exec hooks are construction-time only for this adapter (see
+/// [`GenaiStreamFn::with_exec_hooks`]); the per-request [`StreamRequest`] hook fields are
+/// intentionally ignored because the genai fork's interceptors are client-level.
 #[derive(Clone)]
 pub struct GenaiStreamFn {
     /// `genai` client used for provider execution.
@@ -160,6 +213,41 @@ impl GenaiStreamFn {
         }
     }
 
+    /// Construct an adapter whose `genai` client is built from `builder` with construction-time
+    /// `on_payload`/`on_response` exec hooks installed.
+    ///
+    /// The genai fork's exec hooks ([`PayloadInterceptor`] / [`ResponseObserver`]) are
+    /// **client-level**, and a built [`Client`] cannot be reconfigured, so this adapter wires the
+    /// crate-level hooks once at construction — mirroring how pi wires `onPayload`/`onResponse`
+    /// once at its production `Agent` construction site. Consequently [`GenaiStreamFn`] ignores
+    /// the per-request [`StreamRequest::on_payload`]/[`StreamRequest::on_response`] fields;
+    /// applications that also want custom stream functions or the proxy to see the hooks should
+    /// pass the same hooks both here and on [`crate::AgentConfig`].
+    ///
+    /// `on_payload` fires with the serialized provider payload before the HTTP request is built
+    /// (`Some` replaces the wire payload). `on_response` fires with the response status and
+    /// headers as soon as the HTTP response arrives — before its body/stream is consumed and also
+    /// on 4xx/5xx. On genai's streaming path the HTTP send is lazy, so both fire during the first
+    /// stream poll rather than at [`StreamFn::stream`] return time.
+    ///
+    /// Applications that need additional client configuration (auth resolvers, custom reqwest
+    /// clients, ...) apply it to the supplied `builder`; alternatively they can install
+    /// [`payload_interceptor_from_hook`] / [`response_observer_from_hook`] on their own
+    /// `ClientBuilder` and use [`GenaiStreamFn::new`].
+    pub fn with_exec_hooks(
+        mut builder: ClientBuilder,
+        on_payload: Option<OnPayloadHook>,
+        on_response: Option<OnResponseHook>,
+    ) -> Self {
+        if let Some(on_payload) = on_payload {
+            builder = builder.with_payload_interceptor(payload_interceptor_from_hook(on_payload));
+        }
+        if let Some(on_response) = on_response {
+            builder = builder.with_response_observer(response_observer_from_hook(on_response));
+        }
+        Self::new(builder.build())
+    }
+
     /// Replace the options inherited by future invocations.
     ///
     /// Per-request `Some` fields override these values; required final-content, tool-call, usage,
@@ -190,6 +278,11 @@ impl StreamFn for GenaiStreamFn {
             // genai speaks SSE only, so the transport advisory is intentionally ignored here. The
             // TypeScript contract makes ignoring an unsupported transport compliant.
             transport: _,
+            // The genai fork's exec hooks are client-level, so the per-request hooks are
+            // intentionally ignored here; install them at construction time via
+            // `GenaiStreamFn::with_exec_hooks` (see the `StreamRequest` field docs).
+            on_payload: _,
+            on_response: _,
             cancel,
         } = request;
         let error_model = model_iden_for_error(&model);
@@ -276,6 +369,60 @@ pub fn attach_cost(catalog: &dyn PriceCatalog, event: &mut AssistantMessageEvent
     if let Some(model_cost) = catalog.cost_model(&message.model) {
         message.usage.cost = Some(compute_cost(&message.usage, &model_cost));
     }
+}
+
+/// Adapt a crate-level [`OnPayloadHook`] into the genai fork's client-level
+/// [`PayloadInterceptor`].
+///
+/// The returned interceptor delegates every call to the hook, forwarding the serialized provider
+/// payload and target [`ModelIden`] unchanged; `Some` replaces the wire payload and `None` keeps
+/// it. [`GenaiStreamFn::with_exec_hooks`] installs this adapter for you; it is public so
+/// applications building their own `genai` [`ClientBuilder`] can install the exact same
+/// delegation with [`ClientBuilder::with_payload_interceptor`].
+pub fn payload_interceptor_from_hook(hook: OnPayloadHook) -> PayloadInterceptor {
+    PayloadInterceptor::from_interceptor_async_fn(
+        move |model_iden: ModelIden, payload: Value| -> BoxFuture<'static, Option<Value>> {
+            hook(payload, model_iden)
+        },
+    )
+}
+
+/// Adapt a crate-level [`OnResponseHook`] into the genai fork's client-level [`ResponseObserver`].
+///
+/// The returned observer converts the response head into a [`StreamResponseInfo`] (via
+/// [`header_pairs`]) and delegates to the hook with the target [`ModelIden`].
+/// [`GenaiStreamFn::with_exec_hooks`] installs this adapter for you; it is public so applications
+/// building their own `genai` [`ClientBuilder`] can install the exact same delegation with
+/// [`ClientBuilder::with_response_observer`].
+pub fn response_observer_from_hook(hook: OnResponseHook) -> ResponseObserver {
+    ResponseObserver::from_observer_async_fn(
+        move |model_iden: ModelIden,
+              status: StatusCode,
+              headers: HeaderMap|
+              -> BoxFuture<'static, ()> {
+            let info = StreamResponseInfo::new(status.as_u16(), header_pairs(&headers));
+            hook(info, model_iden)
+        },
+    )
+}
+
+/// Convert a response [`HeaderMap`] into the owned `(name, value)` pairs carried by
+/// [`StreamResponseInfo`].
+///
+/// Header names are reqwest-normalized (lowercase), a repeated header contributes one pair per
+/// value, and non-UTF-8 header values are lossily converted. Exposed so custom [`StreamFn`]
+/// implementations invoking an [`OnResponseHook`] build the same shape the built-in stream
+/// functions produce.
+pub fn header_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_owned(),
+                String::from_utf8_lossy(value.as_bytes()).into_owned(),
+            )
+        })
+        .collect()
 }
 
 fn force_capture_options(mut options: ChatOptions) -> ChatOptions {
@@ -484,6 +631,52 @@ mod tests {
         attach_cost(&catalog, &mut event);
 
         assert!(event.partial().usage.cost.is_none());
+    }
+
+    #[test]
+    fn header_pairs_normalizes_names_and_lossily_converts_values() {
+        let mut headers = HeaderMap::new();
+        headers.append("X-Repeated", "one".parse().unwrap());
+        headers.append("x-repeated", "two".parse().unwrap());
+        headers.insert(
+            "x-binary",
+            reqwest::header::HeaderValue::from_bytes(&[0x66, 0xFF, 0x6F]).unwrap(),
+        );
+
+        let pairs = header_pairs(&headers);
+
+        // reqwest normalizes header names to lowercase; repeats keep one pair per value.
+        assert_eq!(
+            pairs
+                .iter()
+                .filter(|(name, _)| name == "x-repeated")
+                .map(|(_, value)| value.as_str())
+                .collect::<Vec<_>>(),
+            ["one", "two"]
+        );
+        // Non-UTF-8 header values are lossily converted rather than dropped.
+        assert_eq!(
+            pairs
+                .iter()
+                .find(|(name, _)| name == "x-binary")
+                .map(|(_, value)| value.as_str()),
+            Some("f\u{FFFD}o")
+        );
+    }
+
+    #[test]
+    fn stream_response_info_header_lookup_is_case_insensitive() {
+        let info = StreamResponseInfo::new(
+            429,
+            vec![
+                ("retry-after".to_owned(), "2".to_owned()),
+                ("retry-after".to_owned(), "9".to_owned()),
+            ],
+        );
+        assert_eq!(info.status, 429);
+        // First value wins; lookup ignores ASCII case.
+        assert_eq!(info.header("Retry-After"), Some("2"));
+        assert_eq!(info.header("x-missing"), None);
     }
 
     /// Exercises the exact finalization wiring `GenaiStreamFn::stream` uses: `attach_cost` mapped

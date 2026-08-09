@@ -7,8 +7,8 @@ use rust_genai_agent::testing::{MockStreamFn, ScriptedStream, fixtures, script};
 use rust_genai_agent::{
     AfterToolCallHook, Agent, AgentConfig, AgentError, AgentPrepareNextTurnHook,
     AgentPrepareNextTurnWithContextHook, AgentShouldStopAfterTurnHook, BeforeToolCallHook,
-    BusyContext, ConvertToLlm, StreamFn, ThinkingBudgets, ThinkingLevel, ToolExecutionMode,
-    TransformContextHook, Transport, default_convert_to_llm,
+    BusyContext, ConvertToLlm, OnPayloadHook, OnResponseHook, StreamFn, ThinkingBudgets,
+    ThinkingLevel, ToolExecutionMode, TransformContextHook, Transport, default_convert_to_llm,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -258,6 +258,8 @@ async fn every_runtime_config_setter_rejects_updates_during_an_active_run() {
     let prepare: AgentPrepareNextTurnHook = Arc::new(|_cancel| Box::pin(async move { None }));
     let prepare_with_context: AgentPrepareNextTurnWithContextHook =
         Arc::new(|_context, _cancel| Box::pin(async move { None }));
+    let on_payload: OnPayloadHook = Arc::new(|_payload, _model| Box::pin(async move { None }));
+    let on_response: OnResponseHook = Arc::new(|_info, _model| Box::pin(async move {}));
 
     assert_eq!(
         agent.set_stream_fn(replacement_stream),
@@ -289,6 +291,14 @@ async fn every_runtime_config_setter_rejects_updates_during_an_active_run() {
     );
     assert_eq!(
         agent.set_prepare_next_turn_with_context(Some(prepare_with_context)),
+        Err(AgentError::Busy(BusyContext::Other))
+    );
+    assert_eq!(
+        agent.set_on_payload(Some(on_payload)),
+        Err(AgentError::Busy(BusyContext::Other))
+    );
+    assert_eq!(
+        agent.set_on_response(Some(on_response)),
         Err(AgentError::Busy(BusyContext::Other))
     );
     assert_eq!(

@@ -16,10 +16,12 @@ use rust_genai_agent::proxy::{
 };
 use rust_genai_agent::{
     AgentToolCall, AssistantContent, AssistantMessage, AssistantMessageEvent,
-    AssistantMessageEventStream, LlmContext, StopReason, StreamFn, StreamRequest,
+    AssistantMessageEventStream, LlmContext, OnPayloadHook, OnResponseHook, StopReason, StreamFn,
+    StreamRequest, StreamResponseInfo,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -1258,6 +1260,177 @@ async fn first_terminal_wins_and_stream_is_fused() {
         events.last(),
         Some(AssistantMessageEvent::Done { .. })
     ));
+}
+
+type SeenPayloads = Arc<Mutex<Vec<(Value, ModelIden)>>>;
+type SeenResponses = Arc<Mutex<Vec<(StreamResponseInfo, ModelIden)>>>;
+
+fn recording_on_payload(seen: SeenPayloads, replacement: Option<Value>) -> OnPayloadHook {
+    Arc::new(move |payload, model| {
+        let seen = seen.clone();
+        let replacement = replacement.clone();
+        Box::pin(async move {
+            seen.lock().unwrap().push((payload, model));
+            replacement
+        })
+    })
+}
+
+fn recording_on_response(seen: SeenResponses) -> OnResponseHook {
+    Arc::new(move |info, model| {
+        let seen = seen.clone();
+        Box::pin(async move {
+            seen.lock().unwrap().push((info, model));
+        })
+    })
+}
+
+#[tokio::test]
+async fn on_payload_replacement_is_what_goes_over_the_wire() {
+    let mut server = RawServer::spawn(ResponsePlan::one(success_sse())).await;
+    let options = ProxyStreamOptions::new(&server.base_url, "proxy-secret").expect("proxy options");
+    let seen: SeenPayloads = Arc::default();
+    let replacement = json!({"model": {"type": "name", "name": "gpt-4o"}, "x_intercepted": true});
+    let request = default_request("gpt-4o").with_on_payload(recording_on_payload(
+        seen.clone(),
+        Some(replacement.clone()),
+    ));
+
+    let (_, result) = collect_stream(stream_proxy(request, options).await).await;
+    assert_eq!(result.stop_reason, StopReason::Stop);
+
+    // The hook saw the original serialized wire body plus the model identity, never the token.
+    {
+        let payloads = seen.lock().unwrap();
+        assert_eq!(payloads.len(), 1);
+        let (payload, model) = &payloads[0];
+        assert_eq!(model, &ModelIden::new(AdapterKind::OpenAI, "gpt-4o"));
+        assert_eq!(
+            payload.pointer("/model/name").and_then(Value::as_str),
+            Some("gpt-4o")
+        );
+        assert_eq!(
+            payload
+                .pointer("/context/messages/0/content/0/text")
+                .and_then(Value::as_str),
+            Some("hello")
+        );
+        assert!(!payload.to_string().contains("proxy-secret"));
+    }
+
+    // The replacement is exactly what was posted; the original context is gone from the wire.
+    let captured = server.request().await;
+    assert_eq!(captured.json_body(), replacement);
+    let raw_body = String::from_utf8(captured.body).expect("JSON body is UTF-8");
+    assert!(!raw_body.contains("hello"));
+    assert!(!raw_body.contains("proxy-secret"));
+    assert_eq!(
+        captured.headers.get("authorization").map(String::as_str),
+        Some("Bearer proxy-secret")
+    );
+}
+
+#[tokio::test]
+async fn on_payload_returning_none_keeps_the_original_wire_body() {
+    let mut server = RawServer::spawn(ResponsePlan::one(success_sse())).await;
+    let options = ProxyStreamOptions::new(&server.base_url, "token").expect("proxy options");
+    let seen: SeenPayloads = Arc::default();
+    let request =
+        default_request("gpt-4o").with_on_payload(recording_on_payload(seen.clone(), None));
+
+    let (_, result) = collect_stream(stream_proxy(request, options).await).await;
+    assert_eq!(result.stop_reason, StopReason::Stop);
+
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    let captured = server.request().await;
+    assert_eq!(
+        captured.json_body(),
+        json!({
+            "model": {"type": "name", "name": "gpt-4o"},
+            "context": {
+                "systemPrompt": "You are helpful",
+                "messages": [{
+                    "role": "user",
+                    "content": [{"type": "text", "text": "hello"}]
+                }]
+            },
+            "options": {}
+        })
+    );
+}
+
+#[tokio::test]
+async fn on_response_observes_status_and_headers_on_success_before_the_sse_body() {
+    let body = sse_body([
+        json!({"type": "start"}),
+        json!({
+            "type": "done",
+            "reason": "stop",
+            "usage": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 0
+            }
+        }),
+    ]);
+    let mut response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nX-Obs-Test: obs-value\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    response.extend_from_slice(&body);
+    let server = RawServer::spawn(ResponsePlan::one(response)).await;
+    let options = ProxyStreamOptions::new(&server.base_url, "token").expect("proxy options");
+    let seen: SeenResponses = Arc::default();
+    let request = default_request("gpt-4o").with_on_response(recording_on_response(seen.clone()));
+
+    let (_, result) = collect_stream(stream_proxy(request, options).await).await;
+    assert_eq!(result.stop_reason, StopReason::Stop);
+
+    let responses = seen.lock().unwrap();
+    assert_eq!(responses.len(), 1);
+    let (info, model) = &responses[0];
+    assert_eq!(info.status, 200);
+    assert_eq!(info.header("x-obs-test"), Some("obs-value"));
+    assert_eq!(model, &ModelIden::new(AdapterKind::OpenAI, "gpt-4o"));
+}
+
+#[tokio::test]
+async fn on_response_observes_status_and_headers_on_a_non_ok_response() {
+    let error_body = br#"{"error":"quota exhausted"}"#;
+    let mut response = format!(
+        "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: 2\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        error_body.len()
+    )
+    .into_bytes();
+    response.extend_from_slice(error_body);
+    let server = RawServer::spawn(ResponsePlan::one(response)).await;
+    let options = ProxyStreamOptions::new(&server.base_url, "token").expect("proxy options");
+    let seen: SeenResponses = Arc::default();
+    let request = default_request("gpt-4o").with_on_response(recording_on_response(seen.clone()));
+
+    let (_, result) = collect_stream(stream_proxy(request, options).await).await;
+
+    // The observer fired on the failing response head: status plus headers, no body.
+    let responses = seen.lock().unwrap();
+    assert_eq!(responses.len(), 1);
+    let (info, _) = &responses[0];
+    assert_eq!(info.status, 429);
+    assert_eq!(info.header("retry-after"), Some("2"));
+    assert!(
+        !format!("{info:?}").contains("quota exhausted"),
+        "the observer must never receive body content"
+    );
+    drop(responses);
+
+    // The in-band error resolution afterwards is unchanged.
+    assert_eq!(result.stop_reason, StopReason::Error);
+    assert_eq!(
+        result.error_message.as_deref(),
+        Some("Proxy error: quota exhausted")
+    );
 }
 
 #[tokio::test]

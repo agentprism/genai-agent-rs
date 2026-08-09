@@ -13,7 +13,7 @@ categories = ["asynchronous", "api-bindings"]
 [features]
 default = []
 testing = []
-proxy = ["dep:reqwest", "dep:eventsource-stream", "tokio/net", "tokio/io-util"]
+proxy = ["dep:eventsource-stream", "tokio/net", "tokio/io-util"]
 
 [dependencies]
 genai = { version = "0.7.0-beta.18", path = "../rust-genai" }
@@ -21,9 +21,16 @@ async-trait = "0.1"
 eventsource-stream = { version = "0.2.3", optional = true }
 futures = "0.3"
 jsonschema = { version = "0.49", default-features = false }
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream"], optional = true }
+# Non-optional (not just `proxy`): the exec-hook adapters in `stream_fn` name
+# `reqwest::StatusCode`/`HeaderMap` because the genai fork's interceptor signatures use them.
+# reqwest is already a mandatory transitive dependency of genai, so this adds no tree weight.
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+
+[dev-dependencies]
+# Local one-shot capture servers for the GenaiStreamFn exec-hook wiring tests.
+tokio = { version = "1", features = ["net", "io-util"] }

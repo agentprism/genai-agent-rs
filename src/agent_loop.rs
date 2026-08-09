@@ -511,10 +511,15 @@ where
             .map(|tool| tool.spec().to_genai())
             .collect(),
     };
-    let request = StreamRequest::new(config.model.clone(), llm_context)
+    // The exec hooks are forwarded as handles, not invoked here: honoring them is a
+    // stream-function concern (custom `StreamFn`s and the proxy honor them per request; the
+    // client-level `GenaiStreamFn` applies its construction-time hooks instead).
+    let mut request = StreamRequest::new(config.model.clone(), llm_context)
         .with_options(config.chat_options.clone())
         .with_transport(config.transport)
         .with_cancellation(cancel.clone());
+    request.on_payload = config.on_payload.clone();
+    request.on_response = config.on_response.clone();
     let mut response = stream_fn.stream(request).await;
     let final_result = response.result_handle();
 

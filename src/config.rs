@@ -6,9 +6,9 @@
 //! later turns without borrowing caller-owned configuration.
 
 use crate::{
-    AfterToolCallHook, AgentMessage, AgentTool, BeforeToolCallHook, ConvertToLlm,
-    PrepareNextTurnHook, QueueMessagesHook, ShouldStopAfterTurnHook, TransformContextHook,
-    default_convert_to_llm,
+    AfterToolCallHook, AgentMessage, AgentTool, BeforeToolCallHook, ConvertToLlm, OnPayloadHook,
+    OnResponseHook, PrepareNextTurnHook, QueueMessagesHook, ShouldStopAfterTurnHook,
+    TransformContextHook, default_convert_to_llm,
 };
 use genai::ModelSpec;
 use genai::chat::{ChatOptions, ReasoningEffort};
@@ -278,6 +278,16 @@ pub struct AgentLoopConfig {
     /// The loop copies this value; it does not interpret it. Honoring it is a stream-function
     /// concern, and the SSE-only [`crate::GenaiStreamFn`] ignores it.
     pub transport: Transport,
+    /// Optional pre-send payload hook forwarded onto each [`crate::StreamRequest`].
+    ///
+    /// The loop forwards the handle without invoking it; honoring it is a stream-function
+    /// concern (see [`OnPayloadHook`] for which built-in stream functions apply it where).
+    pub on_payload: Option<OnPayloadHook>,
+    /// Optional response observation hook forwarded onto each [`crate::StreamRequest`].
+    ///
+    /// The loop forwards the handle without invoking it; honoring it is a stream-function
+    /// concern (see [`OnResponseHook`] for which built-in stream functions apply it where).
+    pub on_response: Option<OnResponseHook>,
     /// Provider options cloned into each stream request.
     pub chat_options: ChatOptions,
 }
@@ -304,6 +314,8 @@ impl std::fmt::Debug for AgentLoopConfig {
             .field("after_tool_call", &self.after_tool_call.is_some())
             .field("tool_execution", &self.tool_execution)
             .field("transport", &self.transport)
+            .field("on_payload", &self.on_payload.is_some())
+            .field("on_response", &self.on_response.is_some())
             .field("chat_options", &self.chat_options)
             .finish_non_exhaustive()
     }
@@ -324,6 +336,8 @@ impl AgentLoopConfig {
             after_tool_call: None,
             tool_execution: ToolExecutionMode::Parallel,
             transport: Transport::Auto,
+            on_payload: None,
+            on_response: None,
             chat_options: ChatOptions::default(),
         }
     }
@@ -391,6 +405,18 @@ impl AgentLoopConfig {
     /// Install the post-execution tool hook.
     pub fn with_after_tool_call(mut self, after_tool_call: AfterToolCallHook) -> Self {
         self.after_tool_call = Some(after_tool_call);
+        self
+    }
+
+    /// Install the pre-send payload hook forwarded onto each stream request.
+    pub fn with_on_payload(mut self, on_payload: OnPayloadHook) -> Self {
+        self.on_payload = Some(on_payload);
+        self
+    }
+
+    /// Install the response observation hook forwarded onto each stream request.
+    pub fn with_on_response(mut self, on_response: OnResponseHook) -> Self {
+        self.on_response = Some(on_response);
         self
     }
 }

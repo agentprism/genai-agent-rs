@@ -13,8 +13,8 @@ use crate::{
     AfterToolCallHook, AgentContext, AgentError, AgentEvent, AgentLoopConfig, AgentMessage,
     AgentPrepareNextTurnHook, AgentPrepareNextTurnWithContextHook, AgentShouldStopAfterTurnHook,
     AgentTool, AssistantContent, AssistantMessage, BeforeToolCallHook, BusyContext, ConvertToLlm,
-    PriceCatalog, QueueMode, StopReason, StreamFn, ThinkingBudgets, ThinkingLevel,
-    ToolExecutionMode, TransformContextHook, Transport, UserContent, UserMessage,
+    OnPayloadHook, OnResponseHook, PriceCatalog, QueueMode, StopReason, StreamFn, ThinkingBudgets,
+    ThinkingLevel, ToolExecutionMode, TransformContextHook, Transport, UserContent, UserMessage,
     default_convert_to_llm, get_default_stream_fn, run_agent_loop, run_agent_loop_continue,
 };
 use futures::FutureExt;
@@ -137,6 +137,24 @@ pub struct AgentConfig {
     ///
     /// When both preparation hook fields are set, this context-aware hook takes precedence.
     pub prepare_next_turn_with_context: Option<AgentPrepareNextTurnWithContextHook>,
+    /// Optional pre-send payload hook forwarded onto each run's stream requests (pi's
+    /// `onPayload`).
+    ///
+    /// The facade forwards the handle; honoring it is a stream-function concern. Custom
+    /// [`StreamFn`] implementations and the `proxy`-feature `ProxyStreamFn` honor the forwarded
+    /// per-request hook, while [`crate::GenaiStreamFn`] applies only hooks installed at its
+    /// construction ([`crate::GenaiStreamFn::with_exec_hooks`]) — pass the same hook in both
+    /// places, mirroring pi's single construction-site wiring.
+    pub on_payload: Option<OnPayloadHook>,
+    /// Optional response observation hook forwarded onto each run's stream requests (pi's
+    /// `onResponse`).
+    ///
+    /// The facade forwards the handle; honoring it is a stream-function concern. Custom
+    /// [`StreamFn`] implementations and the `proxy`-feature `ProxyStreamFn` honor the forwarded
+    /// per-request hook, while [`crate::GenaiStreamFn`] applies only hooks installed at its
+    /// construction ([`crate::GenaiStreamFn::with_exec_hooks`]) — pass the same hook in both
+    /// places, mirroring pi's single construction-site wiring.
+    pub on_response: Option<OnResponseHook>,
     /// Cache-affinity/session identifier mapped to `ChatOptions::prompt_cache_key`.
     ///
     /// If absent at construction, the initial chat option's prompt-cache key becomes this value.
@@ -196,6 +214,8 @@ impl std::fmt::Debug for AgentConfig {
                 "prepare_next_turn_with_context",
                 &self.prepare_next_turn_with_context.is_some(),
             )
+            .field("on_payload", &self.on_payload.is_some())
+            .field("on_response", &self.on_response.is_some())
             .field("session_id", &self.session_id)
             .field("steering_mode", &self.steering_mode)
             .field("follow_up_mode", &self.follow_up_mode)
@@ -220,6 +240,8 @@ impl Default for AgentConfig {
             should_stop_after_turn: None,
             prepare_next_turn: None,
             prepare_next_turn_with_context: None,
+            on_payload: None,
+            on_response: None,
             session_id: None,
             steering_mode: QueueMode::OneAtATime,
             follow_up_mode: QueueMode::OneAtATime,
@@ -316,6 +338,20 @@ impl AgentConfig {
         prepare_next_turn_with_context: AgentPrepareNextTurnWithContextHook,
     ) -> Self {
         self.prepare_next_turn_with_context = Some(prepare_next_turn_with_context);
+        self
+    }
+
+    /// Install the pre-send payload hook forwarded onto each run's stream requests (see
+    /// [`Self::on_payload`]).
+    pub fn with_on_payload(mut self, on_payload: OnPayloadHook) -> Self {
+        self.on_payload = Some(on_payload);
+        self
+    }
+
+    /// Install the response observation hook forwarded onto each run's stream requests (see
+    /// [`Self::on_response`]).
+    pub fn with_on_response(mut self, on_response: OnResponseHook) -> Self {
+        self.on_response = Some(on_response);
         self
     }
 
@@ -755,6 +791,24 @@ impl Agent {
         self.update_runtime_config(move |config| {
             config.prepare_next_turn_with_context = prepare_next_turn;
         })
+    }
+
+    /// Replace or clear the pre-send payload hook for the next run.
+    ///
+    /// Runtime configuration may only be changed between runs; this returns
+    /// [`AgentError::Busy`] while a prompt or continuation is active. See
+    /// [`AgentConfig::on_payload`] for which stream functions honor the forwarded hook.
+    pub fn set_on_payload(&self, on_payload: Option<OnPayloadHook>) -> Result<(), AgentError> {
+        self.update_runtime_config(move |config| config.on_payload = on_payload)
+    }
+
+    /// Replace or clear the response observation hook for the next run.
+    ///
+    /// Runtime configuration may only be changed between runs; this returns
+    /// [`AgentError::Busy`] while a prompt or continuation is active. See
+    /// [`AgentConfig::on_response`] for which stream functions honor the forwarded hook.
+    pub fn set_on_response(&self, on_response: Option<OnResponseHook>) -> Result<(), AgentError> {
+        self.update_runtime_config(move |config| config.on_response = on_response)
     }
 
     /// Replace the tool execution strategy for the next run.
@@ -1362,6 +1416,8 @@ impl Agent {
             after_tool_call: runtime.after_tool_call,
             tool_execution: runtime.tool_execution,
             transport: runtime.transport,
+            on_payload: runtime.on_payload,
+            on_response: runtime.on_response,
             chat_options,
         }
     }

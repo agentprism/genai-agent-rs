@@ -12,7 +12,9 @@
 
 use super::accumulator::ProxyAccumulator;
 use super::{ProxyConfigError, ProxyRequestV1, ProxyStreamOptions};
-use crate::{AssistantMessageEventStream, StreamFn, StreamRequest};
+use crate::{
+    AssistantMessageEventStream, StreamFn, StreamRequest, StreamResponseInfo, header_pairs,
+};
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
@@ -32,6 +34,10 @@ const MAX_HTTP_ERROR_BODY_BYTES: usize = 64 * 1024;
 /// Clones retain the validated endpoint, bearer token, and cloneable HTTP client. The token remains
 /// redacted by `Debug`. Options created by [`Self::new`] disable redirects; [`Self::with_client`]
 /// installs the caller's client and therefore its redirect policy.
+///
+/// Unlike [`crate::GenaiStreamFn`], this stream function honors the per-request
+/// [`StreamRequest::on_payload`]/[`StreamRequest::on_response`] exec hooks directly; see
+/// [`stream_proxy`] for their exact semantics.
 #[derive(Clone)]
 pub struct ProxyStreamFn {
     options: ProxyStreamOptions,
@@ -99,6 +105,11 @@ impl StreamFn for ProxyStreamFn {
 /// becomes an in-band error without sending a request. The configured bearer token is attached only
 /// as transport authentication and is absent from the JSON DTO.
 ///
+/// The per-request exec hooks on [`StreamRequest`] are honored directly: `on_payload` receives the
+/// serialized wire body before send and a `Some` return replaces what is posted (the hook never
+/// sees the bearer token, which is transport-level only), and `on_response` observes the HTTP
+/// response status and headers before the SSE body — or a non-success error body — is consumed.
+///
 /// Whitespace-only SSE `data` fields are ignored. HTTP, transport, event decoding, protocol,
 /// resource-limit, server-reported, and cancellation failures all become terminal assistant events;
 /// cancellation uses `StopReason::Aborted`, accumulated content is preserved, and the returned
@@ -124,8 +135,29 @@ pub async fn stream_proxy(
         .client()
         .post(options.endpoint().clone())
         .bearer_auth(options.auth_token())
-        .header(reqwest::header::ACCEPT, "text/event-stream")
-        .json(&wire_request);
+        .header(reqwest::header::ACCEPT, "text/event-stream");
+    // Per-request `on_payload` exec hook: the serialized wire body (which already excludes the
+    // bearer token and any resolved-target credentials) is handed to the hook by value, and a
+    // `Some` return replaces what is sent. Without a hook the DTO is serialized directly,
+    // keeping the pre-hook wire bytes unchanged.
+    let http_request = match &request.on_payload {
+        Some(on_payload) => {
+            let payload = match serde_json::to_value(&wire_request) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    return ProxyAccumulator::request_error(
+                        error_model,
+                        format!("Failed to serialize proxy request: {error}"),
+                    );
+                }
+            };
+            let payload = on_payload(payload.clone(), error_model.clone())
+                .await
+                .unwrap_or(payload);
+            http_request.json(&payload)
+        }
+        None => http_request.json(&wire_request),
+    };
 
     let response = tokio::select! {
         biased;
@@ -143,6 +175,14 @@ pub async fn stream_proxy(
             );
         }
     };
+
+    // Per-request `on_response` exec hook: observe the response head (status + headers, never
+    // the body) before any body/stream consumption, including on non-success statuses.
+    if let Some(on_response) = &request.on_response {
+        let info =
+            StreamResponseInfo::new(response.status().as_u16(), header_pairs(response.headers()));
+        on_response(info, error_model.clone()).await;
+    }
 
     if !response.status().is_success() {
         let status = response.status();
