@@ -222,10 +222,17 @@ fn convert_tool_message(message: &ChatMessage, items: &mut Vec<Value>) {
     for part in message.content.parts() {
         if let ContentPart::ToolResponse(response) = part {
             let (call_id, _) = split_tool_id(&response.call_id);
+            // pi's convertToolResultOutput emits "(no tool output)" for an empty
+            // result rather than an empty string (openai-responses-shared.ts:88).
+            let output = if response.content.is_empty() {
+                "(no tool output)"
+            } else {
+                response.content.as_str()
+            };
             items.push(json!({
                 "type": "function_call_output",
                 "call_id": call_id,
-                "output": response.content,
+                "output": output,
             }));
         }
     }
@@ -384,6 +391,28 @@ mod tests {
         assert_eq!(input[2]["type"], "function_call_output");
         assert_eq!(input[2]["call_id"], "call_1");
         assert_eq!(input[2]["output"], "result");
+    }
+
+    #[test]
+    fn empty_tool_result_emits_placeholder() {
+        // L7: an empty tool result becomes "(no tool output)", not "".
+        let tool = ChatMessage::tool(MessageContent::from_parts(vec![ContentPart::ToolResponse(
+            ToolResponse {
+                call_id: "call_9".into(),
+                fn_name: Some("noop".into()),
+                content: String::new(),
+                parts: None,
+            },
+        )]));
+        let context = LlmContext {
+            system_prompt: String::new(),
+            messages: vec![tool],
+            tools: vec![],
+        };
+        let input = &base_body(&context)["input"];
+        assert_eq!(input[0]["type"], "function_call_output");
+        assert_eq!(input[0]["call_id"], "call_9");
+        assert_eq!(input[0]["output"], "(no tool output)");
     }
 
     #[test]

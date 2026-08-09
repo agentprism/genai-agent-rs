@@ -26,12 +26,26 @@ use genai::chat::{
 };
 use serde_json::Value;
 
+/// In-band `error.code` that signals the WS connection pool is exhausted
+/// (`WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE`, openai-codex-responses.ts:70). This
+/// is the *only* in-band error that pi treats as a pre-commit transport failure
+/// eligible for SSE fallback (:349, :701-703); every other `error` /
+/// `response.failed` frame is a terminal in-band error.
+const WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE: &str = "websocket_connection_limit_reached";
+
 /// One translated unit to feed the accumulator.
 pub enum MappedItem {
     /// Fold this genai stream event (`ChatStreamEvent::End` is terminal → `Done`).
     Stream(ChatStreamEvent),
     /// An application-level (non-transport) error → in-band terminal `Error`.
     Fail(String),
+    /// A pre-commit **transport** failure delivered in-band as
+    /// `{"type":"error","code":"websocket_connection_limit_reached"}`
+    /// (openai-codex-responses.ts:701-703). Over WebSocket, before any content is
+    /// committed, the caller falls back to SSE (pi's :349-378). After commit — or
+    /// on the SSE path where there is nothing left to fall back to — the caller
+    /// treats it as a terminal in-band error (pi re-throws once started, :373).
+    TransportFail(String),
 }
 
 /// Per-`output_index` scratch state for an in-flight tool call.
@@ -44,11 +58,22 @@ struct ToolSlot {
 }
 
 /// Stateful translator from Codex Responses events to [`MappedItem`]s.
+///
+/// Streamed content is tracked **per `output_index`** (matching pi's per-slot
+/// bookkeeping, openai-responses-shared.ts:662-689) so a second message/reasoning
+/// block that arrives only via `response.output_item.done` is not dropped.
 #[derive(Default)]
 pub struct CodexEventMapper {
     slots: HashMap<u64, ToolSlot>,
-    saw_text_delta: bool,
-    saw_reasoning_delta: bool,
+    /// Text streamed so far for each message `output_index` (empty until its first
+    /// text delta; present-and-empty is never inserted for text).
+    text_streamed: HashMap<u64, String>,
+    /// Reasoning streamed so far for each reasoning `output_index`. Presence of a
+    /// key means a reasoning slot exists for that index (pi's `getSlot`, :585).
+    reasoning_streamed: HashMap<u64, String>,
+    /// `response.created`'s `response.id`, used as the fallback terminal response id
+    /// when the terminal event omits `id` (openai-responses-shared.ts:581, 538-539).
+    response_id: Option<String>,
 }
 
 impl CodexEventMapper {
@@ -65,7 +90,19 @@ impl CodexEventMapper {
 
         match kind {
             // -- Codex-specific normalization (mapCodexEvents) --
-            "error" => vec![MappedItem::Fail(codex_error_message(event))],
+            // An in-band `error` frame is normally a terminal application error,
+            // EXCEPT `websocket_connection_limit_reached`, which pi treats as a
+            // pre-commit transport failure eligible for SSE fallback (:349, :701-703).
+            "error" => {
+                let message = codex_error_message(event);
+                if codex_error_code(event).as_deref()
+                    == Some(WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE)
+                {
+                    vec![MappedItem::TransportFail(message)]
+                } else {
+                    vec![MappedItem::Fail(message)]
+                }
+            }
             "response.failed" => vec![MappedItem::Fail(response_failed_message(event))],
             "response.done" | "response.completed" | "response.incomplete" => {
                 vec![self.terminal(event)]
@@ -73,15 +110,22 @@ impl CodexEventMapper {
 
             // -- Streaming content (processResponsesStream) --
             // First frame commits the transport and emits the assistant `start`.
-            "response.created" => vec![MappedItem::Stream(ChatStreamEvent::Start)],
+            // pi also records `response.id` here (shared:581) as the fallback id.
+            "response.created" => {
+                if let Some(id) = event
+                    .get("response")
+                    .and_then(|r| r.get("id"))
+                    .and_then(Value::as_str)
+                {
+                    self.response_id = Some(id.to_string());
+                }
+                vec![MappedItem::Stream(ChatStreamEvent::Start)]
+            }
             "response.output_item.added" => self.output_item_added(event),
             "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
                 self.reasoning_delta(event)
             }
-            "response.reasoning_summary_part.done" => {
-                self.saw_reasoning_delta = true;
-                vec![MappedItem::Stream(reasoning_chunk("\n\n"))]
-            }
+            "response.reasoning_summary_part.done" => self.reasoning_part_done(event),
             "response.output_text.delta" | "response.refusal.delta" => self.text_delta(event),
             "response.function_call_arguments.delta" => self.fn_args_delta(event),
             "response.function_call_arguments.done" => self.fn_args_done(event),
@@ -139,7 +183,10 @@ impl CodexEventMapper {
             captured_response_id: response
                 .and_then(|r| r.get("id"))
                 .and_then(Value::as_str)
-                .map(str::to_string),
+                .map(str::to_string)
+                // Fall back to the id captured from `response.created` when the
+                // terminal event omits it (openai-responses-shared.ts:538-539).
+                .or_else(|| self.response_id.clone()),
         };
         MappedItem::Stream(ChatStreamEvent::End(end))
     }
@@ -184,19 +231,42 @@ impl CodexEventMapper {
     }
 
     fn reasoning_delta(&mut self, event: &Value) -> Vec<MappedItem> {
+        let output_index = output_index(event);
         match event.get("delta").and_then(Value::as_str) {
             Some(delta) => {
-                self.saw_reasoning_delta = true;
+                self.reasoning_streamed
+                    .entry(output_index)
+                    .or_default()
+                    .push_str(delta);
                 vec![MappedItem::Stream(reasoning_chunk(delta))]
             }
             None => Vec::new(),
         }
     }
 
+    /// `response.reasoning_summary_part.done` → append a `"\n\n"` separator, but
+    /// ONLY when a reasoning slot already exists for this `output_index` (pi's
+    /// `if (!slot) continue;`, openai-responses-shared.ts:594-596). This stops a
+    /// stray `part.done` from materializing an empty thinking block.
+    fn reasoning_part_done(&mut self, event: &Value) -> Vec<MappedItem> {
+        let output_index = output_index(event);
+        match self.reasoning_streamed.get_mut(&output_index) {
+            Some(streamed) => {
+                streamed.push_str("\n\n");
+                vec![MappedItem::Stream(reasoning_chunk("\n\n"))]
+            }
+            None => Vec::new(),
+        }
+    }
+
     fn text_delta(&mut self, event: &Value) -> Vec<MappedItem> {
+        let output_index = output_index(event);
         match event.get("delta").and_then(Value::as_str) {
             Some(delta) => {
-                self.saw_text_delta = true;
+                self.text_streamed
+                    .entry(output_index)
+                    .or_default()
+                    .push_str(delta);
                 vec![MappedItem::Stream(text_chunk(delta))]
             }
             None => Vec::new(),
@@ -289,25 +359,27 @@ impl CodexEventMapper {
                 let input = str_field(item, "input");
                 vec![MappedItem::Stream(tool_chunk(id, name, input))]
             }
-            // Backfill text / reasoning content only if it never streamed as a
-            // delta (some responses deliver it only on output_item.done).
-            Some("message") if !self.saw_text_delta => {
-                let text = message_output_text(item);
-                if text.is_empty() {
-                    Vec::new()
-                } else {
-                    self.saw_text_delta = true;
-                    vec![MappedItem::Stream(text_chunk(&text))]
-                }
+            // Reconcile this slot's text/reasoning with the item's authoritative
+            // content, INDEPENDENTLY per `output_index` (pi sets the block to the
+            // authoritative content on done, openai-responses-shared.ts:680-689 /
+            // 667-679). Because the accumulator concatenates deltas into a single
+            // block, emit only the suffix of the authoritative text beyond what
+            // already streamed for this slot: this backfills a block that never
+            // streamed (fixing dropped multi-block content) and appends a backend
+            // correction that extends the streamed prefix, without double-emitting.
+            Some("message") => {
+                let authoritative = message_output_text(item);
+                let streamed = self.text_streamed.entry(output_index).or_default();
+                reconcile_done(streamed, authoritative)
+                    .map(|tail| vec![MappedItem::Stream(text_chunk(&tail))])
+                    .unwrap_or_default()
             }
-            Some("reasoning") if !self.saw_reasoning_delta => {
-                let text = reasoning_output_text(item);
-                if text.is_empty() {
-                    Vec::new()
-                } else {
-                    self.saw_reasoning_delta = true;
-                    vec![MappedItem::Stream(reasoning_chunk(&text))]
-                }
+            Some("reasoning") => {
+                let authoritative = reasoning_output_text(item);
+                let streamed = self.reasoning_streamed.entry(output_index).or_default();
+                reconcile_done(streamed, authoritative)
+                    .map(|tail| vec![MappedItem::Stream(reasoning_chunk(&tail))])
+                    .unwrap_or_default()
             }
             _ => Vec::new(),
         }
@@ -400,7 +472,51 @@ fn tool_chunk(id: String, name: String, raw_args: String) -> ChatStreamEvent {
     })
 }
 
+// -- output_item.done reconciliation ----------------------------------------
+
+/// Reconcile a slot's already-streamed text with the authoritative text from a
+/// `response.output_item.done` item, returning the suffix to emit (if any) and
+/// recording the new streamed value.
+///
+/// The genai accumulator concatenates chunks into a single block, so it cannot
+/// *replace* text; this converges on the authoritative content for the realistic
+/// cases while never double-emitting:
+/// - empty authoritative → keep the streamed text (pi's `... || slot.block.text`
+///   for reasoning, openai-responses-shared.ts:670; the message contract always
+///   carries the full text, so an empty item after streaming is treated the same);
+/// - nothing streamed yet → emit the whole authoritative text (backfill);
+/// - authoritative extends the streamed prefix → emit only the appended tail
+///   (mirrors pi's `startsWith` slice for tool args, :647-649);
+/// - authoritative equals the streamed text, or diverges in a way a concatenating
+///   accumulator cannot represent → emit nothing (keep the streamed text).
+fn reconcile_done(streamed: &mut String, authoritative: String) -> Option<String> {
+    if authoritative.is_empty() {
+        return None;
+    }
+    if streamed.is_empty() {
+        *streamed = authoritative.clone();
+        return Some(authoritative);
+    }
+    if authoritative.len() > streamed.len() && authoritative.starts_with(streamed.as_str()) {
+        let tail = authoritative[streamed.len()..].to_string();
+        *streamed = authoritative;
+        return Some(tail);
+    }
+    None
+}
+
 // -- error messages (mapCodexEvents) ----------------------------------------
+
+/// The error `code`, top-level or nested under `error`, if present
+/// (`extractCodexEventError`, openai-codex-responses.ts:709-720).
+fn codex_error_code(event: &Value) -> Option<String> {
+    let nested = event.get("error");
+    event
+        .get("code")
+        .and_then(Value::as_str)
+        .or_else(|| nested.and_then(|e| e.get("code")).and_then(Value::as_str))
+        .map(str::to_string)
+}
 
 /// `Codex error: {message || code || JSON}` (openai-codex-responses.ts:709-733).
 fn codex_error_message(event: &Value) -> String {
@@ -721,5 +837,147 @@ mod tests {
         assert_eq!(out, vec![r#"{"type":"a"}"#.to_string()]);
         out = decoder.push(b"pe\":\"b\"}\n\ndata: [DONE]\n\n");
         assert_eq!(out, vec![r#"{"type":"b"}"#.to_string()]);
+    }
+
+    #[test]
+    fn connection_limit_error_maps_to_transport_fail() {
+        // H1: the connection-limit code is a pre-commit transport failure...
+        let mut mapper = CodexEventMapper::new();
+        match &map_all(
+            &mut mapper,
+            json!({ "type": "error", "code": "websocket_connection_limit_reached", "message": "busy" }),
+        )[0]
+        {
+            MappedItem::TransportFail(msg) => assert_eq!(msg, "Codex error: busy"),
+            _ => panic!("expected TransportFail"),
+        }
+        // ...but any other error code stays a terminal application Fail.
+        match &map_all(
+            &mut mapper,
+            json!({ "type": "error", "code": "server_error", "message": "boom" }),
+        )[0]
+        {
+            MappedItem::Fail(msg) => assert_eq!(msg, "Codex error: boom"),
+            _ => panic!("expected Fail"),
+        }
+        // A nested `error.code` is honored too (extractCodexEventError).
+        match &map_all(
+            &mut mapper,
+            json!({ "type": "error", "error": { "code": "websocket_connection_limit_reached", "message": "busy" } }),
+        )[0]
+        {
+            MappedItem::TransportFail(_) => {}
+            _ => panic!("expected TransportFail from nested code"),
+        }
+    }
+
+    #[test]
+    fn reasoning_part_done_without_slot_is_dropped() {
+        // L8: a stray part.done with no prior reasoning slot emits nothing.
+        let mut mapper = CodexEventMapper::new();
+        assert!(
+            map_all(
+                &mut mapper,
+                json!({ "type": "response.reasoning_summary_part.done", "output_index": 0 }),
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn response_id_falls_back_to_created() {
+        // L6: capture response.created's id and use it when the terminal omits it.
+        let mut mapper = CodexEventMapper::new();
+        let _ = map_all(
+            &mut mapper,
+            json!({ "type": "response.created", "response": { "id": "resp_created" } }),
+        );
+        let items = map_all(
+            &mut mapper,
+            json!({ "type": "response.completed", "response": { "status": "completed" } }),
+        );
+        match &items[0] {
+            MappedItem::Stream(ChatStreamEvent::End(end)) => {
+                assert_eq!(end.captured_response_id.as_deref(), Some("resp_created"));
+            }
+            _ => panic!("expected End"),
+        }
+    }
+
+    #[test]
+    fn terminal_id_takes_precedence_over_created() {
+        let mut mapper = CodexEventMapper::new();
+        let _ = map_all(
+            &mut mapper,
+            json!({ "type": "response.created", "response": { "id": "resp_created" } }),
+        );
+        let items = map_all(
+            &mut mapper,
+            json!({ "type": "response.completed", "response": { "id": "resp_final", "status": "completed" } }),
+        );
+        match &items[0] {
+            MappedItem::Stream(ChatStreamEvent::End(end)) => {
+                assert_eq!(end.captured_response_id.as_deref(), Some("resp_final"));
+            }
+            _ => panic!("expected End"),
+        }
+    }
+
+    #[test]
+    fn second_message_backfilled_only_on_done_is_kept() {
+        // M2 (mapper level): index 0 streams a delta then done; index 1 delivers
+        // its text only via done. Both must produce text chunks.
+        let mut mapper = CodexEventMapper::new();
+        let _ = map_all(
+            &mut mapper,
+            json!({ "type": "response.output_text.delta", "output_index": 0, "delta": "First" }),
+        );
+        // done for index 0 with matching authoritative text -> no re-emit.
+        assert!(
+            map_all(
+                &mut mapper,
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": { "type": "message", "content": [{ "type": "output_text", "text": "First" }] }
+                }),
+            )
+            .is_empty()
+        );
+        // done for index 1 with no prior delta -> backfill "Second".
+        let items = map_all(
+            &mut mapper,
+            json!({
+                "type": "response.output_item.done",
+                "output_index": 1,
+                "item": { "type": "message", "content": [{ "type": "output_text", "text": "Second" }] }
+            }),
+        );
+        match &items[0] {
+            MappedItem::Stream(ChatStreamEvent::Chunk(c)) => assert_eq!(c.content, "Second"),
+            _ => panic!("expected backfilled text chunk"),
+        }
+    }
+
+    #[test]
+    fn message_done_appends_authoritative_correction_tail() {
+        // A backend correction that extends the streamed prefix emits only the tail.
+        let mut mapper = CodexEventMapper::new();
+        let _ = map_all(
+            &mut mapper,
+            json!({ "type": "response.output_text.delta", "output_index": 0, "delta": "Hel" }),
+        );
+        let items = map_all(
+            &mut mapper,
+            json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": { "type": "message", "content": [{ "type": "output_text", "text": "Hello" }] }
+            }),
+        );
+        match &items[0] {
+            MappedItem::Stream(ChatStreamEvent::Chunk(c)) => assert_eq!(c.content, "lo"),
+            _ => panic!("expected tail chunk"),
+        }
     }
 }

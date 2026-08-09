@@ -10,11 +10,13 @@
 //! - [`Transport::Websocket`] / [`Transport::WebsocketCached`] / [`Transport::Auto`]
 //!   — try the WebSocket transport, **falling back to SSE** when the WebSocket
 //!   fails at the *transport* level before any assistant event is committed
-//!   (handshake/upgrade failure, connect timeout, an unexpected close, or an I/O
-//!   error before the first frame). An *application* error delivered as a Codex
-//!   `error` / `response.failed` frame is terminal and does **not** fall back
-//!   (pi's `isCodexNonTransportError`, :697-699). A transport failure *after* the
-//!   first frame is committed becomes a terminal in-band error (pi re-throws once
+//!   (handshake/upgrade failure, connect timeout, an unexpected close, an I/O
+//!   error before the first frame, or an in-band
+//!   `{"type":"error","code":"websocket_connection_limit_reached"}` frame — pi's
+//!   :349, :701-703). Every OTHER *application* error delivered as a Codex `error`
+//!   / `response.failed` frame is terminal and does **not** fall back (pi's
+//!   `isCodexNonTransportError`, :697-699). A transport failure *after* the first
+//!   frame is committed becomes a terminal in-band error (pi re-throws once
 //!   `websocketStarted`, :373).
 //!
 //! `Auto` mirrors pi's default (`options?.transport || "auto"`, :300): WebSocket
@@ -29,8 +31,12 @@
 //!   each request opens a fresh single-shot WebSocket. `WebsocketCached` therefore
 //!   behaves like `Websocket` here.
 //! - The pre-start **connection-limit / previous-response-not-found retry loop**
-//!   (:308-379) is not ported; those pre-commit WebSocket failures simply fall
-//!   back to SSE, which is safe.
+//!   (:308-379) is not ported as a *retry*. Instead, a pre-commit in-band
+//!   connection-limit `error` frame (`websocket_connection_limit_reached`) falls
+//!   back to SSE **once** (pi's :349-378). Every OTHER in-band `error` /
+//!   `response.failed` frame is terminal and never falls back (pi's
+//!   `isCodexNonTransportError`, :697-699); a connection-limit frame arriving
+//!   *after* commit is likewise terminal (pi re-throws once started, :373).
 //! - Request-body **zstd compression** is not sent (see [`crate::request`]).
 //!
 //! # Never-throw contract
@@ -94,8 +100,55 @@ impl std::fmt::Debug for CodexStreamFn {
     }
 }
 
+/// Default `User-Agent`, matching pi's shape `pi (<platform> <release>; <arch>)`
+/// (openai-codex-responses.ts:1609, `pi (${_os.platform()} ${_os.release()}; ${_os.arch()})`).
+///
+/// The live ChatGPT backend can reject a non-pi UA, so the default reproduces
+/// pi's exactly: Node platform names (`linux`/`darwin`/`win32`) and Node arch
+/// names (`x64`/`arm64`), with the OS release read best-effort. Override with
+/// [`CodexStreamFn::with_user_agent`].
 fn default_user_agent() -> String {
-    format!("rust-genai-codex/{}", env!("CARGO_PKG_VERSION"))
+    format!("pi ({} {}; {})", node_platform(), os_release(), node_arch())
+}
+
+/// Map Rust's [`std::env::consts::OS`] to Node's `os.platform()` names.
+fn node_platform() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        // linux (and other unix names) already match Node's platform strings.
+        other => other,
+    }
+}
+
+/// Map Rust's [`std::env::consts::ARCH`] to Node's `os.arch()` names.
+fn node_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        "x86" => "ia32",
+        // arm / riscv64 / ppc64 / s390x / … already match Node's arch strings.
+        other => other,
+    }
+}
+
+/// Best-effort OS release string (Node's `os.release()`). On Linux this is the
+/// kernel release from `/proc/sys/kernel/osrelease`; elsewhere a sensible
+/// constant is used (reading it portably would require `unsafe`/libc `uname`,
+/// which the crate forbids). Never panics; falls back to `"unknown"`.
+fn os_release() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .ok()
+            .map(|release| release.trim().to_string())
+            .filter(|release| !release.is_empty())
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        "unknown".to_string()
+    }
 }
 
 impl CodexStreamFn {
@@ -193,10 +246,23 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// The outcome of translating one raw event frame.
+struct FrameOutcome {
+    /// Assistant events to emit, in order.
+    events: Vec<AssistantMessageEvent>,
+    /// Whether a *content* (non-error) item was folded (used only by the
+    /// WebSocket fallback decision).
+    committed: bool,
+    /// Set when this frame is a pre-commit transport failure (the WS
+    /// connection-limit `error` frame). The caller decides between SSE fallback
+    /// (pre-commit, WebSocket) and a terminal in-band error (after commit / SSE).
+    transport_fail: Option<String>,
+}
+
 /// Translate one raw event JSON string, folding it into `acc`.
 ///
-/// Returns the assistant events to emit and whether a *content* (non-error) item
-/// was processed (`committed`, used only by the WebSocket fallback decision). A
+/// A [`MappedItem::TransportFail`] is **not** folded here: it is surfaced via
+/// [`FrameOutcome::transport_fail`] so the caller can fall back or terminate. A
 /// JSON parse failure becomes an in-band terminal error (a protocol error, which
 /// pi does not fall back from). This function never yields; the caller emits the
 /// returned events so the `yield` stays inside the `async_stream` block.
@@ -204,19 +270,21 @@ fn process_frame(
     mapper: &mut CodexEventMapper,
     acc: &mut AssistantAccumulator,
     frame_json: &str,
-) -> (Vec<AssistantMessageEvent>, bool) {
+) -> FrameOutcome {
     let value: Value = match serde_json::from_str(frame_json) {
         Ok(value) => value,
         Err(error) => {
-            return (
-                acc.fail(format!("Invalid Codex event JSON: {error}")),
-                false,
-            );
+            return FrameOutcome {
+                events: acc.fail(format!("Invalid Codex event JSON: {error}")),
+                committed: false,
+                transport_fail: None,
+            };
         }
     };
 
     let mut events = Vec::new();
     let mut committed = false;
+    let mut transport_fail = None;
     for item in mapper.map(&value) {
         match item {
             MappedItem::Stream(event) => {
@@ -226,12 +294,20 @@ fn process_frame(
             MappedItem::Fail(message) => {
                 events.extend(acc.fail(message));
             }
+            MappedItem::TransportFail(message) => {
+                transport_fail = Some(message);
+                break;
+            }
         }
         if acc.is_terminal() {
             break;
         }
     }
-    (events, committed)
+    FrameOutcome {
+        events,
+        committed,
+        transport_fail,
+    }
 }
 
 #[async_trait]
@@ -361,13 +437,28 @@ impl StreamFn for CodexStreamFn {
                                     }
                                 };
 
-                                let (events, did_commit) =
-                                    process_frame(&mut mapper, &mut acc, &frame);
-                                if did_commit {
+                                let outcome = process_frame(&mut mapper, &mut acc, &frame);
+                                if outcome.committed {
                                     committed = true;
                                 }
-                                for ev in events {
+                                for ev in outcome.events {
                                     yield ev;
+                                }
+                                if let Some(message) = outcome.transport_fail {
+                                    if committed {
+                                        // In-band connection-limit after commit ->
+                                        // terminal (pi re-throws once started, :373).
+                                        for ev in acc.fail(message) {
+                                            yield ev;
+                                        }
+                                        return;
+                                    }
+                                    // Pre-commit connection-limit -> fall back to SSE
+                                    // (pi's :349-378). Breaking with `!committed`
+                                    // makes the post-loop set `do_sse = true`; the SSE
+                                    // branch then installs a fresh accumulator so no
+                                    // duplicate `start` is emitted.
+                                    break;
                                 }
                                 if acc.is_terminal() {
                                     return;
@@ -457,10 +548,17 @@ impl StreamFn for CodexStreamFn {
                     match chunk {
                         Some(Ok(bytes)) => {
                             for frame in decoder.push(&bytes) {
-                                let (events, _committed) =
-                                    process_frame(&mut mapper, &mut acc, &frame);
-                                for ev in events {
+                                let outcome = process_frame(&mut mapper, &mut acc, &frame);
+                                for ev in outcome.events {
                                     yield ev;
+                                }
+                                if let Some(message) = outcome.transport_fail {
+                                    // Nothing left to fall back to on the SSE path:
+                                    // treat the connection-limit frame as terminal.
+                                    for ev in acc.fail(message) {
+                                        yield ev;
+                                    }
+                                    return;
                                 }
                                 if acc.is_terminal() {
                                     return;
@@ -489,5 +587,36 @@ impl StreamFn for CodexStreamFn {
         };
 
         AssistantMessageEventStream::from_stream(stream)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_user_agent_matches_pi_shape() {
+        // M3: default UA is `pi (<platform> <release>; <arch>)`.
+        let ua = default_user_agent();
+        assert!(ua.starts_with("pi ("), "unexpected UA: {ua}");
+        assert!(ua.ends_with(')'), "unexpected UA: {ua}");
+        // The Node-mapped arch is present.
+        assert!(
+            ua.contains(node_arch()),
+            "UA {ua} missing arch {}",
+            node_arch()
+        );
+        // The Node-mapped platform is present, and Rust's raw names are not leaked.
+        assert!(ua.contains(node_platform()), "UA {ua} missing platform");
+        assert!(!ua.contains("x86_64") && !ua.contains("aarch64"));
+    }
+
+    #[test]
+    fn node_platform_and_arch_mappings() {
+        // Sanity: the current target maps to a Node-style name (never the raw
+        // Rust constant for the mapped cases).
+        assert_ne!(node_platform(), "macos");
+        assert_ne!(node_arch(), "x86_64");
+        assert_ne!(node_arch(), "aarch64");
     }
 }

@@ -187,6 +187,40 @@ async fn spawn_ws_server(events: Vec<String>, frame_capture: Arc<Mutex<Option<St
     format!("http://{addr}")
 }
 
+/// Combined server for the in-band WebSocket-failure fallback test: on the first
+/// connection it completes the WS handshake, sends `ws_frames` (e.g. an in-band
+/// `error` frame), then closes. On the second connection it serves SSE, capturing
+/// the request. If the client never falls back (a terminal in-band error), the SSE
+/// leg is simply never reached and `sse_capture` stays `None`.
+async fn spawn_ws_inband_then_sse_server(
+    ws_frames: Vec<String>,
+    sse_events: Vec<String>,
+    sse_capture: Arc<Mutex<Option<CapturedHttp>>>,
+) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        // Connection 1: the WebSocket attempt.
+        if let Ok((stream, _)) = listener.accept().await
+            && let Ok(mut ws) = accept_async(stream).await
+        {
+            // Drain the `response.create` frame, then push the scripted frames.
+            let _ = ws.next().await;
+            for frame in &ws_frames {
+                let _ = ws.send(Message::text(frame.clone())).await;
+            }
+            let _ = ws.close(None).await;
+        }
+        // Connection 2: the SSE POST (only reached if the client falls back).
+        if let Ok((mut stream, _)) = listener.accept().await {
+            let captured = read_http_request(&mut stream).await;
+            *sse_capture.lock().unwrap() = Some(captured);
+            write_sse_ok(&mut stream, &sse_events).await;
+        }
+    });
+    format!("http://{addr}")
+}
+
 /// Combined server for the fallback test: fails the WebSocket upgrade (returns
 /// HTTP 400) on the first connection, then serves SSE on the POST that follows.
 async fn spawn_ws_fail_then_sse_server(
@@ -238,6 +272,20 @@ fn text_response_events() -> Vec<String> {
         r#"{"type":"response.output_text.delta","output_index":0,"delta":" world"}"#.to_string(),
         r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"Hello world"}]}}"#.to_string(),
         r#"{"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":2},"output_tokens":3,"total_tokens":15}}}"#.to_string(),
+    ]
+}
+
+/// Two message items where the SECOND block delivers its text only via
+/// `output_item.done` (no delta). Exercises per-`output_index` backfill (M2).
+fn two_message_events() -> Vec<String> {
+    vec![
+        r#"{"type":"response.created","response":{"id":"resp_m"}}"#.to_string(),
+        r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_0","role":"assistant"}}"#.to_string(),
+        r#"{"type":"response.output_text.delta","output_index":0,"delta":"First"}"#.to_string(),
+        r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_0","role":"assistant","content":[{"type":"output_text","text":"First"}]}}"#.to_string(),
+        r#"{"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg_1","role":"assistant"}}"#.to_string(),
+        r#"{"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"Second"}]}}"#.to_string(),
+        r#"{"type":"response.completed","response":{"id":"resp_m","status":"completed","usage":{"input_tokens":4,"output_tokens":2,"total_tokens":6}}}"#.to_string(),
     ]
 }
 
@@ -449,6 +497,91 @@ async fn websocket_upgrade_failure_falls_back_to_sse() {
     ));
     assert_eq!(message.text(), "Hello world");
     assert_eq!(message.stop_reason, StopReason::Stop);
+}
+
+#[tokio::test]
+async fn websocket_connection_limit_falls_back_to_sse() {
+    // H1: an in-band `websocket_connection_limit_reached` error before any content
+    // is a PRE-COMMIT transport failure -> fall back to SSE (like an upgrade fail).
+    let sse_capture = Arc::new(Mutex::new(None));
+    let ws_frames = vec![
+        r#"{"type":"error","code":"websocket_connection_limit_reached","message":"too many connections"}"#
+            .to_string(),
+    ];
+    let base_url =
+        spawn_ws_inband_then_sse_server(ws_frames, text_response_events(), sse_capture.clone())
+            .await;
+    let (stream_fn, request) = user_request(&base_url, Transport::Auto);
+
+    let events = collect(stream_fn.stream(request).await).await;
+
+    // The SSE POST was reached (fallback happened) and produced the final message.
+    let captured = sse_capture
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("sse fallback request");
+    assert_eq!(captured.method, "POST");
+    assert_eq!(captured.path, "/codex/responses");
+
+    let message = terminal(&events);
+    assert!(matches!(
+        events.last(),
+        Some(AssistantMessageEvent::Done { .. })
+    ));
+    assert_eq!(message.text(), "Hello world");
+    assert_eq!(message.stop_reason, StopReason::Stop);
+}
+
+#[tokio::test]
+async fn websocket_non_connection_limit_error_is_terminal_no_fallback() {
+    // H1: any other in-band `error` frame is a terminal application error with NO
+    // SSE fallback (the SSE leg must never be reached).
+    let sse_capture = Arc::new(Mutex::new(None));
+    let ws_frames = vec![r#"{"type":"error","code":"server_error","message":"boom"}"#.to_string()];
+    let base_url =
+        spawn_ws_inband_then_sse_server(ws_frames, text_response_events(), sse_capture.clone())
+            .await;
+    let (stream_fn, request) = user_request(&base_url, Transport::Auto);
+
+    let events = collect(stream_fn.stream(request).await).await;
+
+    // Terminal in-band Error, reason Error, carrying the mapped message.
+    assert!(matches!(
+        events.last(),
+        Some(AssistantMessageEvent::Error { .. })
+    ));
+    let message = terminal(&events);
+    assert_eq!(message.stop_reason, StopReason::Error);
+    assert_eq!(message.error_message.as_deref(), Some("Codex error: boom"));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AssistantMessageEvent::Done { .. }))
+    );
+    // No SSE fallback: the SSE endpoint was never hit.
+    assert!(
+        sse_capture.lock().unwrap().is_none(),
+        "SSE fallback must not happen for a non-connection-limit error"
+    );
+}
+
+#[tokio::test]
+async fn sse_two_message_blocks_second_via_done_only() {
+    // M2: the second message block delivers its text only via output_item.done;
+    // both texts must survive into the final message.
+    let capture = Arc::new(Mutex::new(None));
+    let base_url = spawn_sse_server(two_message_events(), capture).await;
+    let (stream_fn, request) = user_request(&base_url, Transport::Sse);
+
+    let events = collect(stream_fn.stream(request).await).await;
+    let message = terminal(&events);
+
+    assert_eq!(message.stop_reason, StopReason::Stop);
+    let text = message.text();
+    assert!(text.contains("First"), "missing first block: {text}");
+    assert!(text.contains("Second"), "missing second block: {text}");
+    assert_eq!(text, "FirstSecond");
 }
 
 #[tokio::test]

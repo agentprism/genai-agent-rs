@@ -54,7 +54,9 @@ use rust_genai_codex::{CodexStreamFn, StaticTokenSource, Transport};
 let token_source = Arc::new(StaticTokenSource::new("bearer-jwt", "acct_123"));
 
 // 2. The stream function (defaults: base URL chatgpt.com/backend-api,
-//    transport Auto = WebSocket with SSE fallback, originator "pi").
+//    transport Auto = WebSocket with SSE fallback, originator "pi",
+//    User-Agent "pi (<platform> <release>; <arch>)" — pi's shape, overridable
+//    via .with_user_agent(..)).
 let stream_fn = Arc::new(
     CodexStreamFn::new(token_source)
         .with_transport(Transport::Auto),
@@ -102,11 +104,14 @@ otherwise the instance default applies):
 
 **Fallback rule** (faithful to pi): the WebSocket path falls back to SSE only
 when it fails at the **transport** level *before* the first assistant event is
-committed (handshake/upgrade failure, connect timeout, an unexpected close, or an
-I/O error before the first frame). An **application** error delivered as a Codex
-`error` / `response.failed` frame is terminal and does **not** fall back. A
-transport failure *after* the first frame is committed becomes a terminal in-band
-error (no fallback).
+committed (handshake/upgrade failure, connect timeout, an unexpected close, an
+I/O error before the first frame, or an in-band
+`{"type":"error","code":"websocket_connection_limit_reached"}` frame — pi treats
+the connection-limit error as a pre-commit transport failure). Every **other**
+application error delivered as a Codex `error` / `response.failed` frame is
+terminal and does **not** fall back. A transport failure *after* the first frame
+is committed becomes a terminal in-band error (no fallback), including a
+connection-limit frame that arrives after commit.
 
 ### Documented simplifications vs pi
 
@@ -114,7 +119,8 @@ error (no fallback).
   continuation** (pi's `websocket-cached`) is not ported; each request opens a
   fresh single-shot WebSocket, so `WebsocketCached` behaves like `Websocket`.
 - The pre-start **connection-limit / previous-response-not-found retry loop** is
-  not ported; those pre-commit failures simply fall back to SSE.
+  not ported as a *retry*; instead a pre-commit in-band connection-limit `error`
+  frame falls back to SSE once (other in-band errors stay terminal).
 - Request-body **zstd compression** (`Content-Encoding: zstd`) is not sent; the
   body is plain JSON (pi itself falls back to plain JSON, which the backend
   accepts).

@@ -196,11 +196,16 @@ pub fn parse_error_response(status: u16, body: &str, now_ms: i64) -> String {
         } else {
             None
         };
-        message = err
-            .get("message")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .or(friendly)
+        // pi throws `friendlyMessage || message` (openai-codex-responses.ts:447),
+        // so the friendly usage/rate-limit text wins over a provider `err.message`.
+        // `friendly` is `Some` only for the usage-limit case, so other errors still
+        // surface `err.message`, then the raw body.
+        message = friendly
+            .or_else(|| {
+                err.get("message")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
             .unwrap_or(message);
     }
 
@@ -301,6 +306,19 @@ mod tests {
     fn error_body_prefers_message() {
         let body = r#"{"error":{"code":"bad_request","message":"nope"}}"#;
         assert_eq!(parse_error_response(400, body, 0), "nope");
+    }
+
+    #[test]
+    fn usage_limit_friendly_wins_over_message() {
+        // L4: pi throws `friendlyMessage || message`, so a usage-limit friendly
+        // message must win even when the provider also sends `error.message`.
+        let body = r#"{"error":{"code":"usage_limit_reached","plan_type":"Pro","message":"raw provider text"}}"#;
+        let msg = parse_error_response(429, body, 0);
+        assert!(
+            msg.starts_with("You have hit your ChatGPT usage limit (pro plan)."),
+            "unexpected message: {msg}"
+        );
+        assert!(!msg.contains("raw provider text"));
     }
 
     #[test]
