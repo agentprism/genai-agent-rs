@@ -113,7 +113,12 @@ impl CodexConfig {
 
 /// A pending browser login: the authorize URL to open plus the PKCE verifier and
 /// CSRF state to carry until the redirect returns.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is hand-written and **redacts the `verifier`** (the PKCE secret used
+/// at token exchange). `authorize_url` and `state` are non-secret and stay
+/// visible. Note the `authorize_url` embeds the S256 `code_challenge` (public),
+/// not the verifier.
+#[derive(Clone)]
 pub struct PendingBrowserLogin {
     /// The URL the application should open in a browser.
     pub authorize_url: String,
@@ -121,6 +126,16 @@ pub struct PendingBrowserLogin {
     pub state: String,
     /// PKCE code verifier used at token exchange (keep secret).
     pub verifier: String,
+}
+
+impl std::fmt::Debug for PendingBrowserLogin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingBrowserLogin")
+            .field("authorize_url", &self.authorize_url)
+            .field("state", &self.state)
+            .field("verifier", &"<redacted>")
+            .finish()
+    }
 }
 
 /// A started device login: codes to show the user and the derived timing.
@@ -140,18 +155,43 @@ pub struct DeviceLoginBegin {
 
 /// A successful device-token poll: the authorization code and server-issued PKCE
 /// verifier used for the follow-up code exchange (openai-codex.ts:54-57,252-263).
-#[derive(Debug, Clone)]
+///
+/// `Debug` **redacts both fields**: the `authorization_code` and `code_verifier`
+/// are exchangeable for bearer tokens.
+#[derive(Clone)]
 struct DeviceTokenSuccess {
     authorization_code: String,
     code_verifier: String,
 }
 
+impl std::fmt::Debug for DeviceTokenSuccess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceTokenSuccess")
+            .field("authorization_code", &"<redacted>")
+            .field("code_verifier", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Normalized token payload before it becomes an [`OAuthCredential`].
-#[derive(Debug, Clone)]
+///
+/// `Debug` **redacts the secret `access`/`refresh` tokens**; the non-secret
+/// `expires_at_ms` stays visible.
+#[derive(Clone)]
 struct OAuthToken {
     access: String,
     refresh: String,
     expires_at_ms: i64,
+}
+
+impl std::fmt::Debug for OAuthToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthToken")
+            .field("access", &"<redacted>")
+            .field("refresh", &"<redacted>")
+            .field("expires_at_ms", &self.expires_at_ms)
+            .finish()
+    }
 }
 
 /// The ChatGPT Codex OAuth client.
@@ -314,6 +354,12 @@ impl CodexAuth {
         let user_code = value.get("user_code").and_then(Value::as_str);
         let interval_seconds = parse_interval(value.get("interval"));
 
+        // pi parity + fail-closed: pi rejects when `interval` is not a finite,
+        // non-negative number (openai-codex.ts:218-226). This reproduces that
+        // (`interval.is_finite() && interval >= 0.0`); additionally a missing /
+        // unparseable `interval` (`parse_interval` -> `None`) is rejected here
+        // as an `InvalidDeviceCodeResponse` rather than silently defaulting,
+        // which is intentionally stricter but fail-closed.
         match (device_auth_id, user_code, interval_seconds) {
             (Some(device_auth_id), Some(user_code), Some(interval))
                 if interval.is_finite() && interval >= 0.0 =>
@@ -482,16 +528,27 @@ async fn read_token_response(
     }
 
     let value: Value = response.json().await?;
-    let access = value.get("access_token").and_then(Value::as_str);
-    let refresh = value.get("refresh_token").and_then(Value::as_str);
+    // Reject empty-string tokens the way pi's truthiness checks do
+    // (openai-codex.ts:138 `!json.access_token` / `!json.refresh_token`): an
+    // empty token is treated as a missing field, not a valid credential.
+    let access = value
+        .get("access_token")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    let refresh = value
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
     let expires_in = value.get("expires_in").and_then(Value::as_f64);
 
     match (access, refresh, expires_in) {
         (Some(access), Some(refresh), Some(expires_in)) => Ok(OAuthToken {
             access: access.to_string(),
             refresh: refresh.to_string(),
-            // expires = Date.now() + expires_in * 1000 (openai-codex.ts:145).
-            expires_at_ms: now_unix_ms() + (expires_in * 1000.0) as i64,
+            // expires = Date.now() + expires_in * 1000 (openai-codex.ts:145),
+            // hardened against hostile/degenerate `expires_in` — see
+            // [`expires_at_ms_from`].
+            expires_at_ms: expires_at_ms_from(now_unix_ms(), expires_in),
         }),
         _ => Err(Error::TokenResponseMissingFields {
             operation,
@@ -500,14 +557,57 @@ async fn read_token_response(
     }
 }
 
+/// Compute the absolute expiry (`now + expires_in*1000`) without panicking or
+/// wrapping on a hostile `expires_in`.
+///
+/// A raw `now_unix_ms() + (expires_in * 1000.0) as i64` can panic in debug
+/// builds and wrap in release for values like `1e300` or `f64::INFINITY`. This
+/// clamps and saturates instead, matching the `saturating_add` posture in
+/// `credential.rs`:
+/// - non-finite (`NaN`/`±∞`) and negative values collapse to `0` seconds, i.e.
+///   an already-expired credential that forces a refresh (fail-closed);
+/// - huge-but-finite values saturate to a far-future, non-negative expiry
+///   (capped at `i64::MAX`).
+fn expires_at_ms_from(now_ms: i64, expires_in: f64) -> i64 {
+    let secs = if expires_in.is_finite() {
+        expires_in.clamp(0.0, i64::MAX as f64 / 1000.0)
+    } else {
+        0.0
+    };
+    // Rust's float-to-int `as` cast saturates (no UB), and `saturating_add`
+    // caps at `i64::MAX`, so the result is always a valid, non-negative epoch ms.
+    now_ms.saturating_add((secs * 1000.0) as i64)
+}
+
 /// Parsed authorization input (code and optional state).
-#[derive(Debug, Default, PartialEq)]
+///
+/// `Debug` **redacts the `code`** (a single-use authorization code exchangeable
+/// for tokens); `state` (a CSRF nonce) stays visible. `PartialEq` still compares
+/// the real values, so tests keep their exact-equality semantics.
+#[derive(Default, PartialEq)]
 struct ParsedAuth {
     code: Option<String>,
     state: Option<String>,
 }
 
+impl std::fmt::Debug for ParsedAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParsedAuth")
+            .field("code", &self.code.as_ref().map(|_| "<redacted>"))
+            .field("state", &self.state)
+            .finish()
+    }
+}
+
 /// Port of `parseAuthorizationInput` (openai-codex.ts:73-101).
+///
+/// INTENTIONAL DEVIATION (stricter, fail-closed): pi returns whatever `code` it
+/// parses — including an empty string — and only later rejects a falsy code. This
+/// crate additionally treats a parsed empty `code` as *no code*: the caller
+/// [`CodexAuth::complete_browser_login`] applies `.filter(|c| !c.is_empty())`, so
+/// an empty/whitespace `code=` fragment fails closed with
+/// [`Error::MissingAuthorizationCode`] rather than posting a blank code to the
+/// token endpoint. Parsing itself stays byte-for-byte compatible for real codes.
 fn parse_authorization_input(input: &str) -> ParsedAuth {
     let value = input.trim();
     if value.is_empty() {
@@ -683,6 +783,30 @@ mod tests {
     #[test]
     fn hex_encode_matches_expected() {
         assert_eq!(hex_encode(&[0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");
+    }
+
+    #[test]
+    fn expires_at_ms_is_overflow_safe() {
+        let now = 1_700_000_000_000_i64;
+
+        // Normal case: exact arithmetic.
+        assert_eq!(expires_at_ms_from(now, 3600.0), now + 3_600_000);
+
+        // Hostile huge (but finite) value must not panic and must saturate to a
+        // far-future, non-negative expiry (capped at i64::MAX).
+        let huge = expires_at_ms_from(now, 1e300);
+        assert_eq!(huge, i64::MAX, "1e300 should saturate to i64::MAX");
+        assert!(huge > now, "expiry must be far in the future");
+
+        // Even at i64::MAX `now`, a positive expires_in saturates rather than wraps.
+        assert_eq!(expires_at_ms_from(i64::MAX, 1e300), i64::MAX);
+        assert_eq!(expires_at_ms_from(i64::MAX, 3600.0), i64::MAX);
+
+        // Non-finite / negative collapse to "already expired" (fail-closed).
+        assert_eq!(expires_at_ms_from(now, f64::INFINITY), now);
+        assert_eq!(expires_at_ms_from(now, f64::NEG_INFINITY), now);
+        assert_eq!(expires_at_ms_from(now, f64::NAN), now);
+        assert_eq!(expires_at_ms_from(now, -5.0), now);
     }
 
     #[test]

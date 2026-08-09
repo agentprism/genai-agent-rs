@@ -31,23 +31,31 @@ pub enum Error {
     // -- Token endpoint (openai-codex.ts:126-147) --
     /// Token endpoint returned a non-2xx status.
     /// Mirrors `OpenAI Codex token {operation} failed ({status}): {body}`.
+    ///
+    /// REDACTION WARNING: `body` is the raw token-endpoint response and may
+    /// contain sensitive data (error descriptions, echoed request parameters).
+    /// Callers should redact or omit it before logging; it is included in this
+    /// error's `Display` for diagnostics only.
     #[error("OpenAI Codex token {operation} failed ({status}): {body}")]
     TokenRequest {
         /// "exchange" or "refresh".
         operation: &'static str,
         /// HTTP status code.
         status: u16,
-        /// Response body (best-effort).
+        /// Response body (best-effort). May contain response data — redact before logging.
         body: String,
     },
 
     /// Token endpoint returned 2xx but is missing `access_token` / `refresh_token`
     /// / `expires_in`. Mirrors `OpenAI Codex token {operation} response missing fields`.
+    ///
+    /// REDACTION WARNING: `body` is the raw JSON response and may include token
+    /// material (e.g. a present-but-rejected `access_token`). Redact before logging.
     #[error("OpenAI Codex token {operation} response missing fields: {body}")]
     TokenResponseMissingFields {
         /// "exchange" or "refresh".
         operation: &'static str,
-        /// The raw JSON that failed validation.
+        /// The raw JSON that failed validation. May contain response data — redact before logging.
         body: String,
     },
 
@@ -78,23 +86,32 @@ pub enum Error {
     DeviceCodeNotEnabled,
 
     /// The device-code `usercode` request failed with a non-2xx (non-404) status.
+    ///
+    /// REDACTION WARNING: `body` is the raw response and may contain response
+    /// data; redact before logging.
     #[error("OpenAI Codex device code request failed with status {status}: {body}")]
     DeviceCodeRequestFailed {
         /// HTTP status code.
         status: u16,
-        /// Response body (best-effort).
+        /// Response body (best-effort). May contain response data — redact before logging.
         body: String,
     },
 
     /// The device-code `usercode` response was structurally invalid.
+    ///
+    /// REDACTION WARNING: `body` is the raw JSON response and may contain
+    /// response data; redact before logging.
     #[error("Invalid OpenAI Codex device code response: {body}")]
     InvalidDeviceCodeResponse {
-        /// The raw JSON that failed validation.
+        /// The raw JSON that failed validation. May contain response data — redact before logging.
         body: String,
     },
 
     /// A terminal failure surfaced while polling the device-auth token endpoint.
     /// The message is preformatted by the polling closure.
+    ///
+    /// REDACTION WARNING: the wrapped message embeds the raw device-token error
+    /// response body and may contain response data; redact before logging.
     #[error("{0}")]
     DeviceAuth(String),
 

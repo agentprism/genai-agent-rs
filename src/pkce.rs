@@ -12,12 +12,25 @@ use sha2::{Digest, Sha256};
 use crate::error::{Error, Result};
 
 /// A generated PKCE pair.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is hand-written and **redacts the `verifier`** (the secret held until
+/// token exchange); the `challenge` is public (it travels in the authorize URL)
+/// and stays visible.
+#[derive(Clone)]
 pub struct Pkce {
     /// The high-entropy code verifier (kept by the client until token exchange).
     pub verifier: String,
     /// The S256 code challenge sent on the authorize request.
     pub challenge: String,
+}
+
+impl std::fmt::Debug for Pkce {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pkce")
+            .field("verifier", &"<redacted>")
+            .field("challenge", &self.challenge)
+            .finish()
+    }
 }
 
 impl Pkce {

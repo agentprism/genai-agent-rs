@@ -352,6 +352,48 @@ async fn missing_account_id_is_rejected_by_default() {
     );
 }
 
+#[tokio::test]
+async fn empty_string_tokens_are_rejected_as_missing_fields() {
+    let server = MockServer::start().await;
+    // Empty access_token (pi treats "" as falsy => missing).
+    server.push(
+        "/oauth/token",
+        MockResponse::json(
+            200,
+            serde_json::json!({ "access_token": "", "refresh_token": "r", "expires_in": 3600 })
+                .to_string(),
+        ),
+    );
+    // Empty refresh_token (second call pops this response).
+    server.push(
+        "/oauth/token",
+        MockResponse::json(
+            200,
+            serde_json::json!({
+                "access_token": jwt_with_account_id("acct_x"),
+                "refresh_token": "",
+                "expires_in": 3600,
+            })
+            .to_string(),
+        ),
+    );
+
+    let auth = codex_for(&server);
+
+    for _ in 0..2 {
+        let err = auth
+            .exchange_authorization_code("c", "v", "http://localhost:1455/auth/callback")
+            .await
+            .unwrap_err();
+        match err {
+            rust_genai_auth::Error::TokenResponseMissingFields { operation, .. } => {
+                assert_eq!(operation, "exchange");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Refresh (and store update)
 // ---------------------------------------------------------------------------
@@ -694,4 +736,99 @@ async fn genai_resolver_refreshes_and_persists() {
         .unwrap();
     assert_eq!(loaded.access_token, new_access);
     assert_eq!(loaded.refresh_token.as_deref(), Some("refresh-2"));
+}
+
+#[cfg(feature = "genai")]
+#[tokio::test]
+async fn concurrent_resolvers_refresh_only_once() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use rust_genai_auth::genai_integration::CodexTokenResolver;
+
+    let server = MockServer::start().await;
+    let new_access = jwt_with_account_id("acct_concurrent");
+    // Queue EXACTLY ONE refresh response. If a second refresh were issued it
+    // would fall through to the mock's default "{}" and fail the resolve, so the
+    // "both succeed + exactly one hit" assertions below prove single-refresh.
+    server.push(
+        "/oauth/token",
+        MockResponse::json(
+            200,
+            serde_json::json!({
+                "access_token": new_access,
+                "refresh_token": "refresh-rotated",
+                "expires_in": 3600,
+            })
+            .to_string(),
+        ),
+    );
+
+    let auth = Arc::new(codex_for(&server));
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn CredentialStore> =
+        Arc::new(FileCredentialStore::new(dir.path().join("auth.json")));
+
+    // Seed an expired credential with a (rotating) refresh token.
+    let stale = OAuthCredential::new(
+        jwt_with_account_id("acct_old"),
+        Some("refresh-old".into()),
+        Some(1),
+        Some("acct_old".into()),
+    );
+    store
+        .store(rust_genai_auth::OPENAI_CODEX_PROVIDER_ID, &stale)
+        .unwrap();
+
+    // One shared resolver instance (single mutex) — exactly what the genai
+    // resolver captures internally.
+    let resolver = Arc::new(CodexTokenResolver::with_skew(
+        auth.clone(),
+        store.clone(),
+        rust_genai_auth::OPENAI_CODEX_PROVIDER_ID,
+        Duration::from_secs(0),
+    ));
+
+    // Fire two resolves concurrently.
+    let t1 = {
+        let r = resolver.clone();
+        tokio::spawn(async move { r.resolve().await })
+    };
+    let t2 = {
+        let r = resolver.clone();
+        tokio::spawn(async move { r.resolve().await })
+    };
+    let (a, b) = tokio::join!(t1, t2);
+    let a = a.unwrap().expect("resolve 1 should succeed");
+    let b = b.unwrap().expect("resolve 2 should succeed");
+
+    // Both observed the same freshly rotated token ...
+    assert_eq!(a, new_access);
+    assert_eq!(b, new_access);
+
+    // ... and the token endpoint was hit EXACTLY once (no double refresh race).
+    let hits = server.requests_for("/oauth/token");
+    assert_eq!(
+        hits.len(),
+        1,
+        "expected exactly one refresh request, got {}",
+        hits.len()
+    );
+    let form = hits[0].form_pairs();
+    assert_eq!(
+        form.get("grant_type").map(String::as_str),
+        Some("refresh_token")
+    );
+    assert_eq!(
+        form.get("refresh_token").map(String::as_str),
+        Some("refresh-old")
+    );
+
+    // The store now holds the rotated credential.
+    let loaded = store
+        .load(rust_genai_auth::OPENAI_CODEX_PROVIDER_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.access_token, new_access);
+    assert_eq!(loaded.refresh_token.as_deref(), Some("refresh-rotated"));
 }

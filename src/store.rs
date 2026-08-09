@@ -9,8 +9,13 @@
 //!   (api-key entries for other providers) intact: only the requested provider's
 //!   entry is (de)serialized as an [`OAuthCredential`].
 //! - Default path: `$GENAI_AUTH_FILE`, else `~/.genai/auth.json`.
-//! - Writes are atomic (write to a temp file in the same directory, then rename)
-//!   and, on unix, the file is created `0600` and the parent directory `0700`.
+//! - Writes are atomic (write to a temp file in the same directory, then rename).
+//!   On unix the credential file and temp file are `0600` and the parent
+//!   directory `0700` (an existing directory is tightened too, best-effort). The
+//!   temp file is created exclusively (`O_CREAT | O_EXCL | O_NOFOLLOW`) with a
+//!   CSPRNG-random name, so it never overwrites, follows a symlink, or uses a
+//!   guessable path. See [`crate::genai_integration`] for the cross-process
+//!   advisory lock ([`CredentialStore::lock_path`]) used around refreshes.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -42,6 +47,21 @@ pub trait CredentialStore: Send + Sync {
 
     /// List provider ids that currently have a stored credential.
     fn list(&self) -> Result<Vec<String>>;
+
+    /// Path to a sidecar advisory-lock file for **cross-process** serialization
+    /// of a read-modify-write refresh, or `None` if this store cannot be
+    /// cross-process-locked.
+    ///
+    /// The genai resolver ([`crate::genai_integration`]) acquires an OS advisory
+    /// lock (`flock`) on this path around its load-check-refresh-store sequence
+    /// so two processes sharing the same credential file cannot both POST the
+    /// same rotating refresh token. A sidecar `.lock` file (rather than the
+    /// credential file itself) is used because the atomic write replaces the
+    /// credential file's inode via `rename`, which would drop a lock held on the
+    /// old inode. The default returns `None` (no cross-process locking).
+    fn lock_path(&self) -> Option<PathBuf> {
+        None
+    }
 
     /// Serialized read-modify-write (pi's `modify`, types.ts:86-90).
     ///
@@ -138,6 +158,13 @@ impl CredentialStore for FileCredentialStore {
         Ok(self.read_root()?.keys().cloned().collect())
     }
 
+    fn lock_path(&self) -> Option<PathBuf> {
+        // Sidecar `<auth.json>.lock` (append, do not replace the extension).
+        let mut os = self.path.clone().into_os_string();
+        os.push(".lock");
+        Some(PathBuf::from(os))
+    }
+
     fn modify(
         &self,
         provider_id: &str,
@@ -193,8 +220,19 @@ fn expand_tilde(path: &str, home: Option<&str>) -> PathBuf {
     PathBuf::from(path)
 }
 
+/// Number of exclusive-create attempts before giving up on a unique temp name.
+/// With a 96-bit random suffix a collision is astronomically unlikely; the retry
+/// only guards against a stale leftover temp file with the same random name.
+const MAX_TEMP_CREATE_ATTEMPTS: usize = 8;
+
 /// Atomically write `bytes` to `path`: temp file in the same dir + rename.
-/// On unix the file is `0600` and any created parent directory is `0700`.
+///
+/// Hardening (unix): the parent dir is created (or tightened) to `0700`; the
+/// temp file is created with `O_CREAT | O_EXCL` (never overwrites) and
+/// `O_NOFOLLOW` (never opens through a symlink) at mode `0600`; the temp suffix
+/// is a fresh CSPRNG value (not a predictable pid+timestamp). The `rename` is
+/// atomic on the same filesystem, so a crash cannot leave a half-written or
+/// world-readable credential file in place of the real one.
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     create_dir_secure(parent)?;
@@ -204,28 +242,47 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "auth.json".to_string());
-    let tmp = parent.join(format!(".{file_name}.tmp.{}", unique_suffix()));
 
-    write_file_secure(&tmp, bytes)?;
-
-    match std::fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(Error::Io(e))
+    let mut last_err: Option<Error> = None;
+    for _ in 0..MAX_TEMP_CREATE_ATTEMPTS {
+        let tmp = parent.join(format!(".{file_name}.tmp.{}", random_suffix()?));
+        match write_file_secure(&tmp, bytes) {
+            Ok(()) => {
+                return match std::fs::rename(&tmp, path) {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&tmp);
+                        Err(Error::Io(e))
+                    }
+                };
+            }
+            // O_EXCL collision with a leftover temp file: retry with a new suffix.
+            Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_err = Some(Error::Io(e));
+                continue;
+            }
+            Err(e) => return Err(e),
         }
     }
+    Err(last_err.unwrap_or_else(|| {
+        Error::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not create a unique temp file for the credential store",
+        ))
+    }))
 }
 
 fn write_file_secure(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
     #[cfg(unix)]
     {
-        use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
+        // O_CREAT | O_EXCL (create_new) + O_NOFOLLOW + mode 0600: exclusive,
+        // symlink-refusing, owner-only creation of a brand-new temp file.
         let mut file = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW)
             .mode(0o600)
             .open(path)?;
         file.write_all(bytes)?;
@@ -234,18 +291,39 @@ fn write_file_secure(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     #[cfg(not(unix))]
     {
-        std::fs::write(path, bytes)?;
+        // No mode/O_NOFOLLOW on non-unix, but still create exclusively (O_EXCL).
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        file.write_all(bytes)?;
+        file.flush()?;
         Ok(())
     }
 }
 
+/// Ensure the credential directory exists and is `0700` (unix).
+///
+/// A newly created directory is made `0700` at creation. An **existing** target
+/// directory is also tightened to `0700` (best-effort: a chmod failure — e.g. a
+/// directory the process does not own — is ignored rather than failing the
+/// write, since the credential file itself is always `0600`). Filesystem roots
+/// and `.` / `..` are never chmod'd.
 fn create_dir_secure(dir: &Path) -> Result<()> {
-    if dir.as_os_str().is_empty() || dir.exists() {
+    if dir.as_os_str().is_empty() {
         return Ok(());
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::DirBuilderExt;
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        if dir.exists() {
+            let is_dot = matches!(dir.as_os_str().to_str(), Some(".") | Some(".."));
+            // Skip roots (parent == None) and the current/parent dir markers.
+            if dir.parent().is_some() && !is_dot {
+                let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+            }
+            return Ok(());
+        }
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -254,18 +332,26 @@ fn create_dir_secure(dir: &Path) -> Result<()> {
     }
     #[cfg(not(unix))]
     {
+        if dir.exists() {
+            return Ok(());
+        }
         std::fs::create_dir_all(dir)?;
         Ok(())
     }
 }
 
-fn unique_suffix() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{}-{}", std::process::id(), nanos)
+/// A fresh CSPRNG hex suffix for the temp file name (replaces the old,
+/// predictable pid+timestamp so the temp path is unguessable).
+fn random_suffix() -> Result<String> {
+    let mut bytes = [0u8; 12];
+    getrandom::getrandom(&mut bytes).map_err(|e| Error::Random(e.to_string()))?;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for &b in &bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -368,6 +454,81 @@ mod tests {
 
         let dir_mode = std::fs::metadata(&nested).unwrap().permissions().mode() & 0o777;
         assert_eq!(dir_mode, 0o700, "dir must be 0700, got {dir_mode:o}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_secure_is_exclusive_and_symlink_refusing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+
+        // Fresh create succeeds and is 0600.
+        let target = dir.path().join("fresh.bin");
+        write_file_secure(&target, b"hello").unwrap();
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "temp file must be 0600, got {mode:o}");
+
+        // O_EXCL: creating over an existing path fails with AlreadyExists.
+        let err = write_file_secure(&target, b"again").unwrap_err();
+        match err {
+            Error::Io(e) => assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::AlreadyExists,
+                "expected AlreadyExists, got {e:?}"
+            ),
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        // O_EXCL + O_NOFOLLOW: a symlink at the target path is refused (never
+        // followed / overwritten), so a symlink-swap attack cannot redirect the
+        // write onto an attacker-chosen file.
+        let link = dir.path().join("link.bin");
+        std::os::unix::fs::symlink(dir.path().join("elsewhere.bin"), &link).unwrap();
+        assert!(
+            write_file_secure(&link, b"nope").is_err(),
+            "write through a symlink must be refused"
+        );
+        // The symlink target was not created.
+        assert!(!dir.path().join("elsewhere.bin").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_target_dir_is_tightened_to_0700() {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+        let outer = tempfile::tempdir().unwrap();
+        // Pre-create the credential dir with loose 0755 perms.
+        let nested = outer.path().join("creds");
+        std::fs::DirBuilder::new()
+            .mode(0o755)
+            .create(&nested)
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&nested).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+
+        let store = FileCredentialStore::new(nested.join("auth.json"));
+        let cred = OAuthCredential::new("acc", None, None, None);
+        store.store("openai-codex", &cred).unwrap();
+
+        // The existing dir was tightened to 0700 on write.
+        let dir_mode = std::fs::metadata(&nested).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "existing dir must be tightened to 0700, got {dir_mode:o}"
+        );
+    }
+
+    #[test]
+    fn lock_path_is_sidecar_of_auth_file() {
+        let store = FileCredentialStore::new("/tmp/whatever/auth.json");
+        assert_eq!(
+            store.lock_path(),
+            Some(PathBuf::from("/tmp/whatever/auth.json.lock"))
+        );
     }
 
     #[test]

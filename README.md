@@ -126,6 +126,22 @@ needs a `chatgpt-account-id` header and the `chatgpt.com/backend-api/codex` base
 URL; that provider wiring is the application's responsibility (the account id is
 available on `OAuthCredential::account_id`), exactly as in pi.
 
+**Install it provider-scoped.** The resolver returns the Codex bearer for every
+request regardless of the `ModelIden`, so install it on a client that only
+serves the Codex/ChatGPT provider — not as a global resolver on a multi-provider
+client.
+
+**Serialized refresh (no double-refresh race).** Concurrent requests cannot
+double-refresh a rotating refresh token: the resolver serializes the
+load-check-refresh-store sequence behind a `tokio::sync::Mutex` (in-process) plus
+a best-effort `flock` advisory lock on a `<auth.json>.lock` sidecar
+(cross-process), re-checking expiry inside the lock so late waiters reuse the
+freshly stored token instead of issuing a second refresh. This mirrors pi
+running refresh inside its serialized `modify` lock. The coordination object,
+`genai_integration::CodexTokenResolver`, is public for apps with custom wiring.
+Cross-process serialization is best-effort and covers refreshes routed through
+the resolver; credential writes made outside it are not `flock`-serialized.
+
 ### Fork-branch caveat
 
 The `genai` feature pulls `genai` as a **path dependency** to `../rust-genai`,
@@ -136,17 +152,23 @@ the dependency in `Cargo.toml` to a versioned crates.io release.
 
 ## Features
 
-| Feature    | Default | Effect                                                                 |
-|------------|---------|------------------------------------------------------------------------|
-| `loopback` | off     | Loopback redirect-capture server for the browser flow (tokio sockets). |
-| `genai`    | off     | `genai` `AuthResolver` adapter; adds the `../rust-genai` path dep.      |
+| Feature    | Default | Effect                                                                            |
+|------------|---------|-----------------------------------------------------------------------------------|
+| `loopback` | off     | Loopback redirect-capture server for the browser flow (tokio sockets).            |
+| `genai`    | off     | `genai` `AuthResolver` adapter (serialized refresh); adds `../rust-genai`, `fs2`, `tokio/sync`. |
 
 ## Dependencies (kept lean)
 
 `reqwest` (async HTTP, rustls TLS), `serde`/`serde_json` (JSON), `tokio` (`time`,
 for the device-code poll sleeps), `sha2` + `base64` (PKCE S256 / base64url),
-`getrandom` (CSPRNG for the verifier and CSRF state), and `thiserror` (error
-enum, compile-time only).
+`getrandom` (CSPRNG for the verifier, CSRF state, and temp-file suffix), and
+`thiserror` (error enum, compile-time only). On unix, `libc` (already in the
+tree) supplies the `O_NOFOLLOW` open flag for the credential store's temp file.
+
+The optional `genai` feature additionally pulls `tokio/sync` (the resolver's
+serialization mutex) and `fs2` — a tiny, `libc`-only, safe wrapper around
+`flock(2)` — for the resolver's cross-process advisory lock. The default build
+pulls neither.
 
 ## Security
 
@@ -154,14 +176,22 @@ enum, compile-time only).
   file in plaintext JSON, like pi's `auth.json`. Protect this file the same way
   you protect an API key.
 - **`0600` / `0700`.** On unix the credential file is created `0600`
-  (owner read/write only) and the parent directory `0700`. Writes are atomic
+  (owner read/write only) and the parent directory `0700` — an **existing**
+  target directory is tightened to `0700` too (best-effort). Writes are atomic
   (temp file in the same directory + `rename`) so a crash cannot leave a
-  half-written or world-readable file.
+  half-written or world-readable file. The temp file is created with
+  `O_CREAT | O_EXCL | O_NOFOLLOW` at mode `0600` with a CSPRNG-random suffix, so
+  it never overwrites, follows a symlink, or uses a predictable name.
 - **Env override.** `GENAI_AUTH_FILE` overrides the path — point it at a
   `tmpfs`, an age-encrypted volume, or a per-session directory if you do not want
-  tokens on your home partition.
-- **No secret logging.** Tokens are never logged by this crate. Avoid printing
-  `OAuthCredential` in your own code (its `Debug` is not redacted).
+  tokens on your home partition. Prefer a dedicated directory: its parent is
+  tightened to `0700`.
+- **Redacted `Debug`.** Secret-bearing types (`OAuthCredential`, `Pkce`,
+  `PendingBrowserLogin`, and the internal token/verifier/code carriers) have
+  hand-written `Debug` impls that print secret fields as `"<redacted>"`, so
+  `{:?}` / structured logs cannot leak the access token, refresh token, PKCE
+  verifier, or authorization code. Error variants that carry a response `body`
+  are documented as possibly-sensitive — redact them before logging.
 - **PKCE + CSRF state.** The browser flow uses S256 PKCE and a random `state`
   that must match on the redirect. The loopback host honors
   `PI_OAUTH_CALLBACK_HOST` (default `127.0.0.1`) — keep it on loopback.

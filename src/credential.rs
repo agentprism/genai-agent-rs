@@ -30,7 +30,13 @@ pub const OAUTH_CREDENTIAL_TYPE: &str = "oauth";
 pub const DEFAULT_EXPIRY_SKEW: Duration = Duration::from_secs(5 * 60);
 
 /// A stored OAuth credential (pi's `OAuthCredential`, types.ts:31-34).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// `Debug` is hand-written and **redacts the secret token fields**
+/// (`access_token`, `refresh_token`): both print as `"<redacted>"` (the
+/// refresh token preserving only its `Some`/`None` presence), while non-secret
+/// metadata (`kind`, `expires_at_ms`, `account_id`, `scope`, `extra`) is shown.
+/// This keeps `{:?}` / structured logs from leaking bearer secrets.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct OAuthCredential {
     /// Type tag; always `"oauth"` for this crate.
     #[serde(rename = "type", default = "default_oauth_type")]
@@ -64,6 +70,25 @@ pub struct OAuthCredential {
 
 fn default_oauth_type() -> String {
     OAUTH_CREDENTIAL_TYPE.to_string()
+}
+
+impl std::fmt::Debug for OAuthCredential {
+    /// Redacts the secret token fields; see the type-level docs.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthCredential")
+            .field("kind", &self.kind)
+            .field("access_token", &"<redacted>")
+            // Preserve presence (Some/None) without revealing the value.
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("expires_at_ms", &self.expires_at_ms)
+            .field("account_id", &self.account_id)
+            .field("scope", &self.scope)
+            .field("extra", &self.extra)
+            .finish()
+    }
 }
 
 impl OAuthCredential {
@@ -171,6 +196,52 @@ mod tests {
         let s = serde_json::to_string(&cred).unwrap();
         let back: OAuthCredential = serde_json::from_str(&s).unwrap();
         assert_eq!(cred, back);
+    }
+
+    #[test]
+    fn debug_redacts_secret_tokens() {
+        let cred = OAuthCredential::new(
+            "super-secret-access-token",
+            Some("super-secret-refresh-token".into()),
+            Some(1_750_000_000_000),
+            Some("acct_visible".into()),
+        );
+        let dbg = format!("{cred:?}");
+        // Secrets must not appear.
+        assert!(
+            !dbg.contains("super-secret-access-token"),
+            "access token leaked in Debug: {dbg}"
+        );
+        assert!(
+            !dbg.contains("super-secret-refresh-token"),
+            "refresh token leaked in Debug: {dbg}"
+        );
+        assert!(
+            dbg.contains("<redacted>"),
+            "expected redaction marker: {dbg}"
+        );
+        // Non-secret metadata stays visible.
+        assert!(
+            dbg.contains("acct_visible"),
+            "account id should be visible: {dbg}"
+        );
+        assert!(
+            dbg.contains("1750000000000"),
+            "expiry should be visible: {dbg}"
+        );
+        // Presence of the refresh token is still observable (Some vs None).
+        assert!(
+            dbg.contains("refresh_token: Some"),
+            "refresh presence lost: {dbg}"
+        );
+
+        // A credential without a refresh token shows None (not a redaction).
+        let no_refresh = OAuthCredential::new("a", None, None, None);
+        let dbg2 = format!("{no_refresh:?}");
+        assert!(
+            dbg2.contains("refresh_token: None"),
+            "expected None: {dbg2}"
+        );
     }
 
     #[test]

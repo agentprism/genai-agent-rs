@@ -150,3 +150,44 @@ maps to `genai_integration::codex_auth_resolver` returning
 4. **`require_account_id` toggle** (default `true` = pi parity) lets non-Codex
    or test callers relax the "must contain `chatgpt_account_id`" requirement.
 5. **Cancellation** via future-drop instead of `AbortSignal` (see device-code).
+6. **Resolver-serialized refresh.** pi runs OAuth refresh inside its serialized
+   per-provider `modify` lock (types.ts:54-57,86-90). The Rust
+   `CredentialStore::modify` closure is synchronous, so the async refresh cannot
+   run inside it; instead `genai_integration::CodexTokenResolver` serializes the
+   load-check-refresh-store sequence with a `tokio::sync::Mutex` (in-process) and
+   a best-effort `flock` on a `<auth.json>.lock` sidecar (cross-process, via the
+   new `CredentialStore::lock_path`), with a double-checked expiry re-read inside
+   the lock. This prevents two concurrent requests from both POSTing the same
+   rotating refresh token (one would get `invalid_grant`). Cross-process locking
+   is best-effort and only covers refreshes routed through the resolver.
+7. **Redacted `Debug`.** Every type holding a secret (`OAuthCredential`, `Pkce`,
+   `PendingBrowserLogin`, and the internal `DeviceTokenSuccess` / `OAuthToken` /
+   `ParsedAuth`) has a hand-written `Debug` that prints the secret token /
+   verifier / code fields as `"<redacted>"` while keeping non-secret metadata
+   visible. pi has no equivalent (JS objects log verbatim).
+8. **Overflow-safe expiry.** `expires = Date.now() + expires_in*1000`
+   (openai-codex.ts:145) is computed with clamp + `saturating_add` so a hostile
+   `expires_in` (e.g. `1e300`, `NaN`, `±∞`, negative) cannot panic (debug) or
+   wrap (release): finite huge values saturate to a far-future expiry; non-finite
+   or negative values collapse to "already expired" (fail-closed).
+9. **Empty-string tokens rejected.** An empty `access_token`/`refresh_token` is
+   treated as a missing field (`TokenResponseMissingFields`), matching pi's
+   truthiness check (openai-codex.ts:138 `!json.access_token`).
+10. **`parseAuthorizationInput` / empty-interval — stricter but fail-closed.** A
+    parsed empty `code` is treated as no code (`.filter(|c| !c.is_empty())` in
+    `complete_browser_login`), and a missing/unparseable device `interval` is
+    rejected as `InvalidDeviceCodeResponse` rather than silently defaulting.
+    Both are intentionally stricter than pi and fail closed.
+11. **Temp-file hardening.** The atomic-write temp file is created with
+    `O_CREAT | O_EXCL | O_NOFOLLOW` at mode `0600` and a CSPRNG-random suffix
+    (was pid+timestamp); an existing target directory is also tightened to
+    `0700` (best-effort). pi's store is app-injected, so this is a genai-side
+    default with no direct pi analogue.
+
+## Error redaction (caller responsibility)
+
+Error variants carrying a response `body`/message (`TokenRequest`,
+`TokenResponseMissingFields`, `DeviceCodeRequestFailed`,
+`InvalidDeviceCodeResponse`, `DeviceAuth`) may include response data (and, in the
+`missing fields` case, token material). Their rustdoc warns callers to redact the
+body before logging; the crate itself never logs.
