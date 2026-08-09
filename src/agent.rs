@@ -192,6 +192,24 @@ pub struct AgentConfig {
     /// [`Self::stream_fn`]. Cost is attached at stream finalization by that stream function, never
     /// by the facade.
     pub price_catalog: Option<Arc<dyn PriceCatalog>>,
+    /// Optional maximum number of provider-handshake retries, carried for the application's
+    /// convenience.
+    ///
+    /// Like [`Self::price_catalog`], this is a convenience store only: the facade constructs no
+    /// stream functions and performs no retries. The application is expected to build its
+    /// [`crate::GenaiStreamFn`] with a matching [`crate::RetryPolicy`] (via
+    /// [`crate::GenaiStreamFn::with_retry`]) and pass it as [`Self::stream_fn`]. Mirrors pi's
+    /// `maxRetries` provider-retry option (`provider-retry.ts`); `None`/`0` disables retries.
+    pub max_retries: Option<u32>,
+    /// Optional cap, in milliseconds, on a *server-requested* retry delay, carried for the
+    /// application's convenience.
+    ///
+    /// Like [`Self::max_retries`], this is a convenience store the facade does not apply; install
+    /// the same value on the [`crate::GenaiStreamFn`]'s [`crate::RetryPolicy`]. Mirrors pi's
+    /// `maxRetryDelayMs` (passed at the production construction site, `sdk.ts:359`); its effective
+    /// default is pi's 60000ms and `0` disables the cap. See [`crate::RetryPolicy`] for the exact
+    /// semantics.
+    pub max_retry_delay_ms: Option<u64>,
 }
 
 /// Compatibility name matching the upstream TypeScript constructor documentation.
@@ -224,6 +242,8 @@ impl std::fmt::Debug for AgentConfig {
             .field("transport", &self.transport)
             .field("chat_options", &self.chat_options)
             .field("price_catalog", &self.price_catalog.is_some())
+            .field("max_retries", &self.max_retries)
+            .field("max_retry_delay_ms", &self.max_retry_delay_ms)
             .finish_non_exhaustive()
     }
 }
@@ -250,6 +270,8 @@ impl Default for AgentConfig {
             transport: Transport::Auto,
             chat_options: ChatOptions::default(),
             price_catalog: None,
+            max_retries: None,
+            max_retry_delay_ms: None,
         }
     }
 }
@@ -286,6 +308,25 @@ impl AgentConfig {
     /// finalization.
     pub fn with_price_catalog(mut self, price_catalog: Arc<dyn PriceCatalog>) -> Self {
         self.price_catalog = Some(price_catalog);
+        self
+    }
+
+    /// Carry the maximum number of provider-handshake retries alongside the agent configuration.
+    ///
+    /// This is a convenience store only (see [`Self::max_retries`]): the facade performs no
+    /// retries. Build the [`crate::GenaiStreamFn`] passed as [`Self::stream_fn`] with a matching
+    /// [`crate::RetryPolicy`] via [`crate::GenaiStreamFn::with_retry`].
+    pub fn with_max_retries(mut self, max_retries: u32) -> Self {
+        self.max_retries = Some(max_retries);
+        self
+    }
+
+    /// Carry the server-requested retry-delay cap (milliseconds) alongside the agent configuration.
+    ///
+    /// This is a convenience store only (see [`Self::max_retry_delay_ms`]): the facade performs no
+    /// retries. Install the same value on the [`crate::GenaiStreamFn`]'s [`crate::RetryPolicy`].
+    pub fn with_max_retry_delay_ms(mut self, max_retry_delay_ms: u64) -> Self {
+        self.max_retry_delay_ms = Some(max_retry_delay_ms);
         self
     }
 
