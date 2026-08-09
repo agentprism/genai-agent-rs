@@ -89,6 +89,21 @@ let stream_fn = CodexStreamFn::new(token_source);
 Or pass any `Fn() -> impl Future<Output = Result<CodexToken>>` closure — the
 `dyn Fn -> Future<(bearer, account_id)>` shape — as the token source.
 
+## Model selection
+
+The model id comes from the agent's `AgentState.model` (sent verbatim as the
+Responses `model` field); `CodexStreamFn` does not pick a model.
+
+**A ChatGPT-subscription Codex account does not accept the `-codex`-suffixed
+model slugs.** Verified live (2026-08-09) against a real ChatGPT account: the
+backend rejects `gpt-5-codex`, `gpt-5.1-codex`, `gpt-5.2-codex`, and
+`gpt-5.3-codex` with
+`{"detail":"The '<model>' model is not supported when using Codex with a ChatGPT
+account."}`. A general model such as **`gpt-5.6-sol`** is accepted and streams
+normally. Use a general (non-`-codex`) slug your subscription exposes; the exact
+set is account/plan-dependent, so treat a `not supported` detail as "wrong slug,"
+not a transport failure.
+
 ## Transport modes
 
 Configured via `CodexStreamFn::with_transport(..)` or the per-request
