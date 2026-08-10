@@ -537,51 +537,51 @@ impl Agent {
 	}
 
 	/// Set (or clear with `None`) the transcript-transform hook.
-	pub fn set_transform_context_hook(&self, hook: Arc<dyn TransformContextHook>) -> Result<(), AgentError> {
+	pub fn set_transform_context_hook(&self, hook: Option<Arc<dyn TransformContextHook>>) -> Result<(), AgentError> {
 		self.inner
-			.set_transform_context_object(Arc::new(TransformContextAdapter(hook)) as Arc<dyn agent::TransformContext>)
+			.set_transform_context_object(hook.map(|h| Arc::new(TransformContextAdapter(h)) as Arc<dyn agent::TransformContext>))
 			.map_err(AgentError::from)
 	}
 
 	/// Set (or clear) the before-tool-call gate hook.
-	pub fn set_before_tool_call_hook(&self, hook: Arc<dyn BeforeToolCallHook>) -> Result<(), AgentError> {
+	pub fn set_before_tool_call_hook(&self, hook: Option<Arc<dyn BeforeToolCallHook>>) -> Result<(), AgentError> {
 		self.inner
-			.set_before_tool_call_object(Arc::new(BeforeToolCallAdapter(hook)) as Arc<dyn agent::BeforeToolCall>)
+			.set_before_tool_call_object(hook.map(|h| Arc::new(BeforeToolCallAdapter(h)) as Arc<dyn agent::BeforeToolCall>))
 			.map_err(AgentError::from)
 	}
 
 	/// Set (or clear) the after-tool-call observer hook.
-	pub fn set_after_tool_call_hook(&self, hook: Arc<dyn AfterToolCallHook>) -> Result<(), AgentError> {
+	pub fn set_after_tool_call_hook(&self, hook: Option<Arc<dyn AfterToolCallHook>>) -> Result<(), AgentError> {
 		self.inner
-			.set_after_tool_call_object(Arc::new(AfterToolCallAdapter(hook)) as Arc<dyn agent::AfterToolCall>)
+			.set_after_tool_call_object(hook.map(|h| Arc::new(AfterToolCallAdapter(h)) as Arc<dyn agent::AfterToolCall>))
 			.map_err(AgentError::from)
 	}
 
 	/// Set (or clear) the fallible before-tool-call hook.
-	pub fn set_try_before_tool_call_hook(&self, hook: Arc<dyn TryBeforeToolCallHook>) -> Result<(), AgentError> {
+	pub fn set_try_before_tool_call_hook(&self, hook: Option<Arc<dyn TryBeforeToolCallHook>>) -> Result<(), AgentError> {
 		self.inner
-			.set_try_before_tool_call_object(Arc::new(TryBeforeToolCallAdapter(hook)) as Arc<dyn agent::TryBeforeToolCall>)
+			.set_try_before_tool_call_object(hook.map(|h| Arc::new(TryBeforeToolCallAdapter(h)) as Arc<dyn agent::TryBeforeToolCall>))
 			.map_err(AgentError::from)
 	}
 
 	/// Set (or clear) the fallible after-tool-call hook.
-	pub fn set_try_after_tool_call_hook(&self, hook: Arc<dyn TryAfterToolCallHook>) -> Result<(), AgentError> {
+	pub fn set_try_after_tool_call_hook(&self, hook: Option<Arc<dyn TryAfterToolCallHook>>) -> Result<(), AgentError> {
 		self.inner
-			.set_try_after_tool_call_object(Arc::new(TryAfterToolCallAdapter(hook)) as Arc<dyn agent::TryAfterToolCall>)
+			.set_try_after_tool_call_object(hook.map(|h| Arc::new(TryAfterToolCallAdapter(h)) as Arc<dyn agent::TryAfterToolCall>))
 			.map_err(AgentError::from)
 	}
 
 	/// Set (or clear) the should-stop-after-turn hook.
-	pub fn set_should_stop_after_turn_hook(&self, hook: Arc<dyn ShouldStopAfterTurnHook>) -> Result<(), AgentError> {
+	pub fn set_should_stop_after_turn_hook(&self, hook: Option<Arc<dyn ShouldStopAfterTurnHook>>) -> Result<(), AgentError> {
 		self.inner
-			.set_should_stop_after_turn_object(Arc::new(ShouldStopAdapter(hook)) as Arc<dyn agent::ShouldStopAfterTurn>)
+			.set_should_stop_after_turn_object(hook.map(|h| Arc::new(ShouldStopAdapter(h)) as Arc<dyn agent::ShouldStopAfterTurn>))
 			.map_err(AgentError::from)
 	}
 
 	/// Set (or clear) the prepare-next-turn hook.
-	pub fn set_prepare_next_turn_hook(&self, hook: Arc<dyn PrepareNextTurnHook>) -> Result<(), AgentError> {
+	pub fn set_prepare_next_turn_hook(&self, hook: Option<Arc<dyn PrepareNextTurnHook>>) -> Result<(), AgentError> {
 		self.inner
-			.set_prepare_next_turn_object(Arc::new(PrepareNextTurnAdapter(hook)) as Arc<dyn agent::PrepareNextTurn>)
+			.set_prepare_next_turn_object(hook.map(|h| Arc::new(PrepareNextTurnAdapter(h)) as Arc<dyn agent::PrepareNextTurn>))
 			.map_err(AgentError::from)
 	}
 
@@ -839,6 +839,49 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn cleared_hook_no_longer_blocks() {
+		let (setup, mock) = tool_call_setup();
+		let tool = Arc::new(WeatherTool {
+			executed: AtomicBool::new(false),
+		});
+		let agent = Agent::new_with_stream_fn(setup, mock.clone());
+		agent.set_tools(vec![tool.clone()]);
+
+		struct DenyAll;
+		#[async_trait::async_trait]
+		impl BeforeToolCallHook for DenyAll {
+			async fn before(&self, _ctx: BeforeToolCallContext, _cancel: Arc<AgentCancelToken>) -> BeforeToolCallOutcome {
+				BeforeToolCallOutcome {
+					args_json: None,
+					decision: Some(BeforeToolCallResult {
+						block: true,
+						reason: None,
+						terminate: false,
+					}),
+				}
+			}
+		}
+
+		// Hook registered: the tool call is blocked.
+		agent
+			.set_before_tool_call_hook(Some(Arc::new(DenyAll)))
+			.expect("hook registration while idle");
+		agent.prompt("weather?".to_string()).await.unwrap();
+		assert!(!tool.executed.load(Ordering::SeqCst), "blocked tool must not execute");
+
+		// Hook cleared: the next tool call executes.
+		agent
+			.set_before_tool_call_hook(None)
+			.expect("hook clearing while idle");
+		mock.push_stream(agent::testing::ScriptedStream::from_message(fixtures::tool_use_msg(vec![
+			agent::AgentToolCall::new("call-2", "get_weather", serde_json::json!({ "city": "Porto" })),
+		])));
+		mock.push_stream(agent::testing::ScriptedStream::from_message(fixtures::text_msg("done")));
+		agent.prompt("weather in Porto?".to_string()).await.unwrap();
+		assert!(tool.executed.load(Ordering::SeqCst), "cleared hook: tool must execute");
+	}
+
+	#[tokio::test]
 	async fn before_tool_call_hook_blocks_execution() {
 		let (setup, mock) = tool_call_setup();
 		let tool = Arc::new(WeatherTool {
@@ -864,7 +907,7 @@ mod tests {
 		}
 
 		agent
-			.set_before_tool_call_hook(Arc::new(DenyAll))
+			.set_before_tool_call_hook(Some(Arc::new(DenyAll)))
 			.expect("hook registration while idle");
 		agent.prompt("weather in Lisbon?".to_string()).await.unwrap();
 

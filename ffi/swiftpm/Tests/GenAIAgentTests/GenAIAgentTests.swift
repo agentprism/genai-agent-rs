@@ -82,6 +82,7 @@ final class GenAIAgentTests: XCTestCase {
 		agent.setTools(tools: [tool])
 		agent.addTool(tool: tool)
 		try agent.setBeforeToolCallHook(hook: AllowAll())
+		try agent.setBeforeToolCallHook(hook: nil) // clear
 		try agent.setSteeringSource(source: EmptySource())
 		try agent.setSteeringSource(source: nil) // clear
 	}

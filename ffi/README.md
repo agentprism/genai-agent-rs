@@ -27,9 +27,8 @@ per the §8 naming rule.
 
 **Deliberately out** (additive later, none breaking): host-side `StreamFn`
 (providers go through `GenaiStreamFn`), `ConvertToLlm` (hosts keep the
-default), per-tool `executionMode`, and the tool `UpdateSink`. Note: core
-hook setters take a required `Arc` (no clear variant) except the queue
-sources, so hooks can't currently be cleared once set.
+default), per-tool `executionMode`, and the tool `UpdateSink`. All hook and
+source setters accept `nil` to clear.
 
 ## Semantics (from §8, resolved)
 
