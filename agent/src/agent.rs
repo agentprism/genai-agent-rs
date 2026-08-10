@@ -9,17 +9,21 @@
 //! Cancellation is cooperative through the active run's [`CancellationToken`]. Queue operations and
 //! state snapshots remain available through any clone because all clones share the same agent.
 
+use crate::hooks::{
+    after_tool_call_to_hook, before_tool_call_to_hook, message_converter_to_hook,
+    prepare_next_turn_to_hook, queue_source_to_hook, should_stop_after_turn_to_hook,
+    transform_context_to_hook, try_after_tool_call_to_hook, try_before_tool_call_to_hook,
+};
 use crate::{
-    AfterToolCall, AfterToolCallContext, AfterToolCallHook, AgentContext, AgentError, AgentEvent,
-    AgentLoopConfig, AgentMessage, AgentPrepareNextTurnHook, AgentPrepareNextTurnWithContextHook,
+    AfterToolCall, AfterToolCallHook, AgentContext, AgentError, AgentEvent, AgentLoopConfig,
+    AgentMessage, AgentPrepareNextTurnHook, AgentPrepareNextTurnWithContextHook,
     AgentShouldStopAfterTurnHook, AgentTool, AssistantContent, AssistantMessage, BeforeToolCall,
-    BeforeToolCallContext, BeforeToolCallHook, BusyContext, ConvertToLlm, EventSink, MessageConverter,
-    OnPayloadHook, OnResponseHook, PrepareNextTurn, PrepareNextTurnContext, PriceCatalog, QueueMode,
-    QueueMessagesHook, QueueSource, ShouldStopAfterTurn, ShouldStopAfterTurnContext, StopReason,
-    StreamFn, ThinkingBudgets, ThinkingLevel, ToolExecutionMode, TransformContext,
-    TransformContextHook, Transport, TryAfterToolCall, TryAfterToolCallHook, TryBeforeToolCall,
-    TryBeforeToolCallHook, UserContent, UserMessage, default_convert_to_llm, get_default_stream_fn,
-    resolve_reasoning_effort, run_agent_loop, run_agent_loop_continue,
+    BeforeToolCallHook, BusyContext, ConvertToLlm, EventSink, MessageConverter, OnPayloadHook,
+    OnResponseHook, PrepareNextTurn, PriceCatalog, QueueMode, QueueMessagesHook, QueueSource,
+    ShouldStopAfterTurn, StopReason, StreamFn, ThinkingBudgets, ThinkingLevel, ToolExecutionMode,
+    TransformContext, TransformContextHook, Transport, TryAfterToolCall, TryAfterToolCallHook,
+    TryBeforeToolCall, TryBeforeToolCallHook, UserContent, UserMessage, default_convert_to_llm,
+    get_default_stream_fn, resolve_reasoning_effort, run_agent_loop, run_agent_loop_continue,
 };
 use futures::FutureExt;
 use futures::future::BoxFuture;
@@ -326,14 +330,6 @@ impl Default for AgentConfig {
     }
 }
 
-/// Adapt an object-safe [`QueueSource`] into the internal [`QueueMessagesHook`] closure the loop
-/// consumes. Each poll clones the `Arc` into the returned future so the hook stays `Fn`.
-fn queue_source_to_hook(source: Arc<dyn QueueSource>) -> QueueMessagesHook {
-    Arc::new(move || {
-        let source = source.clone();
-        Box::pin(async move { source.poll().await })
-    })
-}
 
 impl AgentConfig {
     /// Install an agent-specific provider stream function.
@@ -985,11 +981,7 @@ impl Agent {
         &self,
         converter: Arc<dyn MessageConverter>,
     ) -> Result<(), AgentError> {
-        let closure: ConvertToLlm = Arc::new(move |messages: Vec<AgentMessage>| {
-            let converter = converter.clone();
-            Box::pin(async move { converter.convert(&messages) })
-        });
-        self.set_convert_to_llm(closure)
+        self.set_convert_to_llm(message_converter_to_hook(converter))
     }
 
     /// Register an object-safe [`TransformContext`] as the context transform for the next run.
@@ -1000,17 +992,12 @@ impl Agent {
         &self,
         hook: Arc<dyn TransformContext>,
     ) -> Result<(), AgentError> {
-        let closure: TransformContextHook =
-            Arc::new(move |messages: Vec<AgentMessage>, cancel: CancellationToken| {
-                let hook = hook.clone();
-                Box::pin(async move { hook.transform(messages, cancel).await })
-            });
-        self.set_transform_context(Some(closure))
+        self.set_transform_context(Some(transform_context_to_hook(hook)))
     }
 
     /// Register an object-safe [`BeforeToolCall`] as the before-tool-call hook for the next run.
     ///
-    /// The trait takes an owned [`BeforeToolCallContext`] and returns an owned
+    /// The trait takes an owned [`crate::BeforeToolCallContext`] and returns an owned
     /// [`crate::BeforeToolCallOutcome`]; the adapter writes any returned `args` back into the loop's
     /// borrowed `&mut` context before returning the decision (the borrow bridge), so loop semantics
     /// are identical to the closure form. Delegates to [`Self::set_before_tool_call`]; returns
@@ -1019,19 +1006,7 @@ impl Agent {
         &self,
         hook: Arc<dyn BeforeToolCall>,
     ) -> Result<(), AgentError> {
-        let closure: BeforeToolCallHook =
-            Arc::new(move |ctx: &mut BeforeToolCallContext, cancel: CancellationToken| {
-                let hook = hook.clone();
-                let owned = ctx.clone();
-                Box::pin(async move {
-                    let out = hook.before(owned, cancel).await;
-                    if let Some(args) = out.args {
-                        ctx.args = args;
-                    }
-                    out.decision
-                })
-            });
-        self.set_before_tool_call(Some(closure))
+        self.set_before_tool_call(Some(before_tool_call_to_hook(hook)))
     }
 
     /// Register an object-safe [`AfterToolCall`] as the after-tool-call hook for the next run.
@@ -1041,12 +1016,7 @@ impl Agent {
         &self,
         hook: Arc<dyn AfterToolCall>,
     ) -> Result<(), AgentError> {
-        let closure: AfterToolCallHook =
-            Arc::new(move |ctx: AfterToolCallContext, cancel: CancellationToken| {
-                let hook = hook.clone();
-                Box::pin(async move { hook.after(ctx, cancel).await })
-            });
-        self.set_after_tool_call(Some(closure))
+        self.set_after_tool_call(Some(after_tool_call_to_hook(hook)))
     }
 
     /// Register an object-safe [`TryBeforeToolCall`] as the fallible before-tool-call hook.
@@ -1059,19 +1029,7 @@ impl Agent {
         &self,
         hook: Arc<dyn TryBeforeToolCall>,
     ) -> Result<(), AgentError> {
-        let closure: TryBeforeToolCallHook =
-            Arc::new(move |ctx: &mut BeforeToolCallContext, cancel: CancellationToken| {
-                let hook = hook.clone();
-                let owned = ctx.clone();
-                Box::pin(async move {
-                    let out = hook.before(owned, cancel).await?;
-                    if let Some(args) = out.args {
-                        ctx.args = args;
-                    }
-                    Ok(out.decision)
-                })
-            });
-        self.set_try_before_tool_call(Some(closure))
+        self.set_try_before_tool_call(Some(try_before_tool_call_to_hook(hook)))
     }
 
     /// Register an object-safe [`TryAfterToolCall`] as the fallible after-tool-call hook.
@@ -1082,12 +1040,7 @@ impl Agent {
         &self,
         hook: Arc<dyn TryAfterToolCall>,
     ) -> Result<(), AgentError> {
-        let closure: TryAfterToolCallHook =
-            Arc::new(move |ctx: AfterToolCallContext, cancel: CancellationToken| {
-                let hook = hook.clone();
-                Box::pin(async move { hook.after(ctx, cancel).await })
-            });
-        self.set_try_after_tool_call(Some(closure))
+        self.set_try_after_tool_call(Some(try_after_tool_call_to_hook(hook)))
     }
 
     /// Register an object-safe [`ShouldStopAfterTurn`] as the graceful-stop predicate.
@@ -1098,12 +1051,7 @@ impl Agent {
         &self,
         hook: Arc<dyn ShouldStopAfterTurn>,
     ) -> Result<(), AgentError> {
-        let closure: AgentShouldStopAfterTurnHook =
-            Arc::new(move |ctx: ShouldStopAfterTurnContext, cancel: CancellationToken| {
-                let hook = hook.clone();
-                Box::pin(async move { hook.should_stop(ctx, cancel).await })
-            });
-        self.set_should_stop_after_turn(Some(closure))
+        self.set_should_stop_after_turn(Some(should_stop_after_turn_to_hook(hook)))
     }
 
     /// Register an object-safe [`PrepareNextTurn`] as the context-aware next-turn hook.
@@ -1114,12 +1062,7 @@ impl Agent {
         &self,
         hook: Arc<dyn PrepareNextTurn>,
     ) -> Result<(), AgentError> {
-        let closure: AgentPrepareNextTurnWithContextHook =
-            Arc::new(move |ctx: PrepareNextTurnContext, cancel: CancellationToken| {
-                let hook = hook.clone();
-                Box::pin(async move { hook.prepare(ctx, cancel).await })
-            });
-        self.set_prepare_next_turn_with_context(Some(closure))
+        self.set_prepare_next_turn_with_context(Some(prepare_next_turn_to_hook(hook)))
     }
 
     /// Install (or, with `None`, clear) an object-safe [`QueueSource`] as the steering message

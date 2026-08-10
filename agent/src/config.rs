@@ -15,7 +15,7 @@ use genai::chat::{ChatOptions, ReasoningEffort};
 use std::sync::Arc;
 
 /// Execution policy for the tool calls contained in one assistant message.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ToolExecutionMode {
     /// Prepare and execute calls one at a time in source order.
     Sequential,
@@ -55,7 +55,7 @@ pub fn resolve_reasoning_effort(
 }
 
 /// Number of queued messages returned by one steering or follow-up poll.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum QueueMode {
     /// Drain every message currently in the queue, preserving FIFO order.
     All,
@@ -68,7 +68,7 @@ pub enum QueueMode {
 ///
 /// Named levels and explicit budgets are requests: their support and interpretation remain
 /// provider-specific.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ThinkingLevel {
     /// Do not set a reasoning-effort option.
     #[default]
@@ -126,7 +126,7 @@ impl ThinkingLevel {
 ///
 /// Following pi-ai's `clampReasoning`, the extra-high and maximum levels resolve through the
 /// [`Self::high`] entry.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct ThinkingBudgets {
     /// Token budget for [`ThinkingLevel::Minimal`].

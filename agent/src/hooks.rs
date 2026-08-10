@@ -18,7 +18,7 @@
 
 use crate::{
     AgentContext, AgentMessage, AgentToolCall, AgentToolResult, AgentUsage, AssistantMessage,
-    ThinkingLevel, ToolHookError, ToolResultContent, ToolResultMessage,
+    ConvertToLlm, ThinkingLevel, ToolHookError, ToolResultContent, ToolResultMessage,
 };
 use async_trait::async_trait;
 use futures::future::BoxFuture;
@@ -411,4 +411,121 @@ pub trait QueueSource: Send + Sync {
 pub trait MessageConverter: Send + Sync {
     /// Convert the widened transcript snapshot into provider chat messages.
     fn convert(&self, messages: &[AgentMessage]) -> Vec<ChatMessage>;
+}
+
+// ---------------------------------------------------------------------------
+// Trait-object → closure adapters (Layer A1).
+// ---------------------------------------------------------------------------
+//
+// Each helper wraps an `Arc<dyn Trait>` mirror into the existing `Arc<dyn Fn…>` closure alias the
+// loop already consumes. These are the single source of truth for the borrow-bridge / `Arc`-clone
+// logic: both the runtime `Agent::set_*_object` setters and the construction-time `AgentBuilder`
+// (and `AgentConfig::with_*_source_object`) route through them, so a trait mirror behaves
+// identically no matter which entry point installs it. They are `pub(crate)`: an implementation
+// detail of the additive object surface, not part of the public API.
+
+/// Adapt an object-safe [`MessageConverter`] into the async [`ConvertToLlm`] closure. Each call
+/// clones the `Arc` into the returned ready future so the closure stays `Fn`.
+pub(crate) fn message_converter_to_hook(converter: Arc<dyn MessageConverter>) -> ConvertToLlm {
+    Arc::new(move |messages: Vec<AgentMessage>| {
+        let converter = converter.clone();
+        Box::pin(async move { converter.convert(&messages) })
+    })
+}
+
+/// Adapt an object-safe [`TransformContext`] into a [`TransformContextHook`].
+pub(crate) fn transform_context_to_hook(
+    hook: Arc<dyn TransformContext>,
+) -> TransformContextHook {
+    Arc::new(move |messages: Vec<AgentMessage>, cancel: CancellationToken| {
+        let hook = hook.clone();
+        Box::pin(async move { hook.transform(messages, cancel).await })
+    })
+}
+
+/// Adapt an object-safe [`BeforeToolCall`] into a [`BeforeToolCallHook`].
+///
+/// The `&mut` borrow bridge: the trait takes an owned [`BeforeToolCallContext`] and returns an owned
+/// [`BeforeToolCallOutcome`]; this adapter writes any returned `args` back into the loop's borrowed
+/// `&mut` context before returning the `decision`, so loop semantics match the closure form exactly.
+pub(crate) fn before_tool_call_to_hook(hook: Arc<dyn BeforeToolCall>) -> BeforeToolCallHook {
+    Arc::new(move |ctx: &mut BeforeToolCallContext, cancel: CancellationToken| {
+        let hook = hook.clone();
+        let owned = ctx.clone();
+        Box::pin(async move {
+            let out = hook.before(owned, cancel).await;
+            if let Some(args) = out.args {
+                ctx.args = args;
+            }
+            out.decision
+        })
+    })
+}
+
+/// Adapt an object-safe [`AfterToolCall`] into an [`AfterToolCallHook`].
+pub(crate) fn after_tool_call_to_hook(hook: Arc<dyn AfterToolCall>) -> AfterToolCallHook {
+    Arc::new(move |ctx: AfterToolCallContext, cancel: CancellationToken| {
+        let hook = hook.clone();
+        Box::pin(async move { hook.after(ctx, cancel).await })
+    })
+}
+
+/// Adapt an object-safe [`TryBeforeToolCall`] into a [`TryBeforeToolCallHook`].
+///
+/// Same borrow bridge as [`before_tool_call_to_hook`]: on `Ok`, any returned `args` are written back
+/// and the `decision` is returned; `Err` is propagated (skips execution, becomes the call's in-band
+/// error tool result).
+pub(crate) fn try_before_tool_call_to_hook(
+    hook: Arc<dyn TryBeforeToolCall>,
+) -> TryBeforeToolCallHook {
+    Arc::new(move |ctx: &mut BeforeToolCallContext, cancel: CancellationToken| {
+        let hook = hook.clone();
+        let owned = ctx.clone();
+        Box::pin(async move {
+            let out = hook.before(owned, cancel).await?;
+            if let Some(args) = out.args {
+                ctx.args = args;
+            }
+            Ok(out.decision)
+        })
+    })
+}
+
+/// Adapt an object-safe [`TryAfterToolCall`] into a [`TryAfterToolCallHook`].
+pub(crate) fn try_after_tool_call_to_hook(
+    hook: Arc<dyn TryAfterToolCall>,
+) -> TryAfterToolCallHook {
+    Arc::new(move |ctx: AfterToolCallContext, cancel: CancellationToken| {
+        let hook = hook.clone();
+        Box::pin(async move { hook.after(ctx, cancel).await })
+    })
+}
+
+/// Adapt an object-safe [`ShouldStopAfterTurn`] into an [`AgentShouldStopAfterTurnHook`].
+pub(crate) fn should_stop_after_turn_to_hook(
+    hook: Arc<dyn ShouldStopAfterTurn>,
+) -> AgentShouldStopAfterTurnHook {
+    Arc::new(move |ctx: ShouldStopAfterTurnContext, cancel: CancellationToken| {
+        let hook = hook.clone();
+        Box::pin(async move { hook.should_stop(ctx, cancel).await })
+    })
+}
+
+/// Adapt an object-safe [`PrepareNextTurn`] into an [`AgentPrepareNextTurnWithContextHook`].
+pub(crate) fn prepare_next_turn_to_hook(
+    hook: Arc<dyn PrepareNextTurn>,
+) -> AgentPrepareNextTurnWithContextHook {
+    Arc::new(move |ctx: PrepareNextTurnContext, cancel: CancellationToken| {
+        let hook = hook.clone();
+        Box::pin(async move { hook.prepare(ctx, cancel).await })
+    })
+}
+
+/// Adapt an object-safe [`QueueSource`] into the internal [`QueueMessagesHook`] the loop consumes.
+/// Each poll clones the `Arc` into the returned future so the hook stays `Fn`.
+pub(crate) fn queue_source_to_hook(source: Arc<dyn QueueSource>) -> QueueMessagesHook {
+    Arc::new(move || {
+        let source = source.clone();
+        Box::pin(async move { source.poll().await })
+    })
 }

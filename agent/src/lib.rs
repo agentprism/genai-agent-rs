@@ -8,6 +8,7 @@ pub mod error;
 pub mod event;
 pub mod hooks;
 pub mod message;
+pub mod setup;
 pub mod tool;
 pub mod validate;
 
@@ -30,6 +31,7 @@ pub use error::*;
 pub use event::*;
 pub use hooks::*;
 pub use message::*;
+pub use setup::*;
 pub use tool::*;
 pub use validate::*;
 
