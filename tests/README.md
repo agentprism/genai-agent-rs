@@ -10,13 +10,21 @@ This directory ports the non-harness behavioral contract from
 - `e2e_scripted.rs`: 10 mapped cases
 - Mapped parity: **52/52 green**, zero ignored and zero documented divergences
 - M1-M6 completion checkpoint: **112/112 green**
-- Current hardened all-feature repository suite: **120/120 green**
+- Current all-feature repository suite: **220/220 green**
 
 Focused targets additionally cover the assistant accumulator, malformed stream handling, event
-stream lifetime, runtime configuration, proxy HTTP/SSE and trust-boundary behavior, bounded
-streaming JSON/tool arguments, protocol validation, and tool-update settlement/concurrency. All
-provider behavior in tests is scripted or served by local mock HTTP endpoints; the live examples
-are compiled but never executed by the suite.
+stream lifetime, runtime configuration (including independent session/retry request fields and
+shared thinking-budget resolution), fallible tool preparation and before/after hook channels in
+sequential and parallel execution, proxy HTTP/SSE and trust-boundary behavior, bounded streaming
+JSON/tool arguments, protocol validation, and tool-update settlement/concurrency. The
+execution-seam targets (`exec_hooks.rs`, `stream_fn_retry.rs`) pin the request-level
+`on_payload`/`on_response` overrides `GenaiStreamFn` honors through the fork's `ExecOptions`
+(inherit/replace exactly once per channel per physical attempt, including HTTP errors and
+retries, never composing with construction defaults), saturating retry-delay conversion, and
+session-id correlation that never enters provider JSON. `fixtures/fresh-consumer/` is the DIST-01
+distribution fixture exercised by `scripts/check-distribution.sh`, not by the test suite. All provider
+behavior in tests is scripted or served by local mock HTTP endpoints; the live examples are
+compiled but never executed by the suite.
 
 ```bash
 # Verify that the aggregate manifest exactly equals its ordered fragments and pinned TS cases.

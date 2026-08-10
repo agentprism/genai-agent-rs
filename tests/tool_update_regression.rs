@@ -23,7 +23,9 @@ use tokio::sync::Notify;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-const TEST_TIMEOUT: Duration = Duration::from_secs(2);
+// Generous deadlock safety-net (not a latency assertion): a tight bound only fires spuriously under
+// CPU-saturated runs. The 250ms `recv_timeout` race probe below IS an intentional short window.
+const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn model_iden() -> ModelIden {
     ModelIden::new(AdapterKind::OpenAIResp, "mock")

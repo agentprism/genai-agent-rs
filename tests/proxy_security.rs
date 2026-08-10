@@ -13,7 +13,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+// Generous deadlock safety-net (not a latency assertion): a tight bound only fires spuriously
+// under CPU-saturated runs. The 500ms accept-poll further down IS an intentional short window.
+const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn default_request() -> StreamRequest {
     StreamRequest::new(

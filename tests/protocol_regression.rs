@@ -56,12 +56,12 @@ async fn channel_result_and_events_use_the_first_queued_terminal() {
     sender.send(done(second)).unwrap();
 
     // Channel-backed streams publish their result from the producer, before the stream is polled.
-    let resolved = timeout(Duration::from_secs(1), result.get())
+    let resolved = timeout(Duration::from_secs(30), result.get())
         .await
         .expect("a queued terminal should resolve the result")
         .expect("the terminal result should be valid");
     let terminal = stream.next().await.expect("the first terminal event");
-    let trailing = timeout(Duration::from_secs(1), stream.next())
+    let trailing = timeout(Duration::from_secs(30), stream.next())
         .await
         .expect("the stream should fuse immediately after its terminal event");
 

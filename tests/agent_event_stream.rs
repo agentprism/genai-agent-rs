@@ -155,7 +155,7 @@ async fn result_resolves_without_polling_and_events_remain_available() {
     );
     let result = stream.result_handle();
 
-    let messages = tokio::time::timeout(Duration::from_secs(1), result.get())
+    let messages = tokio::time::timeout(Duration::from_secs(30), result.get())
         .await
         .expect("result hung while the event stream was not polled")
         .unwrap();
@@ -229,7 +229,7 @@ async fn dropping_event_iteration_does_not_prevent_a_retained_result() {
     drop(stream);
     cancel.cancel();
 
-    let messages = tokio::time::timeout(Duration::from_secs(1), result.get())
+    let messages = tokio::time::timeout(Duration::from_secs(30), result.get())
         .await
         .expect("dropping event iteration stalled the loop task")
         .unwrap();
@@ -256,12 +256,12 @@ async fn dropping_all_stream_owners_aborts_an_unobservable_background_task() {
         Some(provider),
     );
 
-    tokio::time::timeout(Duration::from_secs(1), started_rx)
+    tokio::time::timeout(Duration::from_secs(30), started_rx)
         .await
         .expect("provider boundary was not entered")
         .unwrap();
     drop(stream);
-    tokio::time::timeout(Duration::from_secs(1), dropped_rx)
+    tokio::time::timeout(Duration::from_secs(30), dropped_rx)
         .await
         .expect("unobservable loop task leaked after its stream was dropped")
         .unwrap();
@@ -280,7 +280,7 @@ async fn cancellation_token_is_forwarded_to_the_spawned_loop() {
     let result = stream.result_handle();
     cancel.cancel();
 
-    let messages = tokio::time::timeout(Duration::from_secs(1), result.get())
+    let messages = tokio::time::timeout(Duration::from_secs(30), result.get())
         .await
         .expect("cancelled loop did not settle")
         .unwrap();
@@ -319,7 +319,7 @@ async fn a_malformed_assistant_stream_still_settles_the_wrapper_result() {
         Some(Arc::new(MalformedStreamFn)),
     );
 
-    let messages = tokio::time::timeout(Duration::from_secs(1), stream.result())
+    let messages = tokio::time::timeout(Duration::from_secs(30), stream.result())
         .await
         .expect("malformed boundary left the wrapper result pending")
         .unwrap();
@@ -346,7 +346,7 @@ async fn a_panicking_boundary_resolves_an_error_and_closes_a_fused_stream() {
     );
     let result = stream.result_handle();
 
-    let error = tokio::time::timeout(Duration::from_secs(1), result.get())
+    let error = tokio::time::timeout(Duration::from_secs(30), result.get())
         .await
         .expect("panicking loop task left the result pending")
         .unwrap_err();

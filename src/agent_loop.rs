@@ -15,7 +15,7 @@ mod tool_exec;
 use crate::{
     AgentContext, AgentEvent, AgentEventSink, AgentLoopConfig, AgentMessage, AssistantMessage,
     AssistantMessageEvent, LlmContext, LoopError, StopReason, StreamFn, StreamRequest,
-    get_default_stream_fn,
+    get_default_stream_fn, resolve_reasoning_effort,
 };
 use futures::stream::FusedStream;
 use futures::{FutureExt, Stream, StreamExt};
@@ -442,7 +442,10 @@ where
                     config.model = model;
                 }
                 if let Some(thinking_level) = update.thinking_level {
-                    config.chat_options.reasoning_effort = thinking_level.reasoning_effort();
+                    // Next-turn thinking updates resolve through the same `ThinkingBudgets` map as
+                    // the stateful agent's initial snapshot.
+                    config.chat_options.reasoning_effort =
+                        resolve_reasoning_effort(thinking_level, config.thinking_budgets.as_ref());
                 }
             }
 
@@ -513,13 +516,18 @@ where
     };
     // The exec hooks are forwarded as handles, not invoked here: honoring them is a
     // stream-function concern (custom `StreamFn`s and the proxy honor them per request; the
-    // client-level `GenaiStreamFn` applies its construction-time hooks instead).
+    // client-level `GenaiStreamFn` applies its construction-time hooks instead). The session id
+    // and retry fields are forwarded the same way; none of them writes
+    // `ChatOptions::prompt_cache_key`.
     let mut request = StreamRequest::new(config.model.clone(), llm_context)
         .with_options(config.chat_options.clone())
         .with_transport(config.transport)
         .with_cancellation(cancel.clone());
     request.on_payload = config.on_payload.clone();
     request.on_response = config.on_response.clone();
+    request.session_id = config.session_id.clone();
+    request.max_retries = config.max_retries;
+    request.max_retry_delay_ms = config.max_retry_delay_ms;
     let mut response = stream_fn.stream(request).await;
     let final_result = response.result_handle();
 

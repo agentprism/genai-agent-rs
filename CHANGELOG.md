@@ -4,6 +4,84 @@ All notable changes to this crate are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Core-runtime batch (independent request fields, shared thinking-budget resolution, fallible tool
+channels) plus the execution-seam batch (request-level exec-hook overrides honored by
+`GenaiStreamFn`, a saturating retry-delay conversion, and the DIST-01 interim distribution
+gate). The all-feature repository suite is **220/220** green.
+
+### Added
+
+- **Request-level exec hooks on `GenaiStreamFn`.** Per-request `StreamRequest::on_payload` /
+  `on_response` hooks are now honored by the production stream function through the genai fork's
+  new request-level `ExecOptions` (`exec_chat_stream_with_exec_options`): a request hook
+  **replaces** the construction-time hook of its channel for that execution only — the two never
+  compose, exactly one hook fires per channel per physical attempt (including retries and
+  HTTP-error responses), and an absent request hook inherits the construction default installed
+  via `GenaiStreamFn::with_exec_hooks`. Combined with the facade's run-admission snapshots, an
+  idle `Agent::set_on_payload` / `set_on_response` replacement takes effect on the next run while
+  an in-flight run keeps its snapshot.
+- **DIST-01 interim distribution workflow.** `scripts/check-distribution.sh` is the release gate:
+  it verifies the exact commit/version pins, the `publish = false` flag, documentation honesty
+  (no registry-only install claims), and the packaged archive contents, then extracts both
+  `cargo package` archives into a fresh temporary consumer, patches `genai` to the exact local
+  archive equivalent of the pinned fork commit, and builds/tests the consumer without sibling
+  source paths. `tests/fixtures/fresh-consumer/` is the runnable reference consumer.
+- **CI gate.** `.github/workflows/distribution.yml` runs the distribution gate; no workflow
+  performs any publication action.
+
+### Changed
+
+- **Publication is explicitly disabled.** The manifest sets `publish = false` and drops the
+  docs.rs `documentation` link while the fork-only `genai` APIs remain unpublished; the `genai`
+  dependency now pins the exact fork version `=0.7.0-beta.19.1-agentprism` (dual-source path
+  form). The README installation section documents only the interim archive+patch flow.
+
+### Fixed
+
+- **Out-of-range server retry delays saturate instead of panicking.** A `retry-after` /
+  `retry-after-ms` value beyond `Duration`'s range (cap disabled) now saturates at
+  `Duration::MAX` in `GenaiStreamFn`'s retry layer — preserving the never-throw `StreamFn`
+  contract — and cancellation still wins over the saturated sleep.
+
+### Added (core-runtime batch)
+
+- **Independent request fields.** `AgentLoopConfig` and `StreamRequest` gain `session_id`,
+  `max_retries`, and `max_retry_delay_ms` with `with_*` builders. `AgentConfig` snapshots them into
+  each run's loop configuration and the loop forwards them onto every stream request.
+  `GenaiStreamFn` honors per-request `max_retries`/`max_retry_delay_ms` as overrides of its
+  construction-time `RetryPolicy` (a per-request `Some(0)` disables retries for that request).
+- **Fallible tool channels.** `AgentTool::try_prepare_arguments` is a new default trait method that
+  adapts existing `prepare_arguments` implementations; `FnTool::with_try_prepare_arguments` is the
+  closure-backed builder. `TryBeforeToolCallHook` / `TryAfterToolCallHook` come with matching
+  `AgentConfig` and `AgentLoopConfig` fields, builders, and `Busy`-guarded `Agent::set_try_*`
+  setters. An `Err` becomes an ordinary in-band error tool result carrying the `ToolHookError`
+  display text verbatim (pi's `error.message` semantics): preparation and before-hook failures skip
+  execution, and an after-hook failure replaces the completed result (content, details, usage, and
+  any termination request are discarded) without rolling back tool side effects. A fallible channel
+  takes precedence over its legacy counterpart when both are installed; the two are never both
+  invoked for one call.
+- **`ToolHookError`**, the error type of the fallible tool channels.
+- **`resolve_reasoning_effort`** is public, and `AgentLoopConfig` carries an optional
+  `thinking_budgets` map: prepare-next-turn thinking updates resolve through it exactly like the
+  stateful agent's initial snapshot (custom budgets, `xhigh`/`max` clamping, explicit-budget
+  bypass, and named-level fallback all behave identically on both paths).
+
+### Changed
+
+- **`session_id` is now independent of `ChatOptions::prompt_cache_key`.** Setting or clearing
+  `AgentConfig::session_id` / `Agent::set_session_id` no longer writes `prompt_cache_key`, and an
+  explicitly configured cache key is no longer adopted as the session id at construction or by
+  `set_chat_options`. The session id is forwarded onto each stream request as
+  `StreamRequest::session_id` instead. Migration: code that relied on the previous mirroring should
+  set `ChatOptions::prompt_cache_key` explicitly.
+- **`AgentConfig::max_retries` / `max_retry_delay_ms` are no longer passive convenience stores.**
+  They are forwarded onto every run's stream requests, and a `GenaiStreamFn` stream function honors
+  them as per-request overrides of its construction-time `RetryPolicy`. Applications that
+  previously copied the values onto `GenaiStreamFn::with_retry` can now rely on the forwarding; the
+  construction-time policy remains the default when a request carries `None`.
+
 ## [0.2.0] - 2026-08-07
 
 Production-parity release bundling parity batches 1–3 and a release wrap-up. The pinned

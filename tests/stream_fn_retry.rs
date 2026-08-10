@@ -12,8 +12,8 @@ use genai::chat::ChatMessage;
 use genai::resolver::{AuthData, Endpoint};
 use genai::{Client, ModelIden, ModelSpec, ServiceTarget};
 use rust_genai_agent::{
-    AssistantMessage, CancellationToken, GenaiStreamFn, LlmContext, RetryPolicy, StopReason,
-    StreamFn, StreamRequest,
+    Agent, AgentConfig, AgentState, AssistantMessage, CancellationToken, GenaiStreamFn, LlmContext,
+    RetryPolicy, StopReason, StreamFn, StreamRequest,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -22,7 +22,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::time::timeout;
 
-const TEST_TIMEOUT: Duration = Duration::from_secs(3);
+// Generous deadlock safety-net (not a latency assertion): a tight bound only fires spuriously under
+// CPU-saturated runs. The retry-delay *lower bounds* asserted below (`elapsed() >= 15ms/300ms`) are
+// the real timing assertions and are unaffected by this ceiling.
+const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Spawn a one-shot-per-connection scripted HTTP server: the Nth accepted connection is answered
 /// with `responses[N]`. Returns the base URL and a counter of accepted connections (i.e., the
@@ -112,7 +115,12 @@ fn request(url: &str) -> StreamRequest {
 
 /// Drive a stream function to its terminal assistant message.
 async fn drive(stream_fn: &GenaiStreamFn, url: &str) -> AssistantMessage {
-    let stream = timeout(TEST_TIMEOUT, stream_fn.stream(request(url)))
+    drive_request(stream_fn, request(url)).await
+}
+
+/// Drive a stream function with an explicit request to its terminal assistant message.
+async fn drive_request(stream_fn: &GenaiStreamFn, request: StreamRequest) -> AssistantMessage {
+    let stream = timeout(TEST_TIMEOUT, stream_fn.stream(request))
         .await
         .expect("stream() returned before timeout");
     let result = stream.result_handle();
@@ -331,9 +339,54 @@ async fn cancellation_during_retry_sleep_aborts_promptly() {
         cancel.cancel();
     });
 
-    let stream = timeout(Duration::from_secs(1), stream_fn.stream(request))
+    let stream = timeout(Duration::from_secs(30), stream_fn.stream(request))
         .await
         .expect("stream() aborted promptly, not after the 5s server delay");
+    let result = stream.result_handle();
+    let _events: Vec<_> = stream.collect().await;
+    let message = result.get().await.expect("terminal message");
+
+    assert_eq!(message.stop_reason, StopReason::Aborted);
+    assert_eq!(
+        message.error_message.as_deref(),
+        Some("Request aborted by user")
+    );
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        1,
+        "the retry was never issued after cancellation"
+    );
+    canceller.await.unwrap();
+}
+
+#[tokio::test]
+async fn out_of_range_server_delay_saturates_and_cancellation_wins_over_sleeping() {
+    // `retry-after-ms: 1e30` exceeds `Duration`'s range: with the cap disabled (a per-request
+    // `max_retry_delay_ms(0)` override of the construction policy), the delay must safely
+    // saturate instead of panicking (the never-throw contract), and cancelling during the wait
+    // must still abort promptly without issuing the retry.
+    let (url, connections) = spawn_scripted_server(vec![
+        http_error("429 Too Many Requests", "retry-after-ms: 1e30\r\n"),
+        http_sse_hello(),
+    ])
+    .await;
+    let stream_fn = GenaiStreamFn::new(Client::builder().build()).with_retry(RetryPolicy {
+        max_retries: 3,
+        max_retry_delay_ms: 60_000,
+    });
+
+    let cancel = CancellationToken::new();
+    let request = request(&url)
+        .with_cancellation(cancel.clone())
+        .with_max_retry_delay_ms(0);
+    let canceller = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        cancel.cancel();
+    });
+
+    let stream = timeout(Duration::from_secs(30), stream_fn.stream(request))
+        .await
+        .expect("stream() aborted promptly, not after the saturated delay");
     let result = stream.result_handle();
     let _events: Vec<_> = stream.collect().await;
     let message = result.get().await.expect("terminal message");
@@ -379,4 +432,124 @@ async fn content_then_mid_stream_error_is_not_retried() {
         1,
         "content already emitted -> never retried"
     );
+}
+
+// ---------------------------------------------------------------------------
+// CORE-REQ-01: per-request retry fields override the construction-time policy
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn per_request_max_retries_enables_retries_when_policy_disables_them() {
+    // Default construction performs no retries; the request's own `max_retries` turns them on.
+    let (url, connections) = spawn_scripted_server(vec![
+        http_error("429 Too Many Requests", "retry-after-ms: 20\r\n"),
+        http_sse_hello(),
+    ])
+    .await;
+    let stream_fn = GenaiStreamFn::new(Client::builder().build());
+
+    let message = drive_request(&stream_fn, request(&url).with_max_retries(3)).await;
+
+    assert_eq!(message.text(), "Hello");
+    assert_eq!(message.stop_reason, StopReason::Stop);
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        2,
+        "the per-request max_retries drove one retry"
+    );
+}
+
+#[tokio::test]
+async fn per_request_max_retries_zero_disables_the_construction_policy() {
+    // The construction policy would retry; a per-request `max_retries: 0` opts the request out.
+    let (url, connections) = spawn_scripted_server(vec![
+        http_error("429 Too Many Requests", "retry-after-ms: 20\r\n"),
+        http_sse_hello(),
+    ])
+    .await;
+    let stream_fn = GenaiStreamFn::new(Client::builder().build()).with_retry(RetryPolicy {
+        max_retries: 3,
+        max_retry_delay_ms: 60_000,
+    });
+
+    let message = drive_request(&stream_fn, request(&url).with_max_retries(0)).await;
+
+    assert_eq!(message.stop_reason, StopReason::Error);
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        1,
+        "the per-request opt-out suppressed the construction policy's retry"
+    );
+}
+
+#[tokio::test]
+async fn per_request_max_retry_delay_ms_overrides_the_policy_cap() {
+    // retry-after-ms: 5000 (5s) fits the construction policy's 60s cap but exceeds the request's
+    // 1s cap: ceil(5.0)=5, ceil(1.0)=1.
+    let (url, connections) = spawn_scripted_server(vec![
+        http_error("429 Too Many Requests", "retry-after-ms: 5000\r\n"),
+        http_sse_hello(),
+    ])
+    .await;
+    let stream_fn = GenaiStreamFn::new(Client::builder().build()).with_retry(RetryPolicy {
+        max_retries: 3,
+        max_retry_delay_ms: 60_000,
+    });
+
+    let message = drive_request(&stream_fn, request(&url).with_max_retry_delay_ms(1_000)).await;
+
+    assert_eq!(message.stop_reason, StopReason::Error);
+    let error_message = message.error_message.as_deref().unwrap();
+    assert!(
+        error_message.starts_with("Server requested 5s retry delay (max: 1s). "),
+        "byte-exact pi cap message prefix with the per-request cap, was: {error_message:?}"
+    );
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        1,
+        "the per-request cap fails fast without retrying"
+    );
+}
+
+#[tokio::test]
+async fn agent_max_retries_drive_real_retries_end_to_end() {
+    // The facade forwards its configured retry fields onto every stream request; a GenaiStreamFn
+    // with the default (disabled) construction policy therefore still retries.
+    let (url, connections) = spawn_scripted_server(vec![
+        http_error("429 Too Many Requests", "retry-after-ms: 20\r\n"),
+        http_sse_hello(),
+    ])
+    .await;
+    let stream_fn = GenaiStreamFn::new(Client::builder().build());
+    let state = AgentState {
+        model: local_target(url),
+        ..AgentState::default()
+    };
+    let agent = Agent::new(
+        AgentConfig::default()
+            .with_initial_state(state)
+            .with_stream_fn(Arc::new(stream_fn))
+            .with_max_retries(2),
+    );
+
+    agent
+        .prompt("Why is the sky red?")
+        .await
+        .expect("admission succeeds");
+
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        2,
+        "AgentConfig.max_retries reached GenaiStreamFn through the stream request"
+    );
+    let state = agent.state();
+    let last = state.messages.last().expect("assistant message");
+    assert_eq!(last.role(), "assistant");
+    match last {
+        rust_genai_agent::AgentMessage::Assistant(message) => {
+            assert_eq!(message.stop_reason, StopReason::Stop);
+            assert_eq!(message.text(), "Hello");
+        }
+        other => panic!("expected an assistant message, got {other:?}"),
+    }
 }

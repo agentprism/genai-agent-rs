@@ -4,7 +4,9 @@
 //! [`ToolCallContext`], and return transcript-ready [`AgentToolResult`] values. [`UpdateSink`]
 //! provides ordered partial updates with an explicit settlement boundary.
 
-use crate::{AgentToolCall, AgentUsage, ToolError, ToolExecutionMode, ToolResultContent};
+use crate::{
+    AgentToolCall, AgentUsage, ToolError, ToolExecutionMode, ToolHookError, ToolResultContent,
+};
 use async_trait::async_trait;
 use futures::future::BoxFuture;
 use genai::chat::Tool;
@@ -261,8 +263,24 @@ pub trait AgentTool: Send + Sync {
     ///
     /// The default is identity. This compatibility hook is suitable for repairing provider-specific
     /// argument shapes; it should not assume that `args` already satisfies [`Self::spec`].
+    ///
+    /// This is the legacy infallible channel. The executor calls
+    /// [`Self::try_prepare_arguments`], whose default adapts this method; override the fallible
+    /// entry point instead when preparation can fail.
     fn prepare_arguments(&self, args: Value) -> Value {
         args
+    }
+
+    /// Fallible raw-argument preparation, run immediately before the single validation pass.
+    ///
+    /// The default adapts the legacy [`Self::prepare_arguments`] transform by wrapping its output
+    /// in `Ok`, so existing implementations remain source-compatible. The executor calls **only**
+    /// this entry point: an explicit override takes precedence, and the legacy transform is then
+    /// never invoked in addition. An `Err` skips validation and execution and becomes the call's
+    /// in-band error tool result (the [`ToolHookError`] display text is the result text), mirroring
+    /// pi's conversion of a thrown `prepareArguments` into the call's error result.
+    fn try_prepare_arguments(&self, args: Value) -> Result<Value, ToolHookError> {
+        Ok(self.prepare_arguments(args))
     }
 
     /// Execute one prepared call.
@@ -288,12 +306,14 @@ type ExecuteFn = Arc<
         + Sync,
 >;
 type PrepareArgumentsFn = Arc<dyn Fn(Value) -> Value + Send + Sync>;
+type TryPrepareArgumentsFn = Arc<dyn Fn(Value) -> Result<Value, ToolHookError> + Send + Sync>;
 
 /// Closure-backed [`AgentTool`] implementation for applications and tests.
 pub struct FnTool {
     spec: ToolSpec,
     execution_mode: Option<ToolExecutionMode>,
     prepare_arguments: Option<PrepareArgumentsFn>,
+    try_prepare_arguments: Option<TryPrepareArgumentsFn>,
     execute: ExecuteFn,
 }
 
@@ -317,6 +337,7 @@ impl FnTool {
             spec,
             execution_mode: None,
             prepare_arguments: None,
+            try_prepare_arguments: None,
             execute: Arc::new(move |call, cancel, updates| {
                 Box::pin(execute(call, cancel, updates))
             }),
@@ -339,11 +360,27 @@ impl FnTool {
     }
 
     /// Install a raw-argument transform that runs before validation and coercion.
+    ///
+    /// This is the legacy infallible channel. When [`Self::with_try_prepare_arguments`] is also
+    /// installed, the fallible transform takes precedence and this one is never invoked.
     pub fn with_prepare_arguments(
         mut self,
         prepare: impl Fn(Value) -> Value + Send + Sync + 'static,
     ) -> Self {
         self.prepare_arguments = Some(Arc::new(prepare));
+        self
+    }
+
+    /// Install a fallible raw-argument transform that runs before validation and coercion.
+    ///
+    /// An `Err` skips validation and execution and becomes the call's in-band error tool result.
+    /// When installed, this channel takes precedence over [`Self::with_prepare_arguments`]; the
+    /// legacy transform is then never invoked.
+    pub fn with_try_prepare_arguments(
+        mut self,
+        prepare: impl Fn(Value) -> Result<Value, ToolHookError> + Send + Sync + 'static,
+    ) -> Self {
+        self.try_prepare_arguments = Some(Arc::new(prepare));
         self
     }
 }
@@ -362,6 +399,15 @@ impl AgentTool for FnTool {
         self.prepare_arguments
             .as_ref()
             .map_or(args.clone(), |prepare| prepare(args))
+    }
+
+    fn try_prepare_arguments(&self, args: Value) -> Result<Value, ToolHookError> {
+        // The fallible closure takes precedence when installed; otherwise the legacy infallible
+        // closure (if any) is adapted. Exactly one channel runs per call.
+        match &self.try_prepare_arguments {
+            Some(try_prepare) => try_prepare(args),
+            None => Ok(self.prepare_arguments(args)),
+        }
     }
 
     async fn execute(

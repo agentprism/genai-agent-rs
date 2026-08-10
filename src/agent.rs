@@ -14,13 +14,14 @@ use crate::{
     AgentPrepareNextTurnHook, AgentPrepareNextTurnWithContextHook, AgentShouldStopAfterTurnHook,
     AgentTool, AssistantContent, AssistantMessage, BeforeToolCallHook, BusyContext, ConvertToLlm,
     OnPayloadHook, OnResponseHook, PriceCatalog, QueueMode, StopReason, StreamFn, ThinkingBudgets,
-    ThinkingLevel, ToolExecutionMode, TransformContextHook, Transport, UserContent, UserMessage,
-    default_convert_to_llm, get_default_stream_fn, run_agent_loop, run_agent_loop_continue,
+    ThinkingLevel, ToolExecutionMode, TransformContextHook, Transport, TryAfterToolCallHook,
+    TryBeforeToolCallHook, UserContent, UserMessage, default_convert_to_llm, get_default_stream_fn,
+    resolve_reasoning_effort, run_agent_loop, run_agent_loop_continue,
 };
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use genai::adapter::AdapterKind;
-use genai::chat::{ChatOptions, ReasoningEffort};
+use genai::chat::ChatOptions;
 use genai::{ModelIden, ModelSpec};
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -125,10 +126,27 @@ pub struct AgentConfig {
     pub convert_to_llm: ConvertToLlm,
     /// Optional provider-boundary transcript transform.
     pub transform_context: Option<TransformContextHook>,
-    /// Optional hook for blocking tool calls or mutating validated arguments.
+    /// Optional legacy infallible hook for blocking tool calls or mutating validated arguments.
+    ///
+    /// [`Self::try_before_tool_call`] takes precedence when both are set; the two are never both
+    /// invoked for one call.
     pub before_tool_call: Option<BeforeToolCallHook>,
-    /// Optional hook for explicitly overriding executed tool results.
+    /// Optional legacy infallible hook for explicitly overriding executed tool results.
+    ///
+    /// [`Self::try_after_tool_call`] takes precedence when both are set; the two are never both
+    /// invoked for one call.
     pub after_tool_call: Option<AfterToolCallHook>,
+    /// Optional fallible pre-execution tool hook forwarded onto each run's loop configuration.
+    ///
+    /// An `Err` skips execution and becomes the call's in-band error tool result. Takes precedence
+    /// over [`Self::before_tool_call`]; see [`TryBeforeToolCallHook`].
+    pub try_before_tool_call: Option<TryBeforeToolCallHook>,
+    /// Optional fallible post-execution tool hook forwarded onto each run's loop configuration.
+    ///
+    /// An `Err` replaces the completed result with an in-band error tool result (tool side effects
+    /// are not rolled back). Takes precedence over [`Self::after_tool_call`]; see
+    /// [`TryAfterToolCallHook`].
+    pub try_after_tool_call: Option<TryAfterToolCallHook>,
     /// Optional post-turn graceful-stop predicate.
     pub should_stop_after_turn: Option<AgentShouldStopAfterTurnHook>,
     /// Optional legacy next-turn hook that receives only the active cancellation token.
@@ -140,24 +158,32 @@ pub struct AgentConfig {
     /// Optional pre-send payload hook forwarded onto each run's stream requests (pi's
     /// `onPayload`).
     ///
-    /// The facade forwards the handle; honoring it is a stream-function concern. Custom
-    /// [`StreamFn`] implementations and the `proxy`-feature `ProxyStreamFn` honor the forwarded
-    /// per-request hook, while [`crate::GenaiStreamFn`] applies only hooks installed at its
-    /// construction ([`crate::GenaiStreamFn::with_exec_hooks`]) — pass the same hook in both
-    /// places, mirroring pi's single construction-site wiring.
+    /// The facade snapshots the handle into each run's loop configuration at admission, so an
+    /// idle [`Agent::set_on_payload`] replacement takes effect on the next run while an in-flight
+    /// run keeps its snapshot. [`crate::GenaiStreamFn`] honors the forwarded hook as a
+    /// request-scoped replacement of its construction-time hook (exactly one hook fires per
+    /// channel per physical attempt, including retries); custom [`StreamFn`] implementations and
+    /// the `proxy`-feature `ProxyStreamFn` honor the forwarded hook directly.
     pub on_payload: Option<OnPayloadHook>,
     /// Optional response observation hook forwarded onto each run's stream requests (pi's
     /// `onResponse`).
     ///
-    /// The facade forwards the handle; honoring it is a stream-function concern. Custom
-    /// [`StreamFn`] implementations and the `proxy`-feature `ProxyStreamFn` honor the forwarded
-    /// per-request hook, while [`crate::GenaiStreamFn`] applies only hooks installed at its
-    /// construction ([`crate::GenaiStreamFn::with_exec_hooks`]) — pass the same hook in both
-    /// places, mirroring pi's single construction-site wiring.
+    /// The facade snapshots the handle into each run's loop configuration at admission, so an
+    /// idle [`Agent::set_on_response`] replacement takes effect on the next run while an
+    /// in-flight run keeps its snapshot. [`crate::GenaiStreamFn`] honors the forwarded hook as a
+    /// request-scoped replacement of its construction-time hook (it fires on every response head,
+    /// including 4xx/5xx and retry attempts); custom [`StreamFn`] implementations and the
+    /// `proxy`-feature `ProxyStreamFn` honor the forwarded hook directly.
     pub on_response: Option<OnResponseHook>,
-    /// Cache-affinity/session identifier mapped to `ChatOptions::prompt_cache_key`.
+    /// Session identifier forwarded onto each run's stream requests (pi's `sessionId`).
     ///
-    /// If absent at construction, the initial chat option's prompt-cache key becomes this value.
+    /// The facade snapshots this value into the run's [`AgentLoopConfig::session_id`], and the loop
+    /// forwards it onto every [`crate::StreamRequest::session_id`] for per-execution correlation.
+    /// It is **independent** of `ChatOptions::prompt_cache_key`: setting or clearing it never
+    /// writes the cache key, and an explicitly configured cache key survives construction, runtime
+    /// setters, reset, prompt, and continue paths unchanged. Custom stream functions may honor it
+    /// for cache-affinity routing; [`crate::GenaiStreamFn`] deliberately never serializes it, so
+    /// the value cannot enter provider JSON.
     pub session_id: Option<String>,
     /// Initial steering-queue drain policy.
     pub steering_mode: QueueMode,
@@ -168,20 +194,21 @@ pub struct AgentConfig {
     /// Optional per-named-level reasoning-token budgets.
     ///
     /// When present, a named [`AgentState::thinking_level`] whose entry is configured resolves to
-    /// [`ReasoningEffort::Budget`] for a run; an unconfigured level falls back to the named
-    /// reasoning effort. An explicit [`ThinkingLevel::Budget`] always bypasses this map. See
+    /// [`genai::chat::ReasoningEffort::Budget`] for a run; an unconfigured level falls back to the
+    /// named reasoning effort. An explicit [`ThinkingLevel::Budget`] always bypasses this map. See
     /// [`ThinkingBudgets`] for the resolution table and the deliberate omissions relative to pi-ai.
     pub thinking_budgets: Option<ThinkingBudgets>,
     /// Preferred provider transport advisory forwarded to the stream function.
     ///
-    /// Defaults to [`Transport::Auto`]. The SSE-only [`GenaiStreamFn`] ignores it; custom stream
-    /// functions may honor it.
+    /// Defaults to [`Transport::Auto`]. The SSE-only [`crate::GenaiStreamFn`] ignores it; custom
+    /// stream functions may honor it.
     pub transport: Transport,
     /// Base provider chat options.
     ///
-    /// Per-run snapshots overwrite `prompt_cache_key` from [`Self::session_id`] and
-    /// `reasoning_effort` from [`AgentState::thinking_level`] (optionally through
-    /// [`Self::thinking_budgets`]).
+    /// Per-run snapshots overwrite `reasoning_effort` from [`AgentState::thinking_level`]
+    /// (optionally through [`Self::thinking_budgets`]). Every other field — including an explicit
+    /// `prompt_cache_key` — is carried into each run unchanged; [`Self::session_id`] is forwarded
+    /// separately and never writes `prompt_cache_key`.
     pub chat_options: ChatOptions,
     /// Optional model price catalog carried for the application's convenience.
     ///
@@ -192,23 +219,22 @@ pub struct AgentConfig {
     /// [`Self::stream_fn`]. Cost is attached at stream finalization by that stream function, never
     /// by the facade.
     pub price_catalog: Option<Arc<dyn PriceCatalog>>,
-    /// Optional maximum number of provider-handshake retries, carried for the application's
-    /// convenience.
+    /// Optional maximum number of provider-handshake retries forwarded onto each run's stream
+    /// requests (pi's `maxRetries` stream option).
     ///
-    /// Like [`Self::price_catalog`], this is a convenience store only: the facade constructs no
-    /// stream functions and performs no retries. The application is expected to build its
-    /// [`crate::GenaiStreamFn`] with a matching [`crate::RetryPolicy`] (via
-    /// [`crate::GenaiStreamFn::with_retry`]) and pass it as [`Self::stream_fn`]. Mirrors pi's
-    /// `maxRetries` provider-retry option (`provider-retry.ts`); `None`/`0` disables retries.
+    /// The facade snapshots this value into the run's [`AgentLoopConfig::max_retries`], and the
+    /// loop forwards it onto every [`crate::StreamRequest::max_retries`]. The facade itself
+    /// performs no retries; honoring the value is a stream-function concern. A
+    /// [`crate::GenaiStreamFn`] stream function treats it as a per-request override of its
+    /// construction-time [`crate::RetryPolicy`]. `None` leaves the stream function's own default.
     pub max_retries: Option<u32>,
-    /// Optional cap, in milliseconds, on a *server-requested* retry delay, carried for the
-    /// application's convenience.
+    /// Optional cap, in milliseconds, on a *server-requested* retry delay, forwarded onto each
+    /// run's stream requests (pi's `maxRetryDelayMs` stream option).
     ///
-    /// Like [`Self::max_retries`], this is a convenience store the facade does not apply; install
-    /// the same value on the [`crate::GenaiStreamFn`]'s [`crate::RetryPolicy`]. Mirrors pi's
-    /// `maxRetryDelayMs` (passed at the production construction site, `sdk.ts:359`); its effective
-    /// default is pi's 60000ms and `0` disables the cap. See [`crate::RetryPolicy`] for the exact
-    /// semantics.
+    /// Like [`Self::max_retries`], the facade forwards this value without applying it. A
+    /// [`crate::GenaiStreamFn`] stream function treats it as a per-request override of its
+    /// construction-time [`crate::RetryPolicy`]; see [`crate::RetryPolicy`] for the exact cap
+    /// semantics (pi's effective default is 60000ms and `0` disables the cap).
     pub max_retry_delay_ms: Option<u64>,
 }
 
@@ -223,6 +249,8 @@ impl std::fmt::Debug for AgentConfig {
             .field("transform_context", &self.transform_context.is_some())
             .field("before_tool_call", &self.before_tool_call.is_some())
             .field("after_tool_call", &self.after_tool_call.is_some())
+            .field("try_before_tool_call", &self.try_before_tool_call.is_some())
+            .field("try_after_tool_call", &self.try_after_tool_call.is_some())
             .field(
                 "should_stop_after_turn",
                 &self.should_stop_after_turn.is_some(),
@@ -257,6 +285,8 @@ impl Default for AgentConfig {
             transform_context: None,
             before_tool_call: None,
             after_tool_call: None,
+            try_before_tool_call: None,
+            try_after_tool_call: None,
             should_stop_after_turn: None,
             prepare_next_turn: None,
             prepare_next_turn_with_context: None,
@@ -311,20 +341,15 @@ impl AgentConfig {
         self
     }
 
-    /// Carry the maximum number of provider-handshake retries alongside the agent configuration.
-    ///
-    /// This is a convenience store only (see [`Self::max_retries`]): the facade performs no
-    /// retries. Build the [`crate::GenaiStreamFn`] passed as [`Self::stream_fn`] with a matching
-    /// [`crate::RetryPolicy`] via [`crate::GenaiStreamFn::with_retry`].
+    /// Set the maximum number of provider-handshake retries forwarded onto each run's stream
+    /// requests (see [`Self::max_retries`]).
     pub fn with_max_retries(mut self, max_retries: u32) -> Self {
         self.max_retries = Some(max_retries);
         self
     }
 
-    /// Carry the server-requested retry-delay cap (milliseconds) alongside the agent configuration.
-    ///
-    /// This is a convenience store only (see [`Self::max_retry_delay_ms`]): the facade performs no
-    /// retries. Install the same value on the [`crate::GenaiStreamFn`]'s [`crate::RetryPolicy`].
+    /// Set the server-requested retry-delay cap (milliseconds) forwarded onto each run's stream
+    /// requests (see [`Self::max_retry_delay_ms`]).
     pub fn with_max_retry_delay_ms(mut self, max_retry_delay_ms: u64) -> Self {
         self.max_retry_delay_ms = Some(max_retry_delay_ms);
         self
@@ -342,15 +367,40 @@ impl AgentConfig {
         self
     }
 
-    /// Install the pre-execution tool hook.
+    /// Install the legacy infallible pre-execution tool hook.
+    ///
+    /// [`Self::with_try_before_tool_call`] takes precedence when both are installed.
     pub fn with_before_tool_call(mut self, before_tool_call: BeforeToolCallHook) -> Self {
         self.before_tool_call = Some(before_tool_call);
         self
     }
 
-    /// Install the post-execution tool hook.
+    /// Install the legacy infallible post-execution tool hook.
+    ///
+    /// [`Self::with_try_after_tool_call`] takes precedence when both are installed.
     pub fn with_after_tool_call(mut self, after_tool_call: AfterToolCallHook) -> Self {
         self.after_tool_call = Some(after_tool_call);
+        self
+    }
+
+    /// Install the fallible pre-execution tool hook (see [`Self::try_before_tool_call`]).
+    ///
+    /// Takes precedence over [`Self::with_before_tool_call`] when both are installed; the two are
+    /// never both invoked for one call.
+    pub fn with_try_before_tool_call(
+        mut self,
+        try_before_tool_call: TryBeforeToolCallHook,
+    ) -> Self {
+        self.try_before_tool_call = Some(try_before_tool_call);
+        self
+    }
+
+    /// Install the fallible post-execution tool hook (see [`Self::try_after_tool_call`]).
+    ///
+    /// Takes precedence over [`Self::with_after_tool_call`] when both are installed; the two are
+    /// never both invoked for one call.
+    pub fn with_try_after_tool_call(mut self, try_after_tool_call: TryAfterToolCallHook) -> Self {
+        self.try_after_tool_call = Some(try_after_tool_call);
         self
     }
 
@@ -396,7 +446,10 @@ impl AgentConfig {
         self
     }
 
-    /// Set the cache-affinity/session identifier mapped to `ChatOptions::prompt_cache_key`.
+    /// Set the session identifier forwarded onto each run's stream requests (see
+    /// [`Self::session_id`]).
+    ///
+    /// This never writes `ChatOptions::prompt_cache_key`; the two are independent.
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
         self
@@ -668,14 +721,9 @@ impl std::fmt::Debug for Agent {
 impl Agent {
     /// Construct an agent from persistent state and runtime configuration.
     ///
-    /// Transient state fields are reset to idle. A configured session id is copied to the chat
-    /// options' prompt-cache key; otherwise an existing prompt-cache key initializes the session id.
+    /// Transient state fields are reset to idle. The session id and the chat options' explicit
+    /// `prompt_cache_key` are independent values and are both preserved exactly as configured.
     pub fn new(mut config: AgentConfig) -> Self {
-        if let Some(session_id) = config.session_id.clone() {
-            config.chat_options.prompt_cache_key = Some(session_id);
-        } else {
-            config.session_id = config.chat_options.prompt_cache_key.clone();
-        }
         config.initial_state.is_streaming = false;
         config.initial_state.streaming_message = None;
         config.initial_state.pending_tool_calls.clear();
@@ -797,6 +845,34 @@ impl Agent {
         self.update_runtime_config(move |config| config.after_tool_call = after_tool_call)
     }
 
+    /// Replace or clear the fallible before-tool-call hook for the next run.
+    ///
+    /// Runtime configuration may only be changed between runs; this returns
+    /// [`AgentError::Busy`] while a prompt or continuation is active. When set, this hook takes
+    /// precedence over the legacy [`Self::set_before_tool_call`] hook.
+    pub fn set_try_before_tool_call(
+        &self,
+        try_before_tool_call: Option<TryBeforeToolCallHook>,
+    ) -> Result<(), AgentError> {
+        self.update_runtime_config(move |config| {
+            config.try_before_tool_call = try_before_tool_call;
+        })
+    }
+
+    /// Replace or clear the fallible after-tool-call hook for the next run.
+    ///
+    /// Runtime configuration may only be changed between runs; this returns
+    /// [`AgentError::Busy`] while a prompt or continuation is active. When set, this hook takes
+    /// precedence over the legacy [`Self::set_after_tool_call`] hook.
+    pub fn set_try_after_tool_call(
+        &self,
+        try_after_tool_call: Option<TryAfterToolCallHook>,
+    ) -> Result<(), AgentError> {
+        self.update_runtime_config(move |config| {
+            config.try_after_tool_call = try_after_tool_call;
+        })
+    }
+
     /// Replace or clear the graceful-stop hook for the next run.
     ///
     /// Runtime configuration may only be changed between runs; this returns
@@ -863,18 +939,11 @@ impl Agent {
     /// Replace provider chat options for the next run.
     ///
     /// Runtime configuration may only be changed between runs; this returns
-    /// [`AgentError::Busy`] while a prompt or continuation is active. An existing
-    /// session id remains authoritative for `prompt_cache_key`; when no session id
-    /// is set, a replacement option's cache key becomes the session id.
-    pub fn set_chat_options(&self, mut chat_options: ChatOptions) -> Result<(), AgentError> {
-        self.update_runtime_config(move |config| {
-            if let Some(session_id) = config.session_id.clone() {
-                chat_options.prompt_cache_key = Some(session_id);
-            } else {
-                config.session_id = chat_options.prompt_cache_key.clone();
-            }
-            config.chat_options = chat_options;
-        })
+    /// [`AgentError::Busy`] while a prompt or continuation is active. The replacement is stored
+    /// exactly as supplied: an explicit `prompt_cache_key` survives, and neither the session id
+    /// nor the cache key is mirrored into the other.
+    pub fn set_chat_options(&self, chat_options: ChatOptions) -> Result<(), AgentError> {
+        self.update_runtime_config(move |config| config.chat_options = chat_options)
     }
 
     /// Set or clear the per-named-level reasoning-token budgets for the next run.
@@ -1026,7 +1095,9 @@ impl Agent {
             .set_mode(mode);
     }
 
-    /// Clone the cache-affinity identifier used for provider request snapshots.
+    /// Clone the session identifier forwarded onto subsequent runs' stream requests.
+    ///
+    /// This value is independent of the chat options' `prompt_cache_key`.
     pub fn session_id(&self) -> Option<String> {
         self.inner
             .config
@@ -1036,18 +1107,17 @@ impl Agent {
             .clone()
     }
 
-    /// Set or clear the cache-affinity id used by subsequent provider configuration snapshots.
+    /// Set or clear the session id forwarded onto subsequent runs' stream requests.
     ///
-    /// This also updates the stored chat options' `prompt_cache_key`. The setter is not guarded by
-    /// [`AgentError::Busy`]; call it while idle when the next run must deterministically observe it.
+    /// This never writes the stored chat options' `prompt_cache_key`; the two are independent.
+    /// The setter is not guarded by [`AgentError::Busy`]; call it while idle when the next run
+    /// must deterministically observe it.
     pub fn set_session_id(&self, session_id: Option<String>) {
-        let mut config = self
-            .inner
+        self.inner
             .config
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        config.session_id = session_id.clone();
-        config.chat_options.prompt_cache_key = session_id;
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .session_id = session_id;
     }
 
     /// Clone the preferred provider transport advisory forwarded to the stream function.
@@ -1395,7 +1465,6 @@ impl Agent {
             .clone();
 
         let mut chat_options = runtime.chat_options.clone();
-        chat_options.prompt_cache_key = runtime.session_id.clone();
         chat_options.reasoning_effort =
             resolve_reasoning_effort(state.thinking_level, runtime.thinking_budgets.as_ref());
 
@@ -1455,10 +1524,16 @@ impl Agent {
             get_follow_up_messages: Some(get_follow_up_messages),
             before_tool_call: runtime.before_tool_call,
             after_tool_call: runtime.after_tool_call,
+            try_before_tool_call: runtime.try_before_tool_call,
+            try_after_tool_call: runtime.try_after_tool_call,
             tool_execution: runtime.tool_execution,
             transport: runtime.transport,
             on_payload: runtime.on_payload,
             on_response: runtime.on_response,
+            session_id: runtime.session_id,
+            thinking_budgets: runtime.thinking_budgets,
+            max_retries: runtime.max_retries,
+            max_retry_delay_ms: runtime.max_retry_delay_ms,
             chat_options,
         }
     }
@@ -1608,29 +1683,6 @@ impl Agent {
             .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-}
-
-/// Resolve the `reasoning_effort` chat option from the snapshotted thinking level and the optional
-/// per-level budget map.
-///
-/// - [`ThinkingLevel::Off`] yields `None` (no reasoning-effort option is set).
-/// - An explicit [`ThinkingLevel::Budget`] always wins and is forwarded unchanged as
-///   [`ReasoningEffort::Budget`], bypassing the map entirely.
-/// - A named level resolves to [`ReasoningEffort::Budget`] when its budget entry is configured
-///   (with `xhigh`/`max` clamping through the `high` entry, per pi-ai's `clampReasoning`), and
-///   otherwise falls back to the named level's own reasoning effort.
-fn resolve_reasoning_effort(
-    level: ThinkingLevel,
-    budgets: Option<&ThinkingBudgets>,
-) -> Option<ReasoningEffort> {
-    match level {
-        ThinkingLevel::Off => None,
-        ThinkingLevel::Budget(tokens) => Some(ReasoningEffort::Budget(tokens)),
-        named => match budgets.and_then(|budgets| budgets.resolve(named)) {
-            Some(budget) => Some(ReasoningEffort::Budget(budget)),
-            None => named.reasoning_effort(),
-        },
     }
 }
 

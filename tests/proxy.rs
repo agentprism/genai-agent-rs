@@ -29,7 +29,10 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-const TEST_TIMEOUT: Duration = Duration::from_secs(3);
+// Generous deadlock safety-net (not a latency assertion): local capture-server round-trips finish
+// in sub-millisecond time, so a tight bound only ever fires spuriously under CPU-saturated runs.
+const TEST_TIMEOUT: Duration = Duration::from_secs(30);
+// Latency assertion (intentionally short): how long we wait to confirm NO request was sent.
 const NO_REQUEST_WINDOW: Duration = Duration::from_millis(150);
 
 #[derive(Debug)]

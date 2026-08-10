@@ -11,17 +11,19 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use async_trait::async_trait;
 use genai::adapter::AdapterKind;
-use genai::chat::{ChatMessage, ChatRole};
+use genai::chat::{ChatMessage, ChatOptions, ChatRole, ReasoningEffort};
 use genai::{ModelIden, ModelSpec};
 use rust_genai_agent::testing::{EventRecorder, MockStreamFn, ScriptedStream};
 use rust_genai_agent::{
     AfterToolCallResult, AgentContext, AgentError, AgentEvent, AgentLoopConfig,
     AgentLoopTurnUpdate, AgentMessage, AgentTool, AgentToolCall, AgentToolResult, AgentUsage,
     AssistantContent, AssistantMessage, AssistantMessageEvent, BeforeToolCallResult, CustomMessage,
-    EventKind, FnTool, LoopError, StopReason, ToolExecutionMode, ToolResultContent,
-    ToolResultMessage, ToolSpec, default_convert_to_llm, run_agent_loop, run_agent_loop_continue,
-    set_default_stream_fn,
+    EventKind, FnTool, LoopError, StopReason, ThinkingBudgets, ThinkingLevel, ToolCallContext,
+    ToolError, ToolExecutionMode, ToolHookError, ToolResultContent, ToolResultMessage, ToolSpec,
+    TryAfterToolCallHook, TryBeforeToolCallHook, UpdateSink, default_convert_to_llm,
+    run_agent_loop, run_agent_loop_continue, set_default_stream_fn,
 };
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -1472,4 +1474,949 @@ async fn allows_custom_message_as_last_message_for_continuation() {
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].role(), "assistant");
     assert_eq!(stream.calls()[0].context.messages[0].role, ChatRole::User);
+}
+
+// ---------------------------------------------------------------------------
+// CORE-REQ-01: independent session/retry request fields
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn loop_forwards_session_id_and_retry_fields_onto_stream_requests() {
+    let config = base_config()
+        .with_session_id("loop-session")
+        .with_max_retries(4)
+        .with_max_retry_delay_ms(7_500)
+        .with_chat_options(ChatOptions::default().with_prompt_cache_key("explicit-key"));
+    let stream = mock(vec![text_response("one"), text_response("two")]);
+
+    run_new(
+        vec![user("hi")],
+        AgentContext::default(),
+        config.clone(),
+        Some(stream.clone()),
+    )
+    .await;
+    run_continue(
+        AgentContext::new("").with_messages(vec![user("again")]),
+        config,
+        Some(stream.clone()),
+    )
+    .await
+    .expect("valid continuation");
+
+    // Both the prompt and the continue path carry the same immutable per-run snapshot fields, and
+    // the session id never writes the explicit cache key (nor vice versa).
+    let calls = stream.calls();
+    assert_eq!(calls.len(), 2);
+    for call in &calls {
+        assert_eq!(call.session_id.as_deref(), Some("loop-session"));
+        assert_eq!(call.max_retries, Some(4));
+        assert_eq!(call.max_retry_delay_ms, Some(7_500));
+        assert_eq!(
+            call.options.prompt_cache_key.as_deref(),
+            Some("explicit-key")
+        );
+    }
+}
+
+#[tokio::test]
+async fn stream_request_session_and_retry_fields_default_to_none() {
+    let stream = mock(vec![text_response("ok")]);
+
+    run_new(
+        vec![user("hi")],
+        AgentContext::default(),
+        base_config(),
+        Some(stream.clone()),
+    )
+    .await;
+
+    let calls = stream.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].session_id, None);
+    assert_eq!(calls[0].max_retries, None);
+    assert_eq!(calls[0].max_retry_delay_ms, None);
+    assert_eq!(calls[0].options.prompt_cache_key, None);
+}
+
+// ---------------------------------------------------------------------------
+// CORE-THINK-01: next-turn thinking updates reuse the ThinkingBudgets map
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn next_turn_thinking_updates_resolve_through_thinking_budgets() {
+    let tool = Arc::new(FnTool::from_value_fn(
+        tool_spec("echo", value_schema()),
+        |args| async move {
+            Ok(AgentToolResult::text(format!(
+                "echoed: {}",
+                args["value"].as_str().unwrap()
+            )))
+        },
+    ));
+    // The low-level loop receives the caller's chat options untouched for the initial request.
+    let updates = [
+        ThinkingLevel::Low,        // resolves through the custom `low` entry
+        ThinkingLevel::XHigh,      // clamps through the custom `high` entry
+        ThinkingLevel::Budget(64), // explicit budget bypasses the map
+        ThinkingLevel::Off,        // clears the reasoning effort
+    ];
+    let turn = Arc::new(AtomicUsize::new(0));
+    let turn_by_hook = turn.clone();
+    let mut config = base_config();
+    config = config
+        .with_thinking_budgets(ThinkingBudgets::default().with_low(512).with_high(900))
+        .with_chat_options(ChatOptions::default().with_reasoning_effort(ReasoningEffort::Medium));
+    config.prepare_next_turn = Some(Arc::new(move |_hook| {
+        let update = updates
+            .get(turn_by_hook.fetch_add(1, Ordering::SeqCst))
+            .copied();
+        Box::pin(async move {
+            update.map(|thinking_level| AgentLoopTurnUpdate {
+                thinking_level: Some(thinking_level),
+                ..AgentLoopTurnUpdate::default()
+            })
+        })
+    }));
+    let stream = mock(vec![
+        tool_response(
+            vec![call("tool-1", "echo", json!({ "value": "a" }))],
+            StopReason::ToolUse,
+        ),
+        tool_response(
+            vec![call("tool-2", "echo", json!({ "value": "b" }))],
+            StopReason::ToolUse,
+        ),
+        tool_response(
+            vec![call("tool-3", "echo", json!({ "value": "c" }))],
+            StopReason::ToolUse,
+        ),
+        tool_response(
+            vec![call("tool-4", "echo", json!({ "value": "d" }))],
+            StopReason::ToolUse,
+        ),
+        text_response("done"),
+    ]);
+
+    run_new(
+        vec![user("go")],
+        empty_context(vec![tool]),
+        config,
+        Some(stream.clone()),
+    )
+    .await;
+
+    let calls = stream.calls();
+    assert_eq!(calls.len(), 5);
+    assert!(matches!(
+        calls[0].options.reasoning_effort,
+        Some(ReasoningEffort::Medium)
+    ));
+    assert!(
+        matches!(
+            calls[1].options.reasoning_effort,
+            Some(ReasoningEffort::Budget(512))
+        ),
+        "Low resolves through the custom `low` budget entry"
+    );
+    assert!(
+        matches!(
+            calls[2].options.reasoning_effort,
+            Some(ReasoningEffort::Budget(900))
+        ),
+        "XHigh clamps through the custom `high` budget entry"
+    );
+    assert!(
+        matches!(
+            calls[3].options.reasoning_effort,
+            Some(ReasoningEffort::Budget(64))
+        ),
+        "an explicit budget bypasses the map"
+    );
+    assert!(
+        calls[4].options.reasoning_effort.is_none(),
+        "Off clears the reasoning effort for the next request"
+    );
+}
+
+#[tokio::test]
+async fn next_turn_named_level_without_budget_entry_falls_back_to_named_effort() {
+    let tool = Arc::new(FnTool::from_value_fn(
+        tool_spec("echo", value_schema()),
+        |args| async move {
+            Ok(AgentToolResult::text(format!(
+                "echoed: {}",
+                args["value"].as_str().unwrap()
+            )))
+        },
+    ));
+    // Only `low` is configured: a High update falls back to the named reasoning effort.
+    let updates = [ThinkingLevel::High];
+    let turn = Arc::new(AtomicUsize::new(0));
+    let turn_by_hook = turn.clone();
+    let mut config = base_config().with_thinking_budgets(ThinkingBudgets::default().with_low(512));
+    config.prepare_next_turn = Some(Arc::new(move |_hook| {
+        let update = updates
+            .get(turn_by_hook.fetch_add(1, Ordering::SeqCst))
+            .copied();
+        Box::pin(async move {
+            update.map(|thinking_level| AgentLoopTurnUpdate {
+                thinking_level: Some(thinking_level),
+                ..AgentLoopTurnUpdate::default()
+            })
+        })
+    }));
+    let stream = mock(vec![
+        tool_response(
+            vec![call("tool-1", "echo", json!({ "value": "a" }))],
+            StopReason::ToolUse,
+        ),
+        text_response("done"),
+    ]);
+
+    run_new(
+        vec![user("go")],
+        empty_context(vec![tool]),
+        config,
+        Some(stream.clone()),
+    )
+    .await;
+
+    let calls = stream.calls();
+    assert_eq!(calls.len(), 2);
+    assert!(
+        matches!(
+            calls[1].options.reasoning_effort,
+            Some(ReasoningEffort::High)
+        ),
+        "an unconfigured level keeps its named reasoning effort"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CORE-TOOLERR-01: fallible preparation and before/after hook channels
+// ---------------------------------------------------------------------------
+
+fn recording_echo_tool(executed: Arc<Mutex<Vec<Value>>>) -> Arc<FnTool> {
+    let executed_by_tool = executed.clone();
+    Arc::new(FnTool::from_value_fn(
+        tool_spec("echo", value_schema()),
+        move |args| {
+            let executed = executed_by_tool.clone();
+            async move {
+                executed.lock().unwrap().push(args["value"].clone());
+                Ok(AgentToolResult::text(format!(
+                    "echoed: {}",
+                    args["value"].as_str().unwrap()
+                )))
+            }
+        },
+    ))
+}
+
+fn tool_result_texts(messages: &[AgentMessage]) -> Vec<(bool, String)> {
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            AgentMessage::ToolResult(result) => {
+                Some((result.is_error, first_text(&result.content).to_owned()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn tool_execution_end_ids(events: &[AgentEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolExecutionEnd { tool_call_id, .. } => Some(tool_call_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn try_prepare_arguments_error_skips_execution_and_continues_sequential() {
+    let executed = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let tool = FnTool::from_value_fn(tool_spec("echo", value_schema()), {
+        let executed = executed.clone();
+        move |args| {
+            let executed = executed.clone();
+            async move {
+                executed.lock().unwrap().push(args["value"].clone());
+                Ok(AgentToolResult::text("should not execute"))
+            }
+        }
+    })
+    .with_try_prepare_arguments(|_args| Err(ToolHookError::new("cannot prepare these arguments")));
+    let config = base_config().with_tool_execution(ToolExecutionMode::Sequential);
+    let stream = mock(vec![
+        tool_response(
+            vec![call("tool-1", "echo", json!({ "value": "hello" }))],
+            StopReason::ToolUse,
+        ),
+        text_response("recovered"),
+    ]);
+
+    let (messages, events) = run_new(
+        vec![user("echo something")],
+        empty_context(vec![Arc::new(tool)]),
+        config,
+        Some(stream.clone()),
+    )
+    .await;
+
+    assert!(executed.lock().unwrap().is_empty(), "execution skipped");
+    assert_eq!(
+        tool_result_texts(&messages),
+        [(true, "cannot prepare these arguments".to_owned())]
+    );
+    assert_eq!(
+        tool_execution_end_ids(&events),
+        ["tool-1"],
+        "the immediate failure still emits start/end for the call"
+    );
+    assert_eq!(
+        stream.call_count(),
+        2,
+        "a preparation failure is an ordinary error result; the loop continues"
+    );
+    assert_eq!(messages.last().unwrap().role(), "assistant");
+}
+
+#[tokio::test]
+async fn try_prepare_arguments_takes_precedence_over_legacy_transform() {
+    let legacy_calls = Arc::new(AtomicUsize::new(0));
+    let executed = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let tool = FnTool::from_value_fn(tool_spec("echo", value_schema()), {
+        let executed = executed.clone();
+        move |args| {
+            let executed = executed.clone();
+            async move {
+                executed.lock().unwrap().push(args["value"].clone());
+                Ok(AgentToolResult::text("ok"))
+            }
+        }
+    })
+    .with_prepare_arguments({
+        let legacy_calls = legacy_calls.clone();
+        move |mut args| {
+            legacy_calls.fetch_add(1, Ordering::SeqCst);
+            args["value"] = json!("legacy");
+            args
+        }
+    })
+    .with_try_prepare_arguments(|mut args| {
+        args["value"] = json!("fallible");
+        Ok(args)
+    });
+    let stream = mock(vec![
+        tool_response(
+            vec![call("tool-1", "echo", json!({ "value": "raw" }))],
+            StopReason::ToolUse,
+        ),
+        text_response("done"),
+    ]);
+
+    run_new(
+        vec![user("echo")],
+        empty_context(vec![Arc::new(tool)]),
+        base_config(),
+        Some(stream),
+    )
+    .await;
+
+    assert_eq!(
+        legacy_calls.load(Ordering::SeqCst),
+        0,
+        "the legacy transform is never invoked when the fallible channel is installed"
+    );
+    assert_eq!(*executed.lock().unwrap(), [json!("fallible")]);
+}
+
+/// Custom tool overriding only the legacy infallible transform: the default fallible entry point
+/// must adapt it unchanged.
+struct LegacyOnlyPrepareTool {
+    executed: Mutex<Vec<Value>>,
+}
+
+#[async_trait]
+impl AgentTool for LegacyOnlyPrepareTool {
+    fn spec(&self) -> ToolSpec {
+        tool_spec("legacy", value_schema())
+    }
+
+    fn prepare_arguments(&self, mut args: Value) -> Value {
+        args["value"] = json!("prepared-by-legacy");
+        args
+    }
+
+    async fn execute(
+        &self,
+        call: ToolCallContext,
+        _cancel: CancellationToken,
+        _on_update: UpdateSink,
+    ) -> Result<AgentToolResult, ToolError> {
+        self.executed
+            .lock()
+            .unwrap()
+            .push(call.args["value"].clone());
+        Ok(AgentToolResult::text(format!(
+            "got {}",
+            call.args["value"].as_str().unwrap()
+        )))
+    }
+}
+
+#[tokio::test]
+async fn legacy_prepare_arguments_is_adapted_into_the_fallible_channel() {
+    let tool = Arc::new(LegacyOnlyPrepareTool {
+        executed: Mutex::new(Vec::new()),
+    });
+    let stream = mock(vec![
+        tool_response(
+            vec![call("tool-1", "legacy", json!({ "value": "raw" }))],
+            StopReason::ToolUse,
+        ),
+        text_response("done"),
+    ]);
+
+    let (messages, _events) = run_new(
+        vec![user("go")],
+        empty_context(vec![tool.clone()]),
+        base_config(),
+        Some(stream),
+    )
+    .await;
+
+    assert_eq!(
+        *tool.executed.lock().unwrap(),
+        [json!("prepared-by-legacy")]
+    );
+    assert_eq!(
+        tool_result_texts(&messages),
+        [(false, "got prepared-by-legacy".to_owned())]
+    );
+}
+
+/// Custom tool overriding both channels: only the fallible entry point runs.
+struct FalliblePrepareTool {
+    legacy_calls: AtomicUsize,
+}
+
+#[async_trait]
+impl AgentTool for FalliblePrepareTool {
+    fn spec(&self) -> ToolSpec {
+        tool_spec("fallible", value_schema())
+    }
+
+    fn prepare_arguments(&self, args: Value) -> Value {
+        self.legacy_calls.fetch_add(1, Ordering::SeqCst);
+        args
+    }
+
+    fn try_prepare_arguments(&self, _args: Value) -> Result<Value, ToolHookError> {
+        Err(ToolHookError::new("preparation exploded"))
+    }
+
+    async fn execute(
+        &self,
+        _call: ToolCallContext,
+        _cancel: CancellationToken,
+        _on_update: UpdateSink,
+    ) -> Result<AgentToolResult, ToolError> {
+        panic!("execution must be skipped after a preparation failure")
+    }
+}
+
+#[tokio::test]
+async fn custom_tool_try_prepare_arguments_failure_becomes_in_band_error() {
+    let tool = Arc::new(FalliblePrepareTool {
+        legacy_calls: AtomicUsize::new(0),
+    });
+    let stream = mock(vec![
+        tool_response(
+            vec![call("tool-1", "fallible", json!({ "value": "x" }))],
+            StopReason::ToolUse,
+        ),
+        text_response("recovered"),
+    ]);
+
+    let (messages, _events) = run_new(
+        vec![user("go")],
+        empty_context(vec![tool.clone()]),
+        base_config(),
+        Some(stream.clone()),
+    )
+    .await;
+
+    assert_eq!(tool.legacy_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        tool_result_texts(&messages),
+        [(true, "preparation exploded".to_owned())]
+    );
+    assert_eq!(stream.call_count(), 2, "the loop continues after the error");
+}
+
+#[tokio::test]
+async fn try_before_tool_call_error_skips_execution_sequential() {
+    let executed = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let tool = recording_echo_tool(executed.clone());
+    let try_before: TryBeforeToolCallHook = Arc::new(|_context, _cancel| {
+        Box::pin(async { Err(ToolHookError::new("before hook exploded")) })
+    });
+    let config = base_config()
+        .with_tool_execution(ToolExecutionMode::Sequential)
+        .with_try_before_tool_call(try_before);
+    let stream = mock(vec![
+        tool_response(
+            vec![call("tool-1", "echo", json!({ "value": "hello" }))],
+            StopReason::ToolUse,
+        ),
+        text_response("recovered"),
+    ]);
+
+    let (messages, events) = run_new(
+        vec![user("echo")],
+        empty_context(vec![tool]),
+        config,
+        Some(stream.clone()),
+    )
+    .await;
+
+    assert!(executed.lock().unwrap().is_empty(), "execution skipped");
+    assert_eq!(
+        tool_result_texts(&messages),
+        [(true, "before hook exploded".to_owned())]
+    );
+    assert_eq!(tool_execution_end_ids(&events), ["tool-1"]);
+    assert_eq!(
+        stream.call_count(),
+        2,
+        "a before-hook failure does not request termination; the loop continues"
+    );
+}
+
+#[tokio::test]
+async fn try_before_tool_call_takes_precedence_over_legacy_hook() {
+    let legacy_calls = Arc::new(AtomicUsize::new(0));
+    let executed = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let tool = recording_echo_tool(executed.clone());
+    let mut config = base_config();
+    config.before_tool_call = Some({
+        let legacy_calls = legacy_calls.clone();
+        Arc::new(move |_context, _cancel| {
+            legacy_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { None::<BeforeToolCallResult> })
+        })
+    });
+    config.try_before_tool_call = Some(Arc::new(|_context, _cancel| {
+        Box::pin(async {
+            Ok(Some(BeforeToolCallResult {
+                block: true,
+                reason: Some("blocked by the fallible hook".to_owned()),
+                terminate: false,
+            }))
+        })
+    }));
+    let stream = mock(vec![
+        tool_response(
+            vec![call("tool-1", "echo", json!({ "value": "hello" }))],
+            StopReason::ToolUse,
+        ),
+        text_response("done"),
+    ]);
+
+    let (messages, _events) = run_new(
+        vec![user("echo")],
+        empty_context(vec![tool]),
+        config,
+        Some(stream.clone()),
+    )
+    .await;
+
+    assert_eq!(
+        legacy_calls.load(Ordering::SeqCst),
+        0,
+        "the legacy hook is never invoked when the fallible hook is installed"
+    );
+    assert!(executed.lock().unwrap().is_empty());
+    assert_eq!(
+        tool_result_texts(&messages),
+        [(true, "blocked by the fallible hook".to_owned())]
+    );
+}
+
+#[tokio::test]
+async fn try_before_tool_call_ok_block_with_terminate_stops_the_batch() {
+    let executed = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let tool = recording_echo_tool(executed.clone());
+    let try_before: TryBeforeToolCallHook = Arc::new(|_context, _cancel| {
+        Box::pin(async {
+            Ok(Some(BeforeToolCallResult {
+                block: true,
+                reason: Some("terminating block".to_owned()),
+                terminate: true,
+            }))
+        })
+    });
+    let config = base_config().with_try_before_tool_call(try_before);
+    let stream = mock(vec![
+        tool_response(
+            vec![call("tool-1", "echo", json!({ "value": "hello" }))],
+            StopReason::ToolUse,
+        ),
+        text_response("should not run"),
+    ]);
+
+    let (messages, _events) = run_new(
+        vec![user("echo")],
+        empty_context(vec![tool]),
+        config,
+        Some(stream.clone()),
+    )
+    .await;
+
+    assert!(executed.lock().unwrap().is_empty());
+    assert_eq!(
+        tool_result_texts(&messages),
+        [(true, "terminating block".to_owned())]
+    );
+    assert_eq!(
+        stream.call_count(),
+        1,
+        "a terminating blocked call ends the loop like the legacy channel"
+    );
+}
+
+#[tokio::test]
+async fn try_before_tool_call_ok_none_applies_arg_mutations_without_revalidation() {
+    let executed = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let executed_by_tool = executed.clone();
+    let tool = Arc::new(FnTool::from_value_fn(
+        tool_spec("echo", value_schema()),
+        move |args| {
+            let executed = executed_by_tool.clone();
+            async move {
+                executed.lock().unwrap().push(args["value"].clone());
+                Ok(AgentToolResult::text(format!("echoed: {}", args["value"])))
+            }
+        },
+    ));
+    let try_before: TryBeforeToolCallHook = Arc::new(|context, _cancel| {
+        context.args["value"] = json!(123);
+        Box::pin(async { Ok(None::<BeforeToolCallResult>) })
+    });
+    let config = base_config().with_try_before_tool_call(try_before);
+    let stream = mock(vec![
+        tool_response(
+            vec![call("tool-1", "echo", json!({ "value": "hello" }))],
+            StopReason::ToolUse,
+        ),
+        text_response("done"),
+    ]);
+
+    run_new(
+        vec![user("echo")],
+        empty_context(vec![tool]),
+        config,
+        Some(stream),
+    )
+    .await;
+
+    assert_eq!(*executed.lock().unwrap(), [json!(123)]);
+}
+
+#[tokio::test]
+async fn try_before_tool_call_cancellation_yields_operation_aborted() {
+    let executed = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let tool = recording_echo_tool(executed.clone());
+    let try_before: TryBeforeToolCallHook = Arc::new(|_context, hook_cancel| {
+        Box::pin(async move {
+            // The hook receives the live run token and cancels the run itself.
+            assert!(!hook_cancel.is_cancelled());
+            hook_cancel.cancel();
+            Ok(None::<BeforeToolCallResult>)
+        })
+    });
+    let config = base_config().with_try_before_tool_call(try_before);
+    let stream = mock(vec![
+        tool_response(
+            vec![call("tool-1", "echo", json!({ "value": "hello" }))],
+            StopReason::ToolUse,
+        ),
+        text_response("after abort"),
+    ]);
+
+    let (messages, _events) = run_new(
+        vec![user("echo")],
+        empty_context(vec![tool]),
+        config,
+        Some(stream.clone()),
+    )
+    .await;
+
+    assert!(executed.lock().unwrap().is_empty(), "execution skipped");
+    assert_eq!(
+        tool_result_texts(&messages),
+        [(true, "Operation aborted".to_owned())]
+    );
+    // A cancellation observed in the before channel produces an ordinary (non-terminating) error
+    // result, so the batch ends but the loop still continues to the next turn.
+    assert_eq!(stream.call_count(), 2);
+}
+
+#[tokio::test]
+async fn try_after_tool_call_error_replaces_completed_result_sequential() {
+    let executed = Arc::new(AtomicBool::new(false));
+    let tool = Arc::new(FnTool::from_value_fn(tool_spec("echo", value_schema()), {
+        let executed = executed.clone();
+        move |args| {
+            let executed = executed.clone();
+            async move {
+                executed.store(true, Ordering::SeqCst);
+                Ok(
+                    AgentToolResult::text(format!("echoed: {}", args["value"].as_str().unwrap()))
+                        .with_usage(AgentUsage::new(1, 2))
+                        .with_terminate(true),
+                )
+            }
+        }
+    }));
+    let try_after: TryAfterToolCallHook = Arc::new(|_context, _cancel| {
+        Box::pin(async { Err(ToolHookError::new("after hook exploded")) })
+    });
+    let config = base_config()
+        .with_tool_execution(ToolExecutionMode::Sequential)
+        .with_try_after_tool_call(try_after);
+    let stream = mock(vec![
+        tool_response(
+            vec![call("tool-1", "echo", json!({ "value": "hello" }))],
+            StopReason::ToolUse,
+        ),
+        text_response("recovered"),
+    ]);
+
+    let (messages, events) = run_new(
+        vec![user("echo")],
+        empty_context(vec![tool]),
+        config,
+        Some(stream.clone()),
+    )
+    .await;
+
+    assert!(
+        executed.load(Ordering::SeqCst),
+        "tool side effects are not rolled back by an after-hook failure"
+    );
+    let result = messages
+        .iter()
+        .find_map(|message| match message {
+            AgentMessage::ToolResult(result) => Some(result.clone()),
+            _ => None,
+        })
+        .expect("tool result message");
+    assert!(result.is_error);
+    assert_eq!(first_text(&result.content), "after hook exploded");
+    assert_eq!(
+        result.details,
+        json!({}),
+        "the replacement discards details"
+    );
+    assert_eq!(result.usage, None, "the replacement discards usage");
+    assert_eq!(tool_execution_end_ids(&events), ["tool-1"]);
+    assert_eq!(
+        stream.call_count(),
+        2,
+        "the replacement also discards the tool's termination request, so the loop continues"
+    );
+}
+
+#[tokio::test]
+async fn try_after_tool_call_takes_precedence_over_legacy_hook() {
+    let legacy_calls = Arc::new(AtomicUsize::new(0));
+    let executed = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let tool = recording_echo_tool(executed.clone());
+    let mut config = base_config();
+    config.after_tool_call = Some({
+        let legacy_calls = legacy_calls.clone();
+        Arc::new(move |_context, _cancel| {
+            legacy_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { None::<AfterToolCallResult> })
+        })
+    });
+    config.try_after_tool_call = Some(Arc::new(|_context, _cancel| {
+        Box::pin(async {
+            Ok(Some(AfterToolCallResult {
+                details: Some(json!({ "channel": "fallible" })),
+                ..AfterToolCallResult::default()
+            }))
+        })
+    }));
+    let stream = mock(vec![
+        tool_response(
+            vec![call("tool-1", "echo", json!({ "value": "hello" }))],
+            StopReason::ToolUse,
+        ),
+        text_response("done"),
+    ]);
+
+    let (messages, _events) = run_new(
+        vec![user("echo")],
+        empty_context(vec![tool]),
+        config,
+        Some(stream),
+    )
+    .await;
+
+    assert_eq!(
+        legacy_calls.load(Ordering::SeqCst),
+        0,
+        "the legacy hook is never invoked when the fallible hook is installed"
+    );
+    assert_eq!(*executed.lock().unwrap(), [json!("hello")]);
+    let result = messages
+        .iter()
+        .find_map(|message| match message {
+            AgentMessage::ToolResult(result) => Some(result.clone()),
+            _ => None,
+        })
+        .expect("tool result message");
+    assert!(!result.is_error);
+    assert_eq!(result.details, json!({ "channel": "fallible" }));
+}
+
+#[tokio::test]
+async fn parallel_fallible_channel_failures_keep_source_order_and_continue() {
+    let executed = Arc::new(Mutex::new(Vec::<String>::new()));
+    let tool = FnTool::from_value_fn(tool_spec("echo", value_schema()), {
+        let executed = executed.clone();
+        move |args| {
+            let executed = executed.clone();
+            async move {
+                let value = args["value"].as_str().unwrap().to_owned();
+                executed.lock().unwrap().push(value.clone());
+                Ok(AgentToolResult::text(format!("echoed: {value}")))
+            }
+        }
+    })
+    .with_try_prepare_arguments(|args| {
+        if args["value"] == json!("bad-prepare") {
+            Err(ToolHookError::new("prepare failed in parallel"))
+        } else {
+            Ok(args)
+        }
+    });
+    let try_before: TryBeforeToolCallHook = Arc::new(|context, _cancel| {
+        let failed = context.args["value"] == json!("bad-before");
+        Box::pin(async move {
+            if failed {
+                Err(ToolHookError::new("before failed in parallel"))
+            } else {
+                Ok(None::<BeforeToolCallResult>)
+            }
+        })
+    });
+    let try_after: TryAfterToolCallHook = Arc::new(|context, _cancel| {
+        let failed = context.args["value"] == json!("bad-after");
+        Box::pin(async move {
+            if failed {
+                Err(ToolHookError::new("after failed in parallel"))
+            } else {
+                Ok(None::<AfterToolCallResult>)
+            }
+        })
+    });
+    let config = base_config()
+        .with_tool_execution(ToolExecutionMode::Parallel)
+        .with_try_before_tool_call(try_before)
+        .with_try_after_tool_call(try_after);
+    let stream = mock(vec![
+        tool_response(
+            vec![
+                call("tool-1", "echo", json!({ "value": "good" })),
+                call("tool-2", "echo", json!({ "value": "bad-prepare" })),
+                call("tool-3", "echo", json!({ "value": "bad-before" })),
+                call("tool-4", "echo", json!({ "value": "bad-after" })),
+            ],
+            StopReason::ToolUse,
+        ),
+        text_response("recovered"),
+    ]);
+
+    let (messages, events) = run_new(
+        vec![user("echo all")],
+        empty_context(vec![Arc::new(tool)]),
+        config,
+        Some(stream.clone()),
+    )
+    .await;
+
+    // Only the good and bad-after calls execute; preparation/before failures skip execution.
+    let mut executed_values = executed.lock().unwrap().clone();
+    executed_values.sort();
+    assert_eq!(executed_values, ["bad-after", "good"]);
+
+    // Start events are source ordered; the immediate preflight failures end before the executed
+    // calls, and every call still emits exactly one end event.
+    let start_ids: Vec<String> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolExecutionStart { tool_call_id, .. } => Some(tool_call_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(start_ids, ["tool-1", "tool-2", "tool-3", "tool-4"]);
+    let end_ids = tool_execution_end_ids(&events);
+    assert_eq!(end_ids.len(), 4);
+    assert_eq!(
+        &end_ids[..2],
+        ["tool-2", "tool-3"],
+        "immediate preparation/before failures end during source-ordered preflight"
+    );
+    let mut executed_end_ids = end_ids[2..].to_vec();
+    executed_end_ids.sort();
+    assert_eq!(executed_end_ids, ["tool-1", "tool-4"]);
+
+    // Result messages are assembled in source order with per-call error classification and the
+    // exact in-band texts.
+    let results: Vec<(String, bool, String)> = messages
+        .iter()
+        .filter_map(|message| match message {
+            AgentMessage::ToolResult(result) => Some((
+                result.tool_call_id.clone(),
+                result.is_error,
+                first_text(&result.content).to_owned(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        results,
+        [
+            ("tool-1".to_owned(), false, "echoed: good".to_owned()),
+            (
+                "tool-2".to_owned(),
+                true,
+                "prepare failed in parallel".to_owned()
+            ),
+            (
+                "tool-3".to_owned(),
+                true,
+                "before failed in parallel".to_owned()
+            ),
+            (
+                "tool-4".to_owned(),
+                true,
+                "after failed in parallel".to_owned()
+            ),
+        ]
+    );
+    assert_eq!(
+        stream.call_count(),
+        2,
+        "the loop continues after a mixed batch of preparation and hook failures"
+    );
+    assert_eq!(messages.last().unwrap().role(), "assistant");
 }

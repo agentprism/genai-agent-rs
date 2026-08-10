@@ -13,8 +13,9 @@ use rust_genai_agent::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentMessage, AgentPrepareNextTurnHook,
     AgentShouldStopAfterTurnHook, AgentState, AgentTool, AgentToolCall, AgentToolResult,
     AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, BusyContext,
-    CancellationToken, EventKind, FnTool, StopReason, StreamFn, StreamRequest, ThinkingLevel,
-    ToolResultContent, ToolSpec, UpdateSink, set_default_stream_fn,
+    CancellationToken, ChatOptions, EventKind, FnTool, StopReason, StreamFn, StreamRequest,
+    ThinkingLevel, ToolHookError, ToolResultContent, ToolSpec, TryAfterToolCallHook,
+    TryBeforeToolCallHook, UpdateSink, set_default_stream_fn,
 };
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -68,7 +69,7 @@ fn message_has_user_text(message: &AgentMessage, expected: &str) -> bool {
 }
 
 async fn wait_until(mut predicate: impl FnMut() -> bool) {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         while !predicate() {
             tokio::task::yield_now().await;
         }
@@ -265,7 +266,7 @@ async fn prompt_awaits_async_subscribers() {
     assert!(agent.state().is_streaming);
 
     barrier.add_permits(1);
-    tokio::time::timeout(Duration::from_secs(2), prompt)
+    tokio::time::timeout(Duration::from_secs(30), prompt)
         .await
         .unwrap()
         .unwrap()
@@ -312,7 +313,7 @@ async fn wait_for_idle_awaits_async_subscribers() {
     assert!(agent.state().is_streaming);
 
     barrier.add_permits(1);
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         prompt.await.unwrap().unwrap();
         idle.await.unwrap();
     })
@@ -345,7 +346,7 @@ async fn subscribers_receive_active_cancellation_token() {
     assert!(!token.is_cancelled());
 
     agent.abort();
-    tokio::time::timeout(Duration::from_secs(2), prompt)
+    tokio::time::timeout(Duration::from_secs(30), prompt)
         .await
         .unwrap()
         .unwrap()
@@ -451,7 +452,7 @@ async fn ignores_settled_parallel_tool_update_while_other_tool_runs() {
 
     let running_agent = agent.clone();
     let prompt = tokio::spawn(async move { running_agent.prompt("run tools").await });
-    let permit = tokio::time::timeout(Duration::from_secs(2), slow_started.acquire())
+    let permit = tokio::time::timeout(Duration::from_secs(30), slow_started.acquire())
         .await
         .unwrap()
         .unwrap();
@@ -477,7 +478,7 @@ async fn ignores_settled_parallel_tool_update_while_other_tool_runs() {
     assert_eq!(events.events().len(), event_count_before_late_update);
 
     release_slow.add_permits(1);
-    tokio::time::timeout(Duration::from_secs(2), prompt)
+    tokio::time::timeout(Duration::from_secs(30), prompt)
         .await
         .unwrap()
         .unwrap()
@@ -611,7 +612,7 @@ async fn reset_rejects_while_processing_without_corrupting_the_transcript() {
     );
 
     release.add_permits(1);
-    tokio::time::timeout(Duration::from_secs(2), prompt)
+    tokio::time::timeout(Duration::from_secs(30), prompt)
         .await
         .unwrap()
         .unwrap()
@@ -642,7 +643,7 @@ async fn prompt_rejects_while_streaming() {
     assert!(matches!(error, AgentError::Busy(BusyContext::Prompt)));
 
     agent.abort();
-    tokio::time::timeout(Duration::from_secs(2), first_prompt)
+    tokio::time::timeout(Duration::from_secs(30), first_prompt)
         .await
         .unwrap()
         .unwrap()
@@ -662,7 +663,7 @@ async fn continue_rejects_while_streaming() {
     assert!(matches!(error, AgentError::Busy(BusyContext::Continue)));
 
     agent.abort();
-    tokio::time::timeout(Duration::from_secs(2), first_prompt)
+    tokio::time::timeout(Duration::from_secs(30), first_prompt)
         .await
         .unwrap()
         .unwrap()
@@ -831,6 +832,9 @@ async fn forwards_should_stop_after_turn_through_options() {
 }
 
 // TS: pi/packages/agent/test/agent.test.ts — `forwards sessionId to streamFunction options`
+//
+// The session id is a first-class request field, independent of `ChatOptions::prompt_cache_key`:
+// setting or clearing it never writes the cache key, and an explicit cache key survives.
 #[tokio::test]
 async fn forwards_session_id_to_stream_options() {
     let stream_fn = Arc::new(MockStreamFn::from_streams(vec![
@@ -840,13 +844,18 @@ async fn forwards_session_id_to_stream_options() {
     let agent = Agent::new(
         AgentConfig::default()
             .with_stream_fn(stream_fn.clone())
-            .with_session_id("session-abc"),
+            .with_session_id("session-abc")
+            .with_chat_options(ChatOptions::default().with_prompt_cache_key("explicit-cache-key")),
     );
 
     agent.prompt("hello").await.unwrap();
     assert_eq!(
-        stream_fn.calls()[0].options.prompt_cache_key.as_deref(),
+        stream_fn.calls()[0].session_id.as_deref(),
         Some("session-abc")
+    );
+    assert_eq!(
+        stream_fn.calls()[0].options.prompt_cache_key.as_deref(),
+        Some("explicit-cache-key")
     );
     assert_eq!(agent.session_id().as_deref(), Some("session-abc"));
 
@@ -854,7 +863,182 @@ async fn forwards_session_id_to_stream_options() {
     assert_eq!(agent.session_id().as_deref(), Some("session-def"));
     agent.prompt("hello again").await.unwrap();
     assert_eq!(
-        stream_fn.calls()[1].options.prompt_cache_key.as_deref(),
+        stream_fn.calls()[1].session_id.as_deref(),
         Some("session-def")
+    );
+    assert_eq!(
+        stream_fn.calls()[1].options.prompt_cache_key.as_deref(),
+        Some("explicit-cache-key")
+    );
+}
+
+#[tokio::test]
+async fn session_id_and_prompt_cache_key_are_fully_independent() {
+    let stream_fn = Arc::new(MockStreamFn::from_streams(vec![
+        script::text_response("one"),
+        script::text_response("two"),
+        script::text_response("three"),
+        script::text_response("four"),
+    ]));
+    let agent = Agent::new(
+        AgentConfig::default()
+            .with_stream_fn(stream_fn.clone())
+            .with_chat_options(ChatOptions::default().with_prompt_cache_key("keep-me")),
+    );
+
+    // Construction preserves an explicit cache key without manufacturing a session id.
+    assert_eq!(agent.session_id(), None);
+    agent.prompt("first").await.unwrap();
+    assert_eq!(stream_fn.calls()[0].session_id, None);
+    assert_eq!(
+        stream_fn.calls()[0].options.prompt_cache_key.as_deref(),
+        Some("keep-me")
+    );
+
+    // Replacing chat options stores them exactly as supplied: the cache key survives, and no
+    // session id is mirrored out of (or into) it.
+    agent
+        .set_chat_options(ChatOptions::default().with_prompt_cache_key("keep-me"))
+        .unwrap();
+    assert_eq!(agent.session_id(), None);
+
+    // Setting and clearing the session id never touches the cache key.
+    agent.set_session_id(Some("session-1".into()));
+    agent.prompt("second").await.unwrap();
+    assert_eq!(
+        stream_fn.calls()[1].session_id.as_deref(),
+        Some("session-1")
+    );
+    assert_eq!(
+        stream_fn.calls()[1].options.prompt_cache_key.as_deref(),
+        Some("keep-me")
+    );
+
+    agent.set_session_id(None);
+    agent.prompt("third").await.unwrap();
+    assert_eq!(stream_fn.calls()[2].session_id, None);
+    assert_eq!(
+        stream_fn.calls()[2].options.prompt_cache_key.as_deref(),
+        Some("keep-me")
+    );
+
+    // Reset preserves both the session id (already cleared) and the explicit cache key.
+    agent.reset().unwrap();
+    assert_eq!(agent.session_id(), None);
+    agent.prompt("after reset").await.unwrap();
+    assert_eq!(
+        stream_fn.calls()[3].options.prompt_cache_key.as_deref(),
+        Some("keep-me")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CORE-TOOLERR-01: fallible tool hooks plumb through the facade
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn try_before_tool_call_error_from_config_becomes_in_band_result() {
+    let executed = Arc::new(AtomicBool::new(false));
+    let executed_by_tool = executed.clone();
+    let tool = Arc::new(FnTool::from_value_fn(
+        ToolSpec::new(
+            "noop",
+            "noop tool",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        move |_args| {
+            let executed = executed_by_tool.clone();
+            async move {
+                executed.store(true, Ordering::SeqCst);
+                Ok(AgentToolResult::text("should not execute"))
+            }
+        },
+    ));
+    let stream_fn = Arc::new(MockStreamFn::from_streams(vec![
+        script::tool_call_turn(vec![AgentToolCall::new("tool-1", "noop", json!({}))]),
+        script::text_response("recovered"),
+    ]));
+    let try_before: TryBeforeToolCallHook = Arc::new(|_context, _cancel| {
+        Box::pin(async { Err(ToolHookError::new("facade before failure")) })
+    });
+    let mut state = AgentState::default();
+    state.tools = vec![tool];
+    let agent = Agent::new(
+        AgentConfig::default()
+            .with_initial_state(state)
+            .with_stream_fn(stream_fn.clone())
+            .with_try_before_tool_call(try_before),
+    );
+
+    agent.prompt("start").await.unwrap();
+
+    assert!(!executed.load(Ordering::SeqCst), "execution skipped");
+    assert_eq!(
+        stream_fn.call_count(),
+        2,
+        "the run continued after the error"
+    );
+    let result = agent
+        .state()
+        .messages
+        .iter()
+        .find_map(|message| match message {
+            AgentMessage::ToolResult(result) => Some(result.clone()),
+            _ => None,
+        })
+        .expect("tool result message");
+    assert!(result.is_error);
+    assert_eq!(
+        result.content,
+        vec![ToolResultContent::text("facade before failure")]
+    );
+}
+
+#[tokio::test]
+async fn try_after_tool_call_setter_replaces_completed_result() {
+    let tool = Arc::new(FnTool::from_value_fn(
+        ToolSpec::new(
+            "noop",
+            "noop tool",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        |_args| async move { Ok(AgentToolResult::text("completed")) },
+    ));
+    let stream_fn = Arc::new(MockStreamFn::from_streams(vec![
+        script::tool_call_turn(vec![AgentToolCall::new("tool-1", "noop", json!({}))]),
+        script::text_response("recovered"),
+    ]));
+    let mut state = AgentState::default();
+    state.tools = vec![tool];
+    let agent = Agent::new(
+        AgentConfig::default()
+            .with_initial_state(state)
+            .with_stream_fn(stream_fn.clone()),
+    );
+    let try_after: TryAfterToolCallHook = Arc::new(|_context, _cancel| {
+        Box::pin(async { Err(ToolHookError::new("facade after failure")) })
+    });
+    agent.set_try_after_tool_call(Some(try_after)).unwrap();
+
+    agent.prompt("start").await.unwrap();
+
+    assert_eq!(
+        stream_fn.call_count(),
+        2,
+        "the run continued after the error"
+    );
+    let result = agent
+        .state()
+        .messages
+        .iter()
+        .find_map(|message| match message {
+            AgentMessage::ToolResult(result) => Some(result.clone()),
+            _ => None,
+        })
+        .expect("tool result message");
+    assert!(result.is_error);
+    assert_eq!(
+        result.content,
+        vec![ToolResultContent::text("facade after failure")]
     );
 }

@@ -601,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "genai"
-version = "0.7.0-beta.19-WIP"
+version = "0.7.0-beta.19.1-agentprism"
 dependencies = [
  "base64 0.23.1",
  "bytes",

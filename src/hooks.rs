@@ -5,13 +5,20 @@
 //! arguments that execute; changes to its other snapshot fields do not alter the loop. Other hooks
 //! return explicit overrides or updates instead of mutating live state.
 //!
-//! These callback signatures intentionally have no error channel. A hook must encode its decision
-//! in its return value and must not panic; unwinding is a contract violation (even where a
+//! These legacy callback signatures intentionally have no error channel. A hook must encode its
+//! decision in its return value and must not panic; unwinding is a contract violation (even where a
 //! higher-level convenience boundary defensively translates the panic into an in-band failure).
+//!
+//! The tool-call channels additionally have opt-in fallible forms, [`TryBeforeToolCallHook`] and
+//! [`TryAfterToolCallHook`], whose `Err` returns become ordinary in-band error tool results. This
+//! mirrors pi, where a `beforeToolCall`/`afterToolCall` throw is caught by the loop and converted
+//! into the call's error result. Each channel is resolved exactly once per tool call: a configured
+//! fallible hook takes precedence over the legacy hook, and the two are never both invoked for one
+//! call.
 
 use crate::{
     AgentContext, AgentMessage, AgentToolCall, AgentToolResult, AgentUsage, AssistantMessage,
-    ThinkingLevel, ToolResultContent, ToolResultMessage,
+    ThinkingLevel, ToolHookError, ToolResultContent, ToolResultMessage,
 };
 use futures::future::BoxFuture;
 use genai::{ModelIden, ModelSpec};
@@ -168,6 +175,46 @@ pub type AfterToolCallHook = Arc<
         + Sync,
 >;
 
+/// Fallible form of the pre-execution tool hook.
+///
+/// The `Ok` contract matches [`BeforeToolCallHook`] exactly: `Ok(None)` (or a result with
+/// `block == false`) allows execution, and mutations to [`BeforeToolCallContext::args`] become the
+/// tool's arguments. An `Err` return skips validation/execution and becomes the call's in-band
+/// error tool result — the [`ToolHookError`] display text is the result text, mirroring pi's
+/// `error.message` propagation for a thrown `beforeToolCall`. Unlike a blocked call, a failed
+/// before-hook does not request batch termination.
+///
+/// When a configuration carries both this hook and the legacy [`BeforeToolCallHook`], only the
+/// fallible hook runs for each call (deterministic precedence; never both).
+pub type TryBeforeToolCallHook = Arc<
+    dyn for<'a> Fn(
+            &'a mut BeforeToolCallContext,
+            CancellationToken,
+        ) -> BoxFuture<'a, Result<Option<BeforeToolCallResult>, ToolHookError>>
+        + Send
+        + Sync,
+>;
+
+/// Fallible form of the post-execution tool hook.
+///
+/// The `Ok` contract matches [`AfterToolCallHook`] exactly. An `Err` return replaces the completed
+/// tool result with an in-band error tool result whose text is the [`ToolHookError`] display text
+/// and whose error classification is `true`, mirroring pi's catch around `afterToolCall`: the
+/// replacement discards the executed result's content, details, usage, and termination request.
+/// Tool side effects are **not** rolled back — execution already happened; only the model-visible
+/// result is replaced.
+///
+/// When a configuration carries both this hook and the legacy [`AfterToolCallHook`], only the
+/// fallible hook runs for each call (deterministic precedence; never both).
+pub type TryAfterToolCallHook = Arc<
+    dyn Fn(
+            AfterToolCallContext,
+            CancellationToken,
+        ) -> BoxFuture<'static, Result<Option<AfterToolCallResult>, ToolHookError>>
+        + Send
+        + Sync,
+>;
+
 /// Low-level post-turn predicate; returning `true` ends the current invocation.
 pub type ShouldStopAfterTurnHook =
     Arc<dyn Fn(ShouldStopAfterTurnContext) -> BoxFuture<'static, bool> + Send + Sync>;
@@ -223,10 +270,12 @@ impl StreamResponseInfo {
 /// returning `None` keeps it unchanged. Like the other hooks it is infallible — a decision is
 /// encoded in the return value and the hook must not panic.
 ///
-/// The production [`crate::GenaiStreamFn`] applies this hook only when it is installed at
-/// construction time ([`crate::GenaiStreamFn::with_exec_hooks`]) because the genai fork's
-/// interceptors are client-level; the `proxy`-feature `ProxyStreamFn` honors the per-request
-/// [`crate::StreamRequest::on_payload`] hook directly.
+/// The production [`crate::GenaiStreamFn`] honors the per-request
+/// [`crate::StreamRequest::on_payload`] hook as a replacement of its construction-time hook (see
+/// [`crate::GenaiStreamFn::with_exec_hooks`]): when the request carries one, the
+/// construction-time hook does not fire for that execution — the two never compose, and exactly
+/// one hook invocation happens per physical attempt, including retries. The `proxy`-feature
+/// `ProxyStreamFn` honors the per-request hook directly.
 pub type OnPayloadHook =
     Arc<dyn Fn(Value, ModelIden) -> BoxFuture<'static, Option<Value>> + Send + Sync>;
 
@@ -236,10 +285,13 @@ pub type OnPayloadHook =
 /// soon as the HTTP response arrives — before its body/stream is consumed, including on 4xx/5xx
 /// responses. It is purely observational and infallible: it returns nothing and must not panic.
 ///
-/// The production [`crate::GenaiStreamFn`] applies this hook only when it is installed at
-/// construction time ([`crate::GenaiStreamFn::with_exec_hooks`]); on that path the HTTP send is
-/// lazy, so the hook fires during stream consumption. The `proxy`-feature `ProxyStreamFn` honors
-/// the per-request [`crate::StreamRequest::on_response`] hook directly and fires it before the
+/// The production [`crate::GenaiStreamFn`] honors the per-request
+/// [`crate::StreamRequest::on_response`] hook as a replacement of its construction-time hook (see
+/// [`crate::GenaiStreamFn::with_exec_hooks`]): when the request carries one, the
+/// construction-time hook does not fire for that execution — the two never compose, and exactly
+/// one hook invocation happens per physical attempt, including retries and HTTP-error responses.
+/// On that path the HTTP send is lazy, so the hook fires during stream consumption. The
+/// `proxy`-feature `ProxyStreamFn` honors the per-request hook directly and fires it before the
 /// SSE body (or error body) is read.
 pub type OnResponseHook =
     Arc<dyn Fn(StreamResponseInfo, ModelIden) -> BoxFuture<'static, ()> + Send + Sync>;

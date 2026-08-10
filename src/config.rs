@@ -8,7 +8,7 @@
 use crate::{
     AfterToolCallHook, AgentMessage, AgentTool, BeforeToolCallHook, ConvertToLlm, OnPayloadHook,
     OnResponseHook, PrepareNextTurnHook, QueueMessagesHook, ShouldStopAfterTurnHook,
-    TransformContextHook, default_convert_to_llm,
+    TransformContextHook, TryAfterToolCallHook, TryBeforeToolCallHook, default_convert_to_llm,
 };
 use genai::ModelSpec;
 use genai::chat::{ChatOptions, ReasoningEffort};
@@ -25,6 +25,33 @@ pub enum ToolExecutionMode {
     /// assistant-message batch sequential.
     #[default]
     Parallel,
+}
+
+/// Resolve the `reasoning_effort` chat option from a thinking level and an optional per-level
+/// budget map.
+///
+/// This is the single resolution used both for a stateful agent's initial snapshot and for
+/// next-turn [`crate::AgentLoopTurnUpdate::thinking_level`] updates, so both paths see identical
+/// behavior:
+///
+/// - [`ThinkingLevel::Off`] yields `None` (no reasoning-effort option is set).
+/// - An explicit [`ThinkingLevel::Budget`] always wins and is forwarded unchanged as
+///   [`ReasoningEffort::Budget`], bypassing the map entirely.
+/// - A named level resolves to [`ReasoningEffort::Budget`] when its budget entry is configured
+///   (with `xhigh`/`max` clamping through the `high` entry, per pi-ai's `clampReasoning`), and
+///   otherwise falls back to the named level's own reasoning effort.
+pub fn resolve_reasoning_effort(
+    level: ThinkingLevel,
+    budgets: Option<&ThinkingBudgets>,
+) -> Option<ReasoningEffort> {
+    match level {
+        ThinkingLevel::Off => None,
+        ThinkingLevel::Budget(tokens) => Some(ReasoningEffort::Budget(tokens)),
+        named => match budgets.and_then(|budgets| budgets.resolve(named)) {
+            Some(budget) => Some(ReasoningEffort::Budget(budget)),
+            None => named.reasoning_effort(),
+        },
+    }
 }
 
 /// Number of queued messages returned by one steering or follow-up poll.
@@ -238,14 +265,42 @@ impl AgentContext {
 
 /// Configuration snapshot for a low-level loop invocation.
 ///
-/// Callback fields are [`Arc`]-backed and can be cloned between turns. Hooks have infallible
-/// signatures; they must communicate their documented decisions through return values rather than
-/// panic.
+/// Callback fields are [`Arc`]-backed and can be cloned between turns. Legacy hooks have
+/// infallible signatures; they must communicate their documented decisions through return values
+/// rather than panic. The fallible tool channels ([`TryBeforeToolCallHook`]/
+/// [`TryAfterToolCallHook`]) convert their errors into in-band error tool results.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct AgentLoopConfig {
     /// Model used for provider requests unless a prepare-next-turn update replaces it.
     pub model: ModelSpec,
+    /// Optional session identifier forwarded onto each [`crate::StreamRequest`]
+    /// ([`crate::StreamRequest::session_id`]).
+    ///
+    /// The loop forwards the value without interpreting it; honoring it (for example for
+    /// cache-affinity routing) is a stream-function concern. It is independent of
+    /// `ChatOptions::prompt_cache_key`: setting or clearing it never writes that field.
+    pub session_id: Option<String>,
+    /// Optional per-named-level reasoning-token budgets.
+    ///
+    /// A prepare-next-turn [`ThinkingLevel`] update resolves through this map via
+    /// [`resolve_reasoning_effort`], exactly like the stateful agent's initial snapshot. `None`
+    /// leaves named levels mapped to their named reasoning efforts.
+    pub thinking_budgets: Option<ThinkingBudgets>,
+    /// Optional maximum number of provider-handshake retries forwarded onto each
+    /// [`crate::StreamRequest`].
+    ///
+    /// The loop performs no retries itself; honoring the value is a stream-function concern.
+    /// [`crate::GenaiStreamFn`] treats it as a per-request override of its construction-time
+    /// [`crate::RetryPolicy`].
+    pub max_retries: Option<u32>,
+    /// Optional cap, in milliseconds, on a *server-requested* retry delay, forwarded onto each
+    /// [`crate::StreamRequest`].
+    ///
+    /// The loop performs no retries itself; honoring the value is a stream-function concern.
+    /// [`crate::GenaiStreamFn`] treats it as a per-request override of its construction-time
+    /// [`crate::RetryPolicy`].
+    pub max_retry_delay_ms: Option<u64>,
     /// Conversion from the widened agent transcript to provider-compatible messages.
     ///
     /// The loop invokes this once per provider request, after [`Self::transform_context`].
@@ -267,10 +322,29 @@ pub struct AgentLoopConfig {
     pub get_steering_messages: Option<QueueMessagesHook>,
     /// Optional source of follow-up messages, polled when the loop would otherwise finish.
     pub get_follow_up_messages: Option<QueueMessagesHook>,
-    /// Optional pre-execution hook for blocking a call or mutating its validated arguments.
+    /// Optional legacy infallible pre-execution hook for blocking a call or mutating its
+    /// validated arguments.
+    ///
+    /// When [`Self::try_before_tool_call`] is also set, the fallible hook takes precedence and this
+    /// hook is never invoked.
     pub before_tool_call: Option<BeforeToolCallHook>,
-    /// Optional post-execution hook for explicitly overriding result fields.
+    /// Optional legacy infallible post-execution hook for explicitly overriding result fields.
+    ///
+    /// When [`Self::try_after_tool_call`] is also set, the fallible hook takes precedence and this
+    /// hook is never invoked.
     pub after_tool_call: Option<AfterToolCallHook>,
+    /// Optional fallible pre-execution hook.
+    ///
+    /// An `Err` skips execution and becomes the call's in-band error tool result. Takes precedence
+    /// over [`Self::before_tool_call`] when both are set; the two are never both invoked for one
+    /// call. See [`TryBeforeToolCallHook`].
+    pub try_before_tool_call: Option<TryBeforeToolCallHook>,
+    /// Optional fallible post-execution hook.
+    ///
+    /// An `Err` replaces the completed result with an in-band error tool result. Takes precedence
+    /// over [`Self::after_tool_call`] when both are set; the two are never both invoked for one
+    /// call. See [`TryAfterToolCallHook`].
+    pub try_after_tool_call: Option<TryAfterToolCallHook>,
     /// Execution policy for each assistant message's tool-call batch.
     pub tool_execution: ToolExecutionMode,
     /// Preferred provider transport advisory forwarded onto each [`crate::StreamRequest`].
@@ -312,7 +386,13 @@ impl std::fmt::Debug for AgentLoopConfig {
             )
             .field("before_tool_call", &self.before_tool_call.is_some())
             .field("after_tool_call", &self.after_tool_call.is_some())
+            .field("try_before_tool_call", &self.try_before_tool_call.is_some())
+            .field("try_after_tool_call", &self.try_after_tool_call.is_some())
             .field("tool_execution", &self.tool_execution)
+            .field("session_id", &self.session_id)
+            .field("thinking_budgets", &self.thinking_budgets)
+            .field("max_retries", &self.max_retries)
+            .field("max_retry_delay_ms", &self.max_retry_delay_ms)
             .field("transport", &self.transport)
             .field("on_payload", &self.on_payload.is_some())
             .field("on_response", &self.on_response.is_some())
@@ -334,12 +414,44 @@ impl AgentLoopConfig {
             get_follow_up_messages: None,
             before_tool_call: None,
             after_tool_call: None,
+            try_before_tool_call: None,
+            try_after_tool_call: None,
             tool_execution: ToolExecutionMode::Parallel,
             transport: Transport::Auto,
             on_payload: None,
             on_response: None,
+            session_id: None,
+            thinking_budgets: None,
+            max_retries: None,
+            max_retry_delay_ms: None,
             chat_options: ChatOptions::default(),
         }
+    }
+
+    /// Set the session identifier forwarded onto each stream request (see [`Self::session_id`]).
+    ///
+    /// This never writes `ChatOptions::prompt_cache_key`; the two are independent.
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    /// Set the per-named-level reasoning-token budgets used for next-turn thinking updates.
+    pub fn with_thinking_budgets(mut self, thinking_budgets: ThinkingBudgets) -> Self {
+        self.thinking_budgets = Some(thinking_budgets);
+        self
+    }
+
+    /// Set the maximum number of provider-handshake retries forwarded onto each stream request.
+    pub fn with_max_retries(mut self, max_retries: u32) -> Self {
+        self.max_retries = Some(max_retries);
+        self
+    }
+
+    /// Set the server-requested retry-delay cap (milliseconds) forwarded onto each stream request.
+    pub fn with_max_retry_delay_ms(mut self, max_retry_delay_ms: u64) -> Self {
+        self.max_retry_delay_ms = Some(max_retry_delay_ms);
+        self
     }
 
     /// Replace the provider chat options.
@@ -396,15 +508,42 @@ impl AgentLoopConfig {
         self
     }
 
-    /// Install the pre-execution tool hook.
+    /// Install the legacy infallible pre-execution tool hook.
+    ///
+    /// [`Self::with_try_before_tool_call`] takes precedence when both are installed.
     pub fn with_before_tool_call(mut self, before_tool_call: BeforeToolCallHook) -> Self {
         self.before_tool_call = Some(before_tool_call);
         self
     }
 
-    /// Install the post-execution tool hook.
+    /// Install the legacy infallible post-execution tool hook.
+    ///
+    /// [`Self::with_try_after_tool_call`] takes precedence when both are installed.
     pub fn with_after_tool_call(mut self, after_tool_call: AfterToolCallHook) -> Self {
         self.after_tool_call = Some(after_tool_call);
+        self
+    }
+
+    /// Install the fallible pre-execution tool hook.
+    ///
+    /// Takes precedence over [`Self::with_before_tool_call`] when both are installed; the two are
+    /// never both invoked for one call. An `Err` skips execution and becomes the call's in-band
+    /// error tool result.
+    pub fn with_try_before_tool_call(
+        mut self,
+        try_before_tool_call: TryBeforeToolCallHook,
+    ) -> Self {
+        self.try_before_tool_call = Some(try_before_tool_call);
+        self
+    }
+
+    /// Install the fallible post-execution tool hook.
+    ///
+    /// Takes precedence over [`Self::with_after_tool_call`] when both are installed; the two are
+    /// never both invoked for one call. An `Err` replaces the completed result with an in-band
+    /// error tool result.
+    pub fn with_try_after_tool_call(mut self, try_after_tool_call: TryAfterToolCallHook) -> Self {
+        self.try_after_tool_call = Some(try_after_tool_call);
         self
     }
 
@@ -470,6 +609,88 @@ mod tests {
     #[test]
     fn transport_defaults_to_auto() {
         assert_eq!(Transport::default(), Transport::Auto);
+    }
+
+    #[test]
+    fn resolve_reasoning_effort_prefers_configured_budgets_and_clamps() {
+        let budgets = ThinkingBudgets::default().with_low(200).with_high(400);
+        let resolve = |level| resolve_reasoning_effort(level, Some(&budgets));
+
+        assert!(resolve(ThinkingLevel::Off).is_none());
+        assert!(
+            matches!(
+                resolve(ThinkingLevel::Budget(64)),
+                Some(ReasoningEffort::Budget(64))
+            ),
+            "an explicit budget always bypasses the map"
+        );
+        assert!(matches!(
+            resolve(ThinkingLevel::Low),
+            Some(ReasoningEffort::Budget(200))
+        ));
+        assert!(matches!(
+            resolve(ThinkingLevel::High),
+            Some(ReasoningEffort::Budget(400))
+        ));
+        assert!(
+            matches!(
+                resolve(ThinkingLevel::Max),
+                Some(ReasoningEffort::Budget(400))
+            ),
+            "max clamps through the high entry"
+        );
+        assert!(
+            matches!(
+                resolve(ThinkingLevel::Medium),
+                Some(ReasoningEffort::Medium)
+            ),
+            "an unconfigured level falls back to its named reasoning effort"
+        );
+    }
+
+    #[test]
+    fn resolve_reasoning_effort_without_budgets_uses_named_efforts() {
+        assert!(resolve_reasoning_effort(ThinkingLevel::Off, None).is_none());
+        assert!(matches!(
+            resolve_reasoning_effort(ThinkingLevel::High, None),
+            Some(ReasoningEffort::High)
+        ));
+        assert!(matches!(
+            resolve_reasoning_effort(ThinkingLevel::Budget(64), None),
+            Some(ReasoningEffort::Budget(64))
+        ));
+    }
+
+    #[test]
+    fn agent_loop_config_debug_redacts_closures_and_shows_scalar_fields() {
+        let config = AgentLoopConfig::new(
+            ModelSpec::from_iden(crate::assistant::unknown_model_iden()),
+            default_convert_to_llm(),
+        )
+        .with_session_id("debug-session")
+        .with_max_retries(3)
+        .with_max_retry_delay_ms(1_250)
+        .with_thinking_budgets(ThinkingBudgets::default().with_high(400))
+        .with_try_before_tool_call(std::sync::Arc::new(|_context, _cancel| {
+            Box::pin(async move { Ok(None) })
+        }))
+        .with_try_after_tool_call(std::sync::Arc::new(|_context, _cancel| {
+            Box::pin(async move { Ok(None) })
+        }));
+
+        let debug = format!("{config:?}");
+        assert!(
+            debug.contains("session_id: Some(\"debug-session\")"),
+            "{debug}"
+        );
+        assert!(debug.contains("max_retries: Some(3)"), "{debug}");
+        assert!(debug.contains("max_retry_delay_ms: Some(1250)"), "{debug}");
+        assert!(debug.contains("try_before_tool_call: true"), "{debug}");
+        assert!(debug.contains("try_after_tool_call: true"), "{debug}");
+        assert!(
+            !debug.contains("Fn("),
+            "closures are redacted to presence flags: {debug}"
+        );
     }
 
     #[test]

@@ -2,9 +2,11 @@
 //!
 //! The loop and the `Agent` facade forward the hooks as handles onto each [`StreamRequest`];
 //! honoring them is a stream-function concern. `GenaiStreamFn` applies construction-time hooks
-//! through the genai fork's client-level interceptors, verified here against a local one-shot
-//! capture server (the fork's own offline test pattern) because the fork's `intercept`/`observe`
-//! entry points are crate-private and cannot be driven directly.
+//! through the genai fork's client-level interceptors and honors per-request hooks through the
+//! fork's request-level `ExecOptions` overrides (a request hook replaces, never composes with,
+//! the construction default). Both are verified here against local one-shot/scripted capture
+//! servers (the fork's own offline test pattern) because the fork's `intercept`/`observe` entry
+//! points are crate-private and cannot be driven directly.
 
 #![cfg(feature = "testing")]
 
@@ -15,11 +17,12 @@ use genai::resolver::{AuthData, Endpoint};
 use genai::{Client, ModelIden, ModelSpec, ServiceTarget};
 use rust_genai_agent::testing::{EventRecorder, MockStreamFn, fixtures, script};
 use rust_genai_agent::{
-    Agent, AgentConfig, AgentContext, AgentLoopConfig, GenaiStreamFn, LlmContext, OnPayloadHook,
-    OnResponseHook, StreamFn, StreamRequest, StreamResponseInfo, default_convert_to_llm,
-    run_agent_loop,
+    Agent, AgentConfig, AgentContext, AgentLoopConfig, AgentState, GenaiStreamFn, LlmContext,
+    OnPayloadHook, OnResponseHook, StopReason, StreamFn, StreamRequest, StreamResponseInfo,
+    default_convert_to_llm, run_agent_loop,
 };
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -27,7 +30,11 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-const TEST_TIMEOUT: Duration = Duration::from_secs(3);
+// Generous deadlock safety-net (not a latency assertion): these are local one-shot capture-server
+// operations that complete in well under a millisecond. A tight bound (previously 3s) spuriously
+// tripped under CPU-saturated `--all-features` runs where tokio workers are starved; 30s only ever
+// fires on a genuine hang.
+const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 type SeenPayloads = Arc<Mutex<Vec<(Value, ModelIden)>>>;
 type SeenResponses = Arc<Mutex<Vec<(StreamResponseInfo, ModelIden)>>>;
@@ -300,11 +307,11 @@ async fn genai_stream_fn_applies_construction_time_exec_hooks_through_the_fork_c
     assert_eq!(&*model.model_name, "gpt-test");
 }
 
-/// The per-request `StreamRequest` hooks are documented as ignored by `GenaiStreamFn`
-/// (client-level fork interceptors cannot vary per request); the wire body and observer state
-/// prove nothing fires when only the request carries hooks.
+/// `GenaiStreamFn` honors per-request `StreamRequest` hooks on a client built without
+/// construction-time hooks: the request's `on_payload` replacement is what actually goes over
+/// the wire, and the request's `on_response` observes the response head exactly once.
 #[tokio::test]
-async fn genai_stream_fn_ignores_request_level_exec_hooks() {
+async fn genai_stream_fn_honors_request_level_exec_hooks() {
     let (url, body_rx) = spawn_capture_server(openai_sse_ok_response()).await;
     let seen_payloads: SeenPayloads = Arc::default();
     let seen_responses: SeenResponses = Arc::default();
@@ -320,7 +327,7 @@ async fn genai_stream_fn_ignores_request_level_exec_hooks() {
     )
     .with_on_payload(recording_on_payload(
         seen_payloads.clone(),
-        Some(json!({"never": "sent"})),
+        Some(json!({"x_request": true})),
     ))
     .with_on_response(recording_on_response(seen_responses.clone()));
     let stream = stream_fn.stream(request).await;
@@ -334,18 +341,406 @@ async fn genai_stream_fn_ignores_request_level_exec_hooks() {
         .expect("terminal message");
     assert_eq!(message.text(), "Hello");
 
-    assert!(seen_payloads.lock().unwrap().is_empty());
-    assert!(seen_responses.lock().unwrap().is_empty());
+    // The request payload hook fired exactly once with the serialized provider payload.
+    {
+        let payloads = seen_payloads.lock().unwrap();
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            payloads[0].0.get("model").and_then(Value::as_str),
+            Some("gpt-test")
+        );
+    }
+    // Its replacement is what actually went over the wire — a full payload replacement, so the
+    // wire body is exactly the hook's return value.
     let wire_body = tokio::time::timeout(TEST_TIMEOUT, body_rx)
         .await
         .expect("captured request before timeout")
         .expect("capture server recorded a body");
     let wire_json: Value = serde_json::from_str(&wire_body).expect("wire body is JSON");
-    assert_eq!(wire_json.get("never"), None);
+    assert_eq!(wire_json, json!({"x_request": true}));
+    // The request response hook observed the response head exactly once.
+    let responses = seen_responses.lock().unwrap();
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0].0.status, 200);
+    assert_eq!(responses[0].0.header("x-obs-test"), Some("obs-value"));
+}
+
+/// A per-request hook *replaces* the construction-time hook of its channel: the construction
+/// hook never fires for the request and the wire payload carries only the request replacement —
+/// the two never compose, so exactly one hook fires per channel.
+#[tokio::test]
+async fn genai_stream_fn_request_hook_replaces_construction_hook_without_composing() {
+    let (url, body_rx) = spawn_capture_server(openai_sse_ok_response()).await;
+    let construction_payloads: SeenPayloads = Arc::default();
+    let construction_responses: SeenResponses = Arc::default();
+    let request_payloads: SeenPayloads = Arc::default();
+    let request_responses: SeenResponses = Arc::default();
+    let stream_fn = GenaiStreamFn::with_exec_hooks(
+        Client::builder(),
+        Some(recording_on_payload(
+            construction_payloads.clone(),
+            Some(json!({"x_construction": true})),
+        )),
+        Some(recording_on_response(construction_responses.clone())),
+    );
+
+    let request = StreamRequest::new(
+        local_target(url),
+        LlmContext {
+            system_prompt: String::new(),
+            messages: vec![ChatMessage::user("Why is the sky red?")],
+            tools: Vec::new(),
+        },
+    )
+    .with_on_payload(recording_on_payload(
+        request_payloads.clone(),
+        Some(json!({"x_request": true})),
+    ))
+    .with_on_response(recording_on_response(request_responses.clone()));
+    let stream = stream_fn.stream(request).await;
+    let result = stream.result_handle();
+    let _events: Vec<_> = tokio::time::timeout(TEST_TIMEOUT, stream.collect())
+        .await
+        .expect("assistant stream finished before timeout");
+    tokio::time::timeout(TEST_TIMEOUT, result.get())
+        .await
+        .expect("terminal result before timeout")
+        .expect("terminal message");
+
+    assert!(
+        construction_payloads.lock().unwrap().is_empty(),
+        "the construction payload hook must not fire on a replaced channel"
+    );
+    assert!(
+        construction_responses.lock().unwrap().is_empty(),
+        "the construction response hook must not fire on a replaced channel"
+    );
+    assert_eq!(request_payloads.lock().unwrap().len(), 1);
+    assert_eq!(request_responses.lock().unwrap().len(), 1);
+    let wire_body = tokio::time::timeout(TEST_TIMEOUT, body_rx)
+        .await
+        .expect("captured request before timeout")
+        .expect("capture server recorded a body");
+    let wire_json: Value = serde_json::from_str(&wire_body).expect("wire body is JSON");
+    assert_eq!(wire_json.get("x_request"), Some(&json!(true)));
+    assert_eq!(
+        wire_json.get("x_construction"),
+        None,
+        "the request replacement never composes with the construction default"
+    );
+}
+
+/// Requests that carry no hook inherit the construction-time hooks unchanged: each fires exactly
+/// once for the attempt.
+#[tokio::test]
+async fn genai_stream_fn_request_without_hooks_inherits_construction_hooks() {
+    let (url, body_rx) = spawn_capture_server(openai_sse_ok_response()).await;
+    let seen_payloads: SeenPayloads = Arc::default();
+    let seen_responses: SeenResponses = Arc::default();
+    let stream_fn = GenaiStreamFn::with_exec_hooks(
+        Client::builder(),
+        Some(recording_on_payload(seen_payloads.clone(), None)),
+        Some(recording_on_response(seen_responses.clone())),
+    );
+
+    let request = StreamRequest::new(
+        local_target(url),
+        LlmContext {
+            system_prompt: String::new(),
+            messages: vec![ChatMessage::user("Why is the sky red?")],
+            tools: Vec::new(),
+        },
+    );
+    let stream = stream_fn.stream(request).await;
+    let result = stream.result_handle();
+    let _events: Vec<_> = tokio::time::timeout(TEST_TIMEOUT, stream.collect())
+        .await
+        .expect("assistant stream finished before timeout");
+    let message = tokio::time::timeout(TEST_TIMEOUT, result.get())
+        .await
+        .expect("terminal result before timeout")
+        .expect("terminal message");
+    assert_eq!(message.text(), "Hello");
+
+    assert_eq!(seen_payloads.lock().unwrap().len(), 1);
+    assert_eq!(seen_responses.lock().unwrap().len(), 1);
+    let wire_body = tokio::time::timeout(TEST_TIMEOUT, body_rx)
+        .await
+        .expect("captured request before timeout")
+        .expect("capture server recorded a body");
+    let wire_json: Value = serde_json::from_str(&wire_body).expect("wire body is JSON");
     assert_eq!(
         wire_json.get("model").and_then(Value::as_str),
         Some("gpt-test")
     );
 }
 
+/// A request `on_response` hook fires on the HTTP-error response head too (before the in-band
+/// stream error surfaces), exactly once for the failed attempt.
+#[tokio::test]
+async fn genai_stream_fn_request_on_response_fires_on_http_error() {
+    let (url, connections) = spawn_scripted_server(vec![http_429_with_short_retry()]).await;
+    let seen_responses: SeenResponses = Arc::default();
+    let stream_fn = GenaiStreamFn::new(Client::builder().build());
+
+    let request = StreamRequest::new(
+        local_target(url),
+        LlmContext {
+            system_prompt: String::new(),
+            messages: vec![ChatMessage::user("Why is the sky red?")],
+            tools: Vec::new(),
+        },
+    )
+    .with_on_response(recording_on_response(seen_responses.clone()));
+    let stream = stream_fn.stream(request).await;
+    let result = stream.result_handle();
+    let _events: Vec<_> = tokio::time::timeout(TEST_TIMEOUT, stream.collect())
+        .await
+        .expect("assistant stream finished before timeout");
+    let message = tokio::time::timeout(TEST_TIMEOUT, result.get())
+        .await
+        .expect("terminal result before timeout")
+        .expect("terminal message");
+
+    assert_eq!(message.stop_reason, StopReason::Error);
+    assert_eq!(connections.load(Ordering::SeqCst), 1);
+    let responses = seen_responses.lock().unwrap();
+    assert_eq!(
+        responses.len(),
+        1,
+        "one observer call for the failed attempt"
+    );
+    assert_eq!(responses[0].0.status, 429);
+}
+
+/// Under retries, per-request exec hooks fire once per physical attempt: `on_payload` runs for
+/// every re-issued request's payload and `on_response` observes every response head, including
+/// the retryable 429.
+#[tokio::test]
+async fn genai_stream_fn_request_hooks_fire_once_per_physical_attempt_under_retries() {
+    let (url, connections) =
+        spawn_scripted_server(vec![http_429_with_short_retry(), openai_sse_ok_response()]).await;
+    let seen_payloads: SeenPayloads = Arc::default();
+    let seen_responses: SeenResponses = Arc::default();
+    let stream_fn = GenaiStreamFn::new(Client::builder().build());
+
+    let request = StreamRequest::new(
+        local_target(url),
+        LlmContext {
+            system_prompt: String::new(),
+            messages: vec![ChatMessage::user("Why is the sky red?")],
+            tools: Vec::new(),
+        },
+    )
+    .with_on_payload(recording_on_payload(seen_payloads.clone(), None))
+    .with_on_response(recording_on_response(seen_responses.clone()))
+    .with_max_retries(2);
+    let stream = stream_fn.stream(request).await;
+    let result = stream.result_handle();
+    let _events: Vec<_> = tokio::time::timeout(TEST_TIMEOUT, stream.collect())
+        .await
+        .expect("assistant stream finished before timeout");
+    let message = tokio::time::timeout(TEST_TIMEOUT, result.get())
+        .await
+        .expect("terminal result before timeout")
+        .expect("terminal message");
+
+    assert_eq!(message.text(), "Hello");
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        2,
+        "one retry was issued"
+    );
+    assert_eq!(
+        seen_payloads.lock().unwrap().len(),
+        2,
+        "on_payload fired once per physical attempt"
+    );
+    let statuses: Vec<u16> = seen_responses
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(info, _)| info.status)
+        .collect();
+    assert_eq!(
+        statuses,
+        [429, 200],
+        "on_response observed every response head, including the retryable error"
+    );
+}
+
 // endregion: --- GenaiStreamFn construction-time wiring
+
+/// Spawn a scripted server answering the Nth connection with `responses[N]`, returning the base
+/// URL and a counter of accepted connections (i.e., physical attempts made).
+async fn spawn_scripted_server(responses: Vec<String>) -> (String, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind local scripted server");
+    let address = listener.local_addr().expect("scripted server address");
+    let connections = Arc::new(AtomicUsize::new(0));
+    let connections_bg = connections.clone();
+    tokio::spawn(async move {
+        for response in responses {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            connections_bg.fetch_add(1, Ordering::SeqCst);
+            let mut buffer = [0_u8; 8192];
+            let _ = socket.read(&mut buffer).await;
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        }
+    });
+    (format!("http://{address}/"), connections)
+}
+
+/// A 429 response asking for a 1ms retry delay.
+fn http_429_with_short_retry() -> String {
+    let body = r#"{"error":{"message":"rate limited"}}"#;
+    format!(
+        "HTTP/1.1 429 Too Many Requests\r\n\
+         content-type: application/json\r\n\
+         retry-after-ms: 1\r\n\
+         content-length: {}\r\n\
+         connection: close\r\n\
+         \r\n\
+         {body}",
+        body.len()
+    )
+}
+
+/// End-to-end through the `Agent` facade with a real `GenaiStreamFn`: the facade snapshots the
+/// configured hooks at run admission, so an idle `set_on_payload` replacement takes effect on the
+/// next run — wire-verified — while the previous run's wire payload proves its snapshot stayed
+/// stable. The session id reaches each run for correlation without ever entering provider JSON.
+#[tokio::test]
+async fn agent_idle_hook_replacement_changes_the_next_run_wire_payload() {
+    // Two connections: run one and run two.
+    let (url, connections) =
+        spawn_scripted_server(vec![openai_sse_ok_response(), openai_sse_ok_response()]).await;
+    let first_seen: SeenPayloads = Arc::default();
+    let second_seen: SeenPayloads = Arc::default();
+    let first_hook = recording_on_payload(first_seen.clone(), Some(json!({"x_run": 1})));
+    let stream_fn = GenaiStreamFn::new(Client::builder().build());
+    let state = AgentState {
+        model: local_target(url),
+        ..AgentState::default()
+    };
+    let agent = Agent::new(
+        AgentConfig::default()
+            .with_initial_state(state)
+            .with_stream_fn(Arc::new(stream_fn))
+            .with_on_payload(first_hook.clone())
+            .with_session_id("session-for-correlation"),
+    );
+
+    // Run one: the configured hook fires and its replacement goes over the wire.
+    agent.prompt("first").await.expect("first run completes");
+    // Idle replacement: swap the payload hook between runs.
+    let second_hook = recording_on_payload(second_seen.clone(), Some(json!({"x_run": 2})));
+    agent
+        .set_on_payload(Some(second_hook.clone()))
+        .expect("idle replacement is admitted");
+    agent.prompt("second").await.expect("second run completes");
+
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        2,
+        "two runs, two attempts"
+    );
+    assert_eq!(
+        first_seen.lock().unwrap().len(),
+        1,
+        "the first hook fired only on the first run"
+    );
+    assert_eq!(
+        second_seen.lock().unwrap().len(),
+        1,
+        "the idle replacement fired on the next run"
+    );
+    // The replacement hook saw the unmodified serialized payload: the two hooks never compose,
+    // and neither payload carries the session id or a prompt cache key.
+    {
+        let second_payloads = second_seen.lock().unwrap();
+        let second_payload = &second_payloads[0].0;
+        assert_eq!(second_payload.get("x_run"), None);
+        assert_eq!(
+            second_payload.get("model").and_then(Value::as_str),
+            Some("gpt-test")
+        );
+    }
+    for seen in [&first_seen, &second_seen] {
+        let seen = seen.lock().unwrap();
+        let payload = &seen[0].0;
+        assert_eq!(
+            payload.get("session_id"),
+            None,
+            "session id never enters provider JSON"
+        );
+        assert_eq!(payload.get("sessionId"), None);
+        assert_eq!(payload.get("prompt_cache_key"), None);
+    }
+    // The run snapshots prove per-execution correlation reached the requests: the facade keeps
+    // the configured session id and forwarded it onto each run's stream requests.
+    assert_eq!(
+        agent.session_id().as_deref(),
+        Some("session-for-correlation")
+    );
+}
+
+/// Under retries, the construction-time exec hooks fire once per physical attempt: `on_payload`
+/// runs for every re-issued request's payload and `on_response` observes every response head,
+/// including the retryable 429.
+#[tokio::test]
+async fn exec_hooks_fire_once_per_physical_attempt_under_retries() {
+    let (url, connections) =
+        spawn_scripted_server(vec![http_429_with_short_retry(), openai_sse_ok_response()]).await;
+    let seen_payloads: SeenPayloads = Arc::default();
+    let seen_responses: SeenResponses = Arc::default();
+    let on_payload = recording_on_payload(seen_payloads.clone(), None);
+    let on_response = recording_on_response(seen_responses.clone());
+    let stream_fn =
+        GenaiStreamFn::with_exec_hooks(Client::builder(), Some(on_payload), Some(on_response))
+            .with_retry(rust_genai_agent::RetryPolicy {
+                max_retries: 2,
+                max_retry_delay_ms: 60_000,
+            });
+
+    let request = StreamRequest::new(
+        local_target(url),
+        LlmContext {
+            system_prompt: String::new(),
+            messages: vec![ChatMessage::user("Why is the sky red?")],
+            tools: Vec::new(),
+        },
+    );
+    let stream = stream_fn.stream(request).await;
+    let result = stream.result_handle();
+    let _events: Vec<_> = tokio::time::timeout(TEST_TIMEOUT, stream.collect())
+        .await
+        .expect("assistant stream finished before timeout");
+    let message = tokio::time::timeout(TEST_TIMEOUT, result.get())
+        .await
+        .expect("terminal result before timeout")
+        .expect("terminal message");
+
+    assert_eq!(message.text(), "Hello");
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        2,
+        "one retry was issued"
+    );
+    assert_eq!(
+        seen_payloads.lock().unwrap().len(),
+        2,
+        "on_payload fired once per physical attempt"
+    );
+    let responses = seen_responses.lock().unwrap();
+    let statuses: Vec<u16> = responses.iter().map(|(info, _)| info.status).collect();
+    assert_eq!(
+        statuses,
+        [429, 200],
+        "on_response observed every response head, including the retryable error"
+    );
+}

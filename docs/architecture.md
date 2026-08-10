@@ -59,7 +59,7 @@
 | `StopReason` stop/length/toolUse/error/aborted | `StopReason::{Completed, MaxTokens, ToolCall, ContentFilter, StopSequence, Other(raw)}` |
 | `ThinkingLevel` + `ThinkingBudgets` | `ChatOptions::reasoning_effort: ReasoningEffort::{Zero, Minimal, Low, Medium, High, XHigh, Max, Budget(u32)}` |
 | `getApiKey(provider)` per call | `Client::builder().with_auth_resolver[_async]_fn(...)` at client construction |
-| `sessionId` (cache affinity) | `ChatOptions::prompt_cache_key` |
+| `sessionId` (cache affinity) | `StreamRequest::session_id` — an independent request field forwarded from `AgentConfig`/`AgentLoopConfig`; **not** collapsed into `ChatOptions::prompt_cache_key`, which remains the explicit provider cache key |
 | `validateToolArguments` (typebox + coercion) | `jsonschema` crate + ported coercion pass (§6) |
 | `AbortSignal` | `tokio_util::sync::CancellationToken` |
 
@@ -258,14 +258,14 @@ pub struct Agent { /* state: RwLock<AgentState>, listeners, queues, active run h
 | 1 | **Tool-call streaming granularity** | genai `ToolCallChunk` = cumulative snapshot with raw-JSON-string args → salvage-parse per chunk; final parse at `StreamEnd`. Preserves pi's toolcall_delta UX. |
 | 2 | **Images in tool results** | The agentprism genai fork widens `ToolResponse` with optional binary `parts` (upstream PR #277): text parts join into `content`, image parts attach as `Binary` attachments. (v1 replaced images with an `[image omitted]` marker while `ToolResponse` was text-only.) |
 | 3 | **`getApiKey` per-call** | Not per-call in genai; expiring tokens are handled natively via `Client::builder().with_auth_resolver_async_fn`. Document as the pattern; no agent-level hook. |
-| 4 | **`onPayload` / `onResponse`** | Ported via the agentprism genai fork's client-level exec interceptors (`PayloadInterceptor`/`ResponseObserver`, upstream PR #277). `on_payload`/`on_response` hooks (`OnPayloadHook`/`OnResponseHook` + a body-free `StreamResponseInfo`) sit on `AgentConfig`/`StreamRequest` with `Busy`-guarded setters; the loop forwards them per request. Custom `StreamFn`s and the proxy honor the per-request hooks directly; `GenaiStreamFn` applies construction-time hooks via `with_exec_hooks` (the fork interceptors are client-level, so per-request fields are ignored — pass the same hooks in both places, as pi wires them once at construction). |
+| 4 | **`onPayload` / `onResponse`** | Ported via the agentprism genai fork's exec interceptors (`PayloadInterceptor`/`ResponseObserver`, upstream PR #277 lineage). `on_payload`/`on_response` hooks (`OnPayloadHook`/`OnResponseHook` + a body-free `StreamResponseInfo`) sit on `AgentConfig`/`StreamRequest` with `Busy`-guarded setters; the loop forwards them per request, and the facade snapshots them at run admission (idle replacement affects the next run; an in-flight run keeps its snapshot). Custom `StreamFn`s and the proxy honor the per-request hooks directly; `GenaiStreamFn` honors them through the fork's request-level `ExecOptions` (`exec_chat_stream_with_exec_options`): a request hook **replaces** the construction-time hook of its channel (installed via `with_exec_hooks`) for that execution only — the two never compose, and exactly one hook fires per channel per physical attempt, including retries and HTTP-error responses. An absent request hook inherits the construction default, matching pi's single construction-site wiring when no per-request override is set. |
 | 5 | **Cost accounting in `Usage`** | genai has no price catalog → `AgentUsage` carries token counts only; `cost` omitted. |
 | 6 | **Model metadata (context window, cost, capabilities)** | `ModelSpec` is an identifier only. Agent state holds `ModelSpec`; catalog features (compaction thresholds etc.) belong to the excluded harness layer anyway. |
-| 7 | **`transport`, `maxRetryDelayMs`, `metadata`, samplingParams** | pi-specific options with no genai counterpart → omitted; `ChatOptions` extras (`extra_headers`, `extra_body`, `prompt_cache_key`) cover the practical cases. |
+| 7 | **`metadata`, samplingParams** | pi-specific options with no genai counterpart → omitted; `ChatOptions` extras (`extra_headers`, `extra_body`, `prompt_cache_key`) cover the practical cases. (`transport` is a forwarded advisory and `maxRetries`/`maxRetryDelayMs` are forwarded request fields honored by `GenaiStreamFn`'s retry layer — no longer omissions.) |
 | 8 | **Custom message extensibility** | TS uses declaration merging → Rust: `AgentMessage::Custom { role, data: Value }` open variant; `convert_to_llm` decides their fate. |
 | 9 | **Tool `details`/typed results** | Type-erased `serde_json::Value` (runtime JSON schema is the type story). |
 | 10 | **Async traits** | `StreamFn`/`AgentTool`/hooks must be dyn-safe ⇒ `async_trait` (or hand-written `BoxFuture`); crate is tokio-only. |
-| 11 | **Hook snapshots and infallibility** | Async hooks receive owned, cloned snapshots so futures can be `'static`; only the before-tool context is mutably borrowed for argument replacement. Hook outputs are deliberately not `Result`-shaped. A panic is a programming fault: `Agent` synthesizes an in-band failure lifecycle, spawned `agent_loop` returns `LoopError::TaskPanicked` through its result handle, and direct `run_agent_loop` callers own normal Rust unwind handling. |
+| 11 | **Hook snapshots and infallibility** | Async hooks receive owned, cloned snapshots so futures can be `'static`; only the before-tool context is mutably borrowed for argument replacement. Legacy hook outputs are deliberately not `Result`-shaped; the tool channels additionally offer opt-in fallible forms (`AgentTool::try_prepare_arguments`, `TryBeforeToolCallHook`, `TryAfterToolCallHook`) whose `Err` becomes the call's in-band error tool result (preparation/before failures skip execution; an after-hook failure replaces the completed result without rolling back side effects). A fallible channel takes precedence over its legacy counterpart and they never both run for one call. A panic is a programming fault: `Agent` synthesizes an in-band failure lifecycle, spawned `agent_loop` returns `LoopError::TaskPanicked` through its result handle, and direct `run_agent_loop` callers own normal Rust unwind handling. |
 | 12 | **Unbounded observer/update handoff** | Spawned loop events and internal parallel tool-task updates use unbounded channels so a dropped/slow observer cannot change execution ordering or deadlock tasks. Producers must bound update frequency themselves; use the awaited `run_agent_loop` sink when consumer backpressure is required. |
 | 13 | **`UpdateSink` re-entry** | `emit` and `close` are serialized across clones, and the synchronous callback executes while the shared gate is held. The callback must not call any method on the same sink or a clone; same-sink re-entry would deadlock. |
 | 14 | **Convenience exports** | Telemetry setup and UUID generation exposed by the TypeScript index are intentionally omitted rather than imposing ecosystem choices; applications select their own crates. |
@@ -274,25 +274,42 @@ pub struct Agent { /* state: RwLock<AgentState>, listeners, queues, active run h
 
 ## 9. Current package and crate shape
 
-The publishable manifest pins the MSRV and uses Cargo's dual-source dependency form: local review
-builds use the sibling checkout, while packaged consumers resolve the verified crates.io release.
+The manifest pins the MSRV and uses Cargo's dual-source dependency form over the **single fork
+version** (`0.7.0-beta.19.1-agentprism`, pinned to the fork commit): local review builds use the
+sibling checkout, while packaged consumers satisfy the requirement through a `[patch.crates-io]`
+entry pointing at the extracted fork archive. Because cargo's patch mechanics require the
+dependency requirement to match at least one published registry version, the requirement is a
+tight window over the published beta line and the exactness guarantee comes from the fork
+manifest version + the commit pin + the gate's fresh-consumer resolution assertion. The crate is
+**not published** (`publish = false`) while the fork-only `genai` APIs remain unpublished;
+distribution is by locally packaged crate archives only, verified end to end by
+`scripts/check-distribution.sh` (the DIST-01 gate: commit/version pins, publication disabled,
+documentation honesty, package contents, and a fresh-consumer build+test against the extracted
+archives). No CI step performs any publication action.
 
 ```toml
 [package]
 name = "rust-genai-agent"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 readme = "README.md"
-documentation = "https://docs.rs/rust-genai-agent"
+publish = false
 
 [dependencies]
-genai = { version = "0.7.0-beta.18", path = "../rust-genai" }
+# Requirement window over the last published beta line; the code always comes from the pinned
+# fork (fork version 0.7.0-beta.19.1-agentprism) — locally via `path`, packaged via the
+# consumer's [patch.crates-io] entry (cargo's patch mechanics require a registry-matching
+# requirement, so an exact unpublished version cannot be named here).
+genai = { version = ">=0.7.0-beta.18, <0.7.0-beta.20", path = "../rust-genai" }
 
 [features]
 default = []
 testing = []
-proxy = ["dep:reqwest", "dep:eventsource-stream", "tokio/net", "tokio/io-util"]
+proxy = ["dep:eventsource-stream", "tokio/net", "tokio/io-util"]
+
+[patch.crates-io]
+genai = { path = "../rust-genai" }
 ```
 
 ```text

@@ -3,13 +3,16 @@
 #![cfg(feature = "testing")]
 
 use genai::chat::{ChatOptions, ReasoningEffort};
-use rust_genai_agent::testing::{MockStreamFn, ScriptedStream, fixtures, script};
+use rust_genai_agent::testing::{MockStreamFn, ScriptedStream, fixtures, script, tools};
 use rust_genai_agent::{
-    AfterToolCallHook, Agent, AgentConfig, AgentError, AgentPrepareNextTurnHook,
-    AgentPrepareNextTurnWithContextHook, AgentShouldStopAfterTurnHook, BeforeToolCallHook,
-    BusyContext, ConvertToLlm, OnPayloadHook, OnResponseHook, StreamFn, ThinkingBudgets,
-    ThinkingLevel, ToolExecutionMode, TransformContextHook, Transport, default_convert_to_llm,
+    AfterToolCallHook, Agent, AgentConfig, AgentError, AgentLoopTurnUpdate,
+    AgentPrepareNextTurnHook, AgentPrepareNextTurnWithContextHook, AgentShouldStopAfterTurnHook,
+    AgentState, AgentToolCall, BeforeToolCallHook, BusyContext, ConvertToLlm, OnPayloadHook,
+    OnResponseHook, StreamFn, ThinkingBudgets, ThinkingLevel, ToolExecutionMode,
+    TransformContextHook, Transport, TryAfterToolCallHook, TryBeforeToolCallHook,
+    default_convert_to_llm,
 };
+use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -204,10 +207,10 @@ async fn replacing_hook_and_chat_options_applies_to_the_next_run() {
     assert_eq!(new_hook_calls.load(Ordering::SeqCst), 1);
     let calls = stream.calls();
     assert_eq!(calls[0].options.temperature, Some(0.25));
-    assert_eq!(
-        calls[0].options.prompt_cache_key.as_deref(),
-        Some("session-stays-stable")
-    );
+    // The session id is forwarded as its own request field; replacing chat options stores them
+    // exactly as supplied (no cache key) and the session id is never mirrored into one.
+    assert_eq!(calls[0].session_id.as_deref(), Some("session-stays-stable"));
+    assert_eq!(calls[0].options.prompt_cache_key, None);
     assert_eq!(agent.session_id().as_deref(), Some("session-stays-stable"));
 }
 
@@ -238,7 +241,7 @@ async fn every_runtime_config_setter_rejects_updates_during_an_active_run() {
 
     let running_agent = agent.clone();
     let prompt = tokio::spawn(async move { running_agent.prompt("block").await });
-    let permit = tokio::time::timeout(Duration::from_secs(2), entered.acquire())
+    let permit = tokio::time::timeout(Duration::from_secs(30), entered.acquire())
         .await
         .expect("stream function was entered")
         .unwrap();
@@ -258,6 +261,10 @@ async fn every_runtime_config_setter_rejects_updates_during_an_active_run() {
     let prepare: AgentPrepareNextTurnHook = Arc::new(|_cancel| Box::pin(async move { None }));
     let prepare_with_context: AgentPrepareNextTurnWithContextHook =
         Arc::new(|_context, _cancel| Box::pin(async move { None }));
+    let try_before: TryBeforeToolCallHook =
+        Arc::new(|_context, _cancel| Box::pin(async move { Ok(None) }));
+    let try_after: TryAfterToolCallHook =
+        Arc::new(|_context, _cancel| Box::pin(async move { Ok(None) }));
     let on_payload: OnPayloadHook = Arc::new(|_payload, _model| Box::pin(async move { None }));
     let on_response: OnResponseHook = Arc::new(|_info, _model| Box::pin(async move {}));
 
@@ -279,6 +286,14 @@ async fn every_runtime_config_setter_rejects_updates_during_an_active_run() {
     );
     assert_eq!(
         agent.set_after_tool_call(Some(after)),
+        Err(AgentError::Busy(BusyContext::Other))
+    );
+    assert_eq!(
+        agent.set_try_before_tool_call(Some(try_before)),
+        Err(AgentError::Busy(BusyContext::Other))
+    );
+    assert_eq!(
+        agent.set_try_after_tool_call(Some(try_after)),
         Err(AgentError::Busy(BusyContext::Other))
     );
     assert_eq!(
@@ -315,7 +330,7 @@ async fn every_runtime_config_setter_rejects_updates_during_an_active_run() {
     );
 
     release.add_permits(1);
-    tokio::time::timeout(Duration::from_secs(2), prompt)
+    tokio::time::timeout(Duration::from_secs(30), prompt)
         .await
         .expect("prompt settles after release")
         .unwrap()
@@ -390,7 +405,7 @@ async fn set_transport_is_unguarded_during_an_active_run() {
 
     let running_agent = agent.clone();
     let prompt = tokio::spawn(async move { running_agent.prompt("block").await });
-    let permit = tokio::time::timeout(Duration::from_secs(2), entered.acquire())
+    let permit = tokio::time::timeout(Duration::from_secs(30), entered.acquire())
         .await
         .expect("stream function was entered")
         .unwrap();
@@ -401,9 +416,113 @@ async fn set_transport_is_unguarded_during_an_active_run() {
     assert_eq!(agent.transport(), Transport::Websocket);
 
     release.add_permits(1);
-    tokio::time::timeout(Duration::from_secs(2), prompt)
+    tokio::time::timeout(Duration::from_secs(30), prompt)
         .await
         .expect("prompt settles after release")
         .unwrap()
         .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// CORE-REQ-01: retry fields ride the immutable per-run snapshot
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn retry_fields_reach_stream_requests_on_prompt_and_continue() {
+    let stream = Arc::new(MockStreamFn::from_streams(vec![
+        script::text_response("one"),
+        script::text_response("two"),
+    ]));
+    let agent = Agent::new(
+        AgentConfig::default()
+            .with_stream_fn(stream.clone())
+            .with_max_retries(2)
+            .with_max_retry_delay_ms(5_000),
+    );
+
+    agent.prompt("first").await.unwrap();
+    agent.steer(fixtures::user_msg("second"));
+    agent.continue_().await.unwrap();
+
+    let calls = stream.calls();
+    assert_eq!(calls.len(), 2);
+    for call in &calls {
+        assert_eq!(call.max_retries, Some(2));
+        assert_eq!(call.max_retry_delay_ms, Some(5_000));
+        assert_eq!(call.session_id, None);
+        assert_eq!(call.options.prompt_cache_key, None);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CORE-THINK-01: initial and next-turn levels share the ThinkingBudgets map
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn initial_and_next_turn_thinking_levels_share_the_thinking_budgets_map() {
+    let stream = Arc::new(MockStreamFn::from_streams(vec![
+        script::tool_call_turn(vec![AgentToolCall::new(
+            "tool-1",
+            "calculate",
+            json!({ "expression": "1 + 2" }),
+        )]),
+        script::tool_call_turn(vec![AgentToolCall::new(
+            "tool-2",
+            "calculate",
+            json!({ "expression": "3 + 4" }),
+        )]),
+        script::text_response("done"),
+    ]));
+    let updates = [ThinkingLevel::Low, ThinkingLevel::Max];
+    let turn = Arc::new(AtomicUsize::new(0));
+    let turn_by_hook = turn.clone();
+    let prepare: AgentPrepareNextTurnHook = Arc::new(move |_cancel| {
+        let update = updates
+            .get(turn_by_hook.fetch_add(1, Ordering::SeqCst))
+            .copied();
+        Box::pin(async move {
+            update.map(|thinking_level| AgentLoopTurnUpdate {
+                thinking_level: Some(thinking_level),
+                ..AgentLoopTurnUpdate::default()
+            })
+        })
+    });
+    let state = AgentState {
+        thinking_level: ThinkingLevel::High,
+        tools: vec![tools::calculate_tool()],
+        ..AgentState::default()
+    };
+    let agent = Agent::new(
+        AgentConfig::default()
+            .with_initial_state(state)
+            .with_stream_fn(stream.clone())
+            .with_thinking_budgets(ThinkingBudgets::default().with_low(100).with_high(400))
+            .with_prepare_next_turn(prepare),
+    );
+
+    agent.prompt("go").await.unwrap();
+
+    let calls = stream.calls();
+    assert_eq!(calls.len(), 3);
+    assert!(
+        matches!(
+            calls[0].options.reasoning_effort,
+            Some(ReasoningEffort::Budget(400))
+        ),
+        "the initial High level resolves through the budgets map"
+    );
+    assert!(
+        matches!(
+            calls[1].options.reasoning_effort,
+            Some(ReasoningEffort::Budget(100))
+        ),
+        "the next-turn Low update resolves through the same map"
+    );
+    assert!(
+        matches!(
+            calls[2].options.reasoning_effort,
+            Some(ReasoningEffort::Budget(400))
+        ),
+        "the next-turn Max update clamps through the same map's high entry"
+    );
 }

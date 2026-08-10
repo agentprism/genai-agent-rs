@@ -2,8 +2,10 @@
 //!
 //! Low-level [`LoopError`] and stateful [`AgentError`] values report invalid invocations or missing
 //! runtime dependencies. Ordinary provider failures, cancellation, and tool failures are encoded
-//! in-band as assistant messages, tool-result messages, and lifecycle events. Hook signatures are
-//! likewise infallible; a hook panic is a contract violation, not a routine error value.
+//! in-band as assistant messages, tool-result messages, and lifecycle events. Legacy hook
+//! signatures are likewise infallible; a hook panic is a contract violation, not a routine error
+//! value. The opt-in fallible tool channels ([`ToolHookError`]) keep the same in-band rule: their
+//! errors become error tool results rather than loop errors.
 
 use thiserror::Error;
 
@@ -86,6 +88,46 @@ pub enum AgentError {
     NoDefaultStreamFn,
 }
 
+/// Errors produced by the fallible tool channels: [`crate::AgentTool::try_prepare_arguments`],
+/// [`crate::TryBeforeToolCallHook`], and [`crate::TryAfterToolCallHook`].
+///
+/// The loop converts these errors into ordinary in-band error tool results instead of returning
+/// a [`LoopError`] or aborting the run: preparation and before-hook failures skip execution,
+/// while an after-hook failure replaces the completed result. [`std::fmt::Display`] is exactly
+/// the contained message — the in-band result text — mirroring pi's `error.message` propagation
+/// for a thrown `prepareArguments`/`beforeToolCall`/`afterToolCall`.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{message}")]
+pub struct ToolHookError {
+    message: String,
+}
+
+impl ToolHookError {
+    /// Construct a channel error whose display text is the supplied message, verbatim.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    /// Return the exact message used as the in-band error tool-result text.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl From<String> for ToolHookError {
+    fn from(message: String) -> Self {
+        Self::new(message)
+    }
+}
+
+impl From<&str> for ToolHookError {
+    fn from(message: &str) -> Self {
+        Self::new(message)
+    }
+}
+
 /// Errors produced by an [`crate::AgentTool`] implementation.
 ///
 /// The loop converts these errors to in-band error tool results instead of returning a
@@ -129,4 +171,20 @@ pub enum ValidationError {
         /// Human-readable validation diagnostic.
         message: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_hook_error_display_is_the_verbatim_message() {
+        let error = ToolHookError::new("hook exploded");
+        assert_eq!(error.to_string(), "hook exploded");
+        assert_eq!(error.message(), "hook exploded");
+        let from_string: ToolHookError = String::from("owned").into();
+        assert_eq!(from_string.to_string(), "owned");
+        let from_str: ToolHookError = "borrowed".into();
+        assert_eq!(from_str.to_string(), "borrowed");
+    }
 }

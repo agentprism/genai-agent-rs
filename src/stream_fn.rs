@@ -15,7 +15,9 @@ use futures::StreamExt;
 use futures::future::BoxFuture;
 use genai::adapter::AdapterKind;
 use genai::chat::{ChatMessage, ChatOptions, ChatRequest, ChatStream, ChatStreamEvent, Tool};
-use genai::{Client, ClientBuilder, ModelIden, ModelSpec, PayloadInterceptor, ResponseObserver};
+use genai::{
+    Client, ClientBuilder, ExecOptions, ModelIden, ModelSpec, PayloadInterceptor, ResponseObserver,
+};
 use reqwest::StatusCode;
 use reqwest::header::HeaderMap;
 use serde_json::Value;
@@ -70,20 +72,46 @@ pub struct StreamRequest {
     pub transport: Transport,
     /// Optional pre-send payload hook for this invocation (pi's `onPayload`).
     ///
-    /// The agent loop forwards the configured hook here so custom [`StreamFn`] implementations
-    /// and the `proxy`-feature `ProxyStreamFn` can honor it per request. The production
-    /// [`GenaiStreamFn`] ignores this field: the genai fork's payload interceptor is
-    /// client-level, so it must be installed at construction time via
-    /// [`GenaiStreamFn::with_exec_hooks`] (pass the same hook in both places).
+    /// The agent loop forwards the configured hook here. [`GenaiStreamFn`] honors it as a
+    /// request-scoped **replacement** of its construction-time hook (via the genai fork's
+    /// request-level [`ExecOptions`]): when set, the construction-time hook does not fire for the
+    /// request, and the hook fires exactly once per physical attempt, including retries. When
+    /// absent, the construction-time hook (if any) applies unchanged. Custom [`StreamFn`]
+    /// implementations and the `proxy`-feature `ProxyStreamFn` honor the forwarded hook directly.
     pub on_payload: Option<OnPayloadHook>,
     /// Optional response observation hook for this invocation (pi's `onResponse`).
     ///
-    /// The agent loop forwards the configured hook here so custom [`StreamFn`] implementations
-    /// and the `proxy`-feature `ProxyStreamFn` can honor it per request. The production
-    /// [`GenaiStreamFn`] ignores this field: the genai fork's response observer is client-level,
-    /// so it must be installed at construction time via [`GenaiStreamFn::with_exec_hooks`] (pass
-    /// the same hook in both places).
+    /// The agent loop forwards the configured hook here. [`GenaiStreamFn`] honors it as a
+    /// request-scoped **replacement** of its construction-time hook (via the genai fork's
+    /// request-level [`ExecOptions`]): when set, the construction-time hook does not fire for the
+    /// request, and the hook fires exactly once per physical attempt — on the response head,
+    /// including 4xx/5xx responses and retry attempts. When absent, the construction-time hook
+    /// (if any) applies unchanged. Custom [`StreamFn`] implementations and the `proxy`-feature
+    /// `ProxyStreamFn` honor the forwarded hook directly.
     pub on_response: Option<OnResponseHook>,
+    /// Optional session identifier for this invocation (pi's `StreamOptions.sessionId`).
+    ///
+    /// The identifier reaches this per-execution context for correlation (logging, metrics,
+    /// session-aware routing in custom stream functions). The production [`GenaiStreamFn`]
+    /// deliberately does not serialize it: provider serialization is genai's concern and the
+    /// explicit cache-affinity path there is `ChatOptions::prompt_cache_key`, which is
+    /// **independent** of this field — setting or clearing `session_id` never writes
+    /// `options.prompt_cache_key`, and vice versa, so the value never enters provider JSON.
+    pub session_id: Option<String>,
+    /// Optional per-request maximum number of provider-handshake retries (pi's
+    /// `StreamOptions.maxRetries`).
+    ///
+    /// [`GenaiStreamFn`] honors this as an override of its construction-time
+    /// [`RetryPolicy::max_retries`] (`Some(0)` disables retries for the request). Custom
+    /// [`StreamFn`] implementations may honor or ignore it.
+    pub max_retries: Option<u32>,
+    /// Optional per-request cap, in milliseconds, on a *server-requested* retry delay (pi's
+    /// `StreamOptions.maxRetryDelayMs`).
+    ///
+    /// [`GenaiStreamFn`] honors this as an override of its construction-time
+    /// [`RetryPolicy::max_retry_delay_ms`]. Custom [`StreamFn`] implementations may honor or
+    /// ignore it.
+    pub max_retry_delay_ms: Option<u64>,
     /// Cooperative cancellation token for setup and streaming.
     pub cancel: CancellationToken,
 }
@@ -97,6 +125,9 @@ impl std::fmt::Debug for StreamRequest {
             .field("transport", &self.transport)
             .field("on_payload", &self.on_payload.is_some())
             .field("on_response", &self.on_response.is_some())
+            .field("session_id", &self.session_id)
+            .field("max_retries", &self.max_retries)
+            .field("max_retry_delay_ms", &self.max_retry_delay_ms)
             .field("cancel", &self.cancel)
             .finish_non_exhaustive()
     }
@@ -113,6 +144,9 @@ impl StreamRequest {
             transport: Transport::default(),
             on_payload: None,
             on_response: None,
+            session_id: None,
+            max_retries: None,
+            max_retry_delay_ms: None,
             cancel: CancellationToken::new(),
         }
     }
@@ -138,6 +172,28 @@ impl StreamRequest {
     /// Install the per-invocation response observation hook (see [`StreamRequest::on_response`]).
     pub fn with_on_response(mut self, on_response: OnResponseHook) -> Self {
         self.on_response = Some(on_response);
+        self
+    }
+
+    /// Set the per-invocation session identifier (see [`StreamRequest::session_id`]).
+    ///
+    /// This never writes `options.prompt_cache_key`; the two are independent.
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    /// Set the per-invocation maximum number of provider-handshake retries (see
+    /// [`StreamRequest::max_retries`]).
+    pub fn with_max_retries(mut self, max_retries: u32) -> Self {
+        self.max_retries = Some(max_retries);
+        self
+    }
+
+    /// Set the per-invocation server-requested retry-delay cap in milliseconds (see
+    /// [`StreamRequest::max_retry_delay_ms`]).
+    pub fn with_max_retry_delay_ms(mut self, max_retry_delay_ms: u64) -> Self {
+        self.max_retry_delay_ms = Some(max_retry_delay_ms);
         self
     }
 
@@ -226,9 +282,11 @@ impl Default for RetryPolicy {
 /// Capture options are forced on every invocation because `StreamEnd` is the authoritative source
 /// for final content, parsed tool arguments, usage, stop reason, and response id.
 ///
-/// `on_payload`/`on_response` exec hooks are construction-time only for this adapter (see
-/// [`GenaiStreamFn::with_exec_hooks`]); the per-request [`StreamRequest`] hook fields are
-/// intentionally ignored because the genai fork's interceptors are client-level.
+/// `on_payload`/`on_response` exec hooks can be installed at construction time (see
+/// [`GenaiStreamFn::with_exec_hooks`]) **and** per request ([`StreamRequest::on_payload`] /
+/// [`StreamRequest::on_response`]): a request hook replaces the construction-time hook of its
+/// channel for that execution only (never composing, so exactly one hook fires per channel per
+/// physical attempt), while an absent request hook inherits the construction-time default.
 #[derive(Clone)]
 pub struct GenaiStreamFn {
     /// `genai` client used for provider execution.
@@ -245,7 +303,9 @@ pub struct GenaiStreamFn {
     ///
     /// Defaults to [`RetryPolicy::default`] (`max_retries = 0`), so retries are opt-in via
     /// [`GenaiStreamFn::with_retry`] and the default behavior is byte-identical to the pre-retry
-    /// path.
+    /// path. A request's [`StreamRequest::max_retries`]/[`StreamRequest::max_retry_delay_ms`]
+    /// `Some` values override the corresponding policy field for that invocation, mirroring how
+    /// pi forwards `maxRetries`/`maxRetryDelayMs` as per-request stream options.
     pub retry: RetryPolicy,
 }
 
@@ -274,19 +334,19 @@ impl GenaiStreamFn {
     /// Construct an adapter whose `genai` client is built from `builder` with construction-time
     /// `on_payload`/`on_response` exec hooks installed.
     ///
-    /// The genai fork's exec hooks ([`PayloadInterceptor`] / [`ResponseObserver`]) are
-    /// **client-level**, and a built [`Client`] cannot be reconfigured, so this adapter wires the
-    /// crate-level hooks once at construction — mirroring how pi wires `onPayload`/`onResponse`
-    /// once at its production `Agent` construction site. Consequently [`GenaiStreamFn`] ignores
-    /// the per-request [`StreamRequest::on_payload`]/[`StreamRequest::on_response`] fields;
-    /// applications that also want custom stream functions or the proxy to see the hooks should
-    /// pass the same hooks both here and on [`crate::AgentConfig`].
+    /// The genai fork's exec hooks ([`PayloadInterceptor`] / [`ResponseObserver`]) are installed
+    /// on the built [`Client`] as the construction-time defaults for their channels — mirroring
+    /// how pi wires `onPayload`/`onResponse` once at its production `Agent` construction site. A
+    /// per-request [`StreamRequest::on_payload`]/[`StreamRequest::on_response`] hook **replaces**
+    /// the corresponding construction-time hook for that execution (the two never compose);
+    /// requests that carry no hook inherit these defaults unchanged.
     ///
     /// `on_payload` fires with the serialized provider payload before the HTTP request is built
     /// (`Some` replaces the wire payload). `on_response` fires with the response status and
     /// headers as soon as the HTTP response arrives — before its body/stream is consumed and also
     /// on 4xx/5xx. On genai's streaming path the HTTP send is lazy, so both fire during the first
-    /// stream poll rather than at [`StreamFn::stream`] return time.
+    /// stream poll rather than at [`StreamFn::stream`] return time. Under retries, each re-issued
+    /// attempt resolves and fires the hooks again, exactly once per physical attempt.
     ///
     /// Applications that need additional client configuration (auth resolvers, custom reqwest
     /// clients, ...) apply it to the supplied `builder`; alternatively they can install
@@ -334,6 +394,9 @@ impl GenaiStreamFn {
     /// sleep is cancellation-aware. The default policy (`max_retries = 0`) leaves behavior
     /// byte-identical to the pre-retry path. See [`RetryPolicy`] for the exact classification, delay
     /// precedence, and cap semantics reproduced from pi-ai's `provider-retry.ts`.
+    ///
+    /// Per-request [`StreamRequest::max_retries`]/[`StreamRequest::max_retry_delay_ms`] `Some`
+    /// values override the corresponding policy field for that invocation.
     pub fn with_retry(mut self, policy: RetryPolicy) -> Self {
         self.retry = policy;
         self
@@ -350,11 +413,15 @@ impl StreamFn for GenaiStreamFn {
             // genai speaks SSE only, so the transport advisory is intentionally ignored here. The
             // TypeScript contract makes ignoring an unsupported transport compliant.
             transport: _,
-            // The genai fork's exec hooks are client-level, so the per-request hooks are
-            // intentionally ignored here; install them at construction time via
-            // `GenaiStreamFn::with_exec_hooks` (see the `StreamRequest` field docs).
-            on_payload: _,
-            on_response: _,
+            on_payload,
+            on_response,
+            // Provider session/cache-affinity serialization is genai's concern
+            // (`ChatOptions::prompt_cache_key` is the explicit path); the session id reaches this
+            // per-execution context for correlation only and is deliberately never serialized into
+            // provider payloads (see the `StreamRequest::session_id` field docs).
+            session_id: _,
+            max_retries,
+            max_retry_delay_ms,
             cancel,
         } = request;
         let error_model = model_iden_for_error(&model);
@@ -362,9 +429,30 @@ impl StreamFn for GenaiStreamFn {
         let options = force_capture_options(overlay_chat_options(&self.base_options, options));
         let price_catalog = self.price_catalog.clone();
 
+        // Per-request `Some` values overlay the construction-time retry policy, mirroring pi's
+        // per-request `maxRetries`/`maxRetryDelayMs` stream options.
+        let retry = RetryPolicy {
+            max_retries: max_retries.unwrap_or(self.retry.max_retries),
+            max_retry_delay_ms: max_retry_delay_ms.unwrap_or(self.retry.max_retry_delay_ms),
+        };
+
+        // Per-request exec hooks overlay the client's construction-time hooks as *replacements*
+        // (one resolved hook per channel per physical attempt; the two never compose). Absent
+        // request hooks leave the channels in `Inherit` state, so construction defaults apply
+        // unchanged. Built once per invocation and reused across retry attempts.
+        let mut exec_options = ExecOptions::new();
+        if let Some(on_payload) = on_payload {
+            exec_options =
+                exec_options.with_payload_interceptor(payload_interceptor_from_hook(on_payload));
+        }
+        if let Some(on_response) = on_response {
+            exec_options =
+                exec_options.with_response_observer(response_observer_from_hook(on_response));
+        }
+
         // Retries disabled (the default): the original single-shot path, byte-identical to the
         // pre-retry behavior. The HTTP send stays lazy (performed on the first stream poll).
-        if self.retry.max_retries == 0 {
+        if retry.max_retries == 0 {
             let response = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
@@ -374,7 +462,12 @@ impl StreamFn for GenaiStreamFn {
                         "Request aborted by user",
                     ));
                 }
-                response = self.client.exec_chat_stream(model, chat_request, Some(&options)) => response,
+                response = self.client.exec_chat_stream_with_exec_options(
+                    model,
+                    chat_request,
+                    Some(&options),
+                    Some(&exec_options),
+                ) => response,
             };
 
             let response = match response {
@@ -406,7 +499,7 @@ impl StreamFn for GenaiStreamFn {
         let RetryPolicy {
             max_retries,
             max_retry_delay_ms,
-        } = self.retry;
+        } = retry;
         let mut attempt: u32 = 0;
         loop {
             let response = tokio::select! {
@@ -418,10 +511,11 @@ impl StreamFn for GenaiStreamFn {
                         "Request aborted by user",
                     ));
                 }
-                response = self.client.exec_chat_stream(
+                response = self.client.exec_chat_stream_with_exec_options(
                     model.clone(),
                     chat_request.clone(),
                     Some(&options),
+                    Some(&exec_options),
                 ) => response,
             };
 
@@ -530,7 +624,7 @@ impl StreamFn for GenaiStreamFn {
                                 ),
                             );
                         }
-                        attempt += 1;
+                        attempt = attempt.saturating_add(1);
                         continue;
                     }
                 }
@@ -719,9 +813,13 @@ fn validate_server_delay(
 
 /// Convert a millisecond delay to a [`Duration`], clamping to `>= 0` like pi's
 /// `abortableSleep`'s `Math.max(0, ms)` (a `Duration` cannot be negative). A `NaN` delay (an
-/// unparseable HTTP-date, mirroring `Date.parse` returning `NaN`) also clamps to zero.
+/// unparseable HTTP-date, mirroring `Date.parse` returning `NaN`) also clamps to zero. An
+/// out-of-range delay (a malicious or buggy `retry-after` value can exceed `Duration`'s range)
+/// safely saturates at `Duration::MAX` instead of panicking — the never-throw [`StreamFn`]
+/// contract — and the cancellation-aware sleep still wins over the saturated wait.
 fn duration_from_millis_f64(ms: f64) -> Duration {
-    Duration::from_secs_f64(ms.max(0.0) / 1000.0)
+    let secs = ms.max(0.0) / 1000.0;
+    Duration::try_from_secs_f64(secs).unwrap_or(Duration::MAX)
 }
 
 /// A jitter value in `[0, 1)` for pi's `1 - Math.random() * 0.25` backoff jitter, without pulling
@@ -1189,6 +1287,43 @@ mod tests {
         let policy = RetryPolicy::default();
         assert_eq!(policy.max_retries, 0);
         assert_eq!(policy.max_retry_delay_ms, 60_000);
+    }
+
+    #[test]
+    fn stream_request_session_and_retry_fields_default_to_none() {
+        let request = StreamRequest::new(
+            ModelSpec::from_iden(ModelIden::new(AdapterKind::Anthropic, "claude-test")),
+            LlmContext::default(),
+        );
+        assert_eq!(request.session_id, None);
+        assert_eq!(request.max_retries, None);
+        assert_eq!(request.max_retry_delay_ms, None);
+        assert_eq!(request.options.prompt_cache_key, None);
+    }
+
+    #[test]
+    fn stream_request_debug_shows_scalar_fields_and_redacts_closures() {
+        let request = StreamRequest::new(
+            ModelSpec::from_iden(ModelIden::new(AdapterKind::Anthropic, "claude-test")),
+            LlmContext::default(),
+        )
+        .with_session_id("req-session")
+        .with_max_retries(2)
+        .with_max_retry_delay_ms(500)
+        .with_on_payload(Arc::new(|payload, _model| {
+            Box::pin(async move { Some(payload) })
+        }));
+
+        let debug = format!("{request:?}");
+        assert!(
+            debug.contains("session_id: Some(\"req-session\")"),
+            "{debug}"
+        );
+        assert!(debug.contains("max_retries: Some(2)"), "{debug}");
+        assert!(debug.contains("max_retry_delay_ms: Some(500)"), "{debug}");
+        assert!(debug.contains("on_payload: true"), "{debug}");
+        // The session id never leaks into the options' prompt cache key.
+        assert_eq!(request.options.prompt_cache_key, None);
     }
 
     #[test]

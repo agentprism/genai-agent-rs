@@ -1,8 +1,9 @@
 use crate::{
     AfterToolCallContext, AfterToolCallHook, AgentContext, AgentEvent, AgentEventSink,
     AgentLoopConfig, AgentTool, AgentToolCall, AgentToolResult, AssistantMessage,
-    BeforeToolCallContext, ToolCallContext, ToolExecutionMode, ToolResultContent,
-    ToolResultMessage, UpdateSink, validate_tool_arguments,
+    BeforeToolCallContext, BeforeToolCallResult, ToolCallContext, ToolExecutionMode, ToolHookError,
+    ToolResultContent, ToolResultMessage, TryAfterToolCallHook, UpdateSink,
+    validate_tool_arguments,
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -29,13 +30,15 @@ struct ExecutedToolCallOutcome {
 }
 
 struct AfterToolCallSnapshot {
-    hook: AfterToolCallHook,
+    try_hook: Option<TryAfterToolCallHook>,
+    legacy_hook: Option<AfterToolCallHook>,
     current_context: AgentContext,
     assistant_message: AssistantMessage,
 }
 
 struct AfterToolCallHookInput<'a> {
-    hook: &'a AfterToolCallHook,
+    try_hook: Option<&'a TryAfterToolCallHook>,
+    legacy_hook: Option<&'a AfterToolCallHook>,
     current_context: &'a AgentContext,
     assistant_message: &'a AssistantMessage,
 }
@@ -185,14 +188,7 @@ where
                 finalize_executed_tool_call(
                     prepared,
                     executed,
-                    config
-                        .after_tool_call
-                        .as_ref()
-                        .map(|hook| AfterToolCallHookInput {
-                            hook,
-                            current_context,
-                            assistant_message,
-                        }),
+                    after_tool_call_input(config, current_context, assistant_message),
                     cancel.clone(),
                 )
                 .await
@@ -259,13 +255,15 @@ where
     }
 
     let task_count = prepared_calls.len();
-    let after_tool_call_snapshot = config.after_tool_call.as_ref().map(|hook| {
-        Arc::new(AfterToolCallSnapshot {
-            hook: hook.clone(),
-            current_context: current_context.clone(),
-            assistant_message: assistant_message.clone(),
-        })
-    });
+    let after_tool_call_snapshot =
+        (config.try_after_tool_call.is_some() || config.after_tool_call.is_some()).then(|| {
+            Arc::new(AfterToolCallSnapshot {
+                try_hook: config.try_after_tool_call.clone(),
+                legacy_hook: config.after_tool_call.clone(),
+                current_context: current_context.clone(),
+                assistant_message: assistant_message.clone(),
+            })
+        });
     let (event_sender, mut event_receiver) =
         mpsc::unbounded_channel::<ToolTaskEvent<ParallelToolCallFinished>>();
     let mut running = JoinSet::new();
@@ -281,7 +279,8 @@ where
             let hook = after_tool_call_snapshot
                 .as_deref()
                 .map(|snapshot| AfterToolCallHookInput {
-                    hook: &snapshot.hook,
+                    try_hook: snapshot.try_hook.as_ref(),
+                    legacy_hook: snapshot.legacy_hook.as_ref(),
                     current_context: &snapshot.current_context,
                     assistant_message: &snapshot.assistant_message,
                 });
@@ -367,21 +366,36 @@ async fn prepare_tool_call(
 
     // Preparation precedes the one and only validation pass. The before hook receives the
     // validated value by mutable reference; its mutations intentionally are not revalidated.
-    let prepared_arguments = tool.prepare_arguments(tool_call.arguments.clone());
+    // `try_prepare_arguments` is the single preparation entry point: its default adapts the legacy
+    // infallible transform, and an explicit fallible override takes precedence. A preparation
+    // failure skips validation and execution with an in-band error result, mirroring pi's catch
+    // around `prepareArguments`.
+    let prepared_arguments = match tool.try_prepare_arguments(tool_call.arguments.clone()) {
+        Ok(arguments) => arguments,
+        Err(error) => return immediate_error(tool_call, error.to_string()),
+    };
     let spec = tool.spec();
     let validated_args = match validate_tool_arguments(&spec, prepared_arguments) {
         Ok(arguments) => arguments,
         Err(error) => return immediate_error(tool_call, error.to_string()),
     };
 
-    let args = if let Some(before_tool_call) = &config.before_tool_call {
+    let args = if config.try_before_tool_call.is_some() || config.before_tool_call.is_some() {
         let mut hook_context = BeforeToolCallContext {
             assistant_message: assistant_message.clone(),
             tool_call: tool_call.clone(),
             args: validated_args,
             context: current_context.clone(),
         };
-        let before_result = before_tool_call(&mut hook_context, cancel.clone()).await;
+        // Each channel resolves exactly once per call: the fallible hook takes precedence when
+        // installed, and the two hooks are never both invoked. A hook failure skips execution,
+        // mirroring pi's catch around `beforeToolCall`; unlike a blocked call it does not request
+        // batch termination.
+        let before_result =
+            match run_before_tool_call_channel(config, &mut hook_context, cancel).await {
+                Ok(before_result) => before_result,
+                Err(error) => return immediate_error(tool_call, error.to_string()),
+            };
         if cancel.is_cancelled() {
             return immediate_error(tool_call, "Operation aborted");
         }
@@ -414,6 +428,39 @@ async fn prepare_tool_call(
         tool_call: tool_call.clone(),
         tool,
         args,
+    })
+}
+
+/// Invoke the configured before-tool-call channel exactly once: the fallible hook when installed,
+/// otherwise the legacy infallible hook adapted to `Ok`. Returns `Ok(None)` when neither is set.
+async fn run_before_tool_call_channel(
+    config: &AgentLoopConfig,
+    hook_context: &mut BeforeToolCallContext,
+    cancel: &CancellationToken,
+) -> Result<Option<BeforeToolCallResult>, ToolHookError> {
+    if let Some(try_hook) = &config.try_before_tool_call {
+        try_hook(hook_context, cancel.clone()).await
+    } else if let Some(legacy_hook) = &config.before_tool_call {
+        Ok(legacy_hook(hook_context, cancel.clone()).await)
+    } else {
+        Ok(None)
+    }
+}
+
+/// Build the after-tool-call channel input when either hook form is configured.
+fn after_tool_call_input<'a>(
+    config: &'a AgentLoopConfig,
+    current_context: &'a AgentContext,
+    assistant_message: &'a AssistantMessage,
+) -> Option<AfterToolCallHookInput<'a>> {
+    if config.try_after_tool_call.is_none() && config.after_tool_call.is_none() {
+        return None;
+    }
+    Some(AfterToolCallHookInput {
+        try_hook: config.try_after_tool_call.as_ref(),
+        legacy_hook: config.after_tool_call.as_ref(),
+        current_context,
+        assistant_message,
     })
 }
 
@@ -570,34 +617,50 @@ async fn finalize_executed_tool_call(
     let mut is_error = executed.is_error;
 
     if let Some(after_tool_call) = after_tool_call {
-        let after_result = (after_tool_call.hook)(
-            AfterToolCallContext {
-                assistant_message: after_tool_call.assistant_message.clone(),
-                tool_call: prepared.tool_call.clone(),
-                args: prepared.args,
-                result: result.clone(),
-                is_error,
-                context: after_tool_call.current_context.clone(),
-            },
-            cancel,
-        )
-        .await;
+        let hook_context = AfterToolCallContext {
+            assistant_message: after_tool_call.assistant_message.clone(),
+            tool_call: prepared.tool_call.clone(),
+            args: prepared.args,
+            result: result.clone(),
+            is_error,
+            context: after_tool_call.current_context.clone(),
+        };
+        // Each channel resolves exactly once per call: the fallible hook takes precedence when
+        // installed, and the two hooks are never both invoked.
+        let after_result = if let Some(try_hook) = after_tool_call.try_hook {
+            try_hook(hook_context, cancel).await
+        } else if let Some(legacy_hook) = after_tool_call.legacy_hook {
+            Ok(legacy_hook(hook_context, cancel).await)
+        } else {
+            Ok(None)
+        };
 
-        if let Some(after_result) = after_result {
-            if let Some(content) = after_result.content {
-                result.content = content;
+        match after_result {
+            Ok(Some(after_result)) => {
+                if let Some(content) = after_result.content {
+                    result.content = content;
+                }
+                if let Some(details) = after_result.details {
+                    result.details = details;
+                }
+                if let Some(usage) = after_result.usage {
+                    result.usage = Some(usage);
+                }
+                if let Some(terminate) = after_result.terminate {
+                    result.terminate = terminate;
+                }
+                if let Some(after_is_error) = after_result.is_error {
+                    is_error = after_is_error;
+                }
             }
-            if let Some(details) = after_result.details {
-                result.details = details;
-            }
-            if let Some(usage) = after_result.usage {
-                result.usage = Some(usage);
-            }
-            if let Some(terminate) = after_result.terminate {
-                result.terminate = terminate;
-            }
-            if let Some(after_is_error) = after_result.is_error {
-                is_error = after_is_error;
+            Ok(None) => {}
+            // An after-hook failure replaces the completed result with an in-band error result,
+            // mirroring pi's catch around `afterToolCall`: content, details, usage, and any
+            // termination request are discarded. Tool side effects are not rolled back —
+            // execution already happened; only the model-visible result is replaced.
+            Err(error) => {
+                result = create_error_tool_result(error.to_string());
+                is_error = true;
             }
         }
     }
