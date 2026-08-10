@@ -1,12 +1,18 @@
 [package]
 name = "genai"
-version = "0.7.0-beta.19-WIP"
+# Fork-lineage version: upstream's 0.7.0-beta.19 WIP line plus the agentprism fork's APIs
+# (request-level exec-hook overrides, ToolResponse parts, streaming HTTP error headers, ...).
+# The numeric `.N` + `-agentprism` pre-release suffix keeps the artifact distinct from — and
+# predictably ordered against — anything upstream may publish (beta.19 < this < beta.20);
+# distribution is by locally packaged crate archives only (see rust-genai-agent's
+# scripts/check-distribution.sh) — this version is not on crates.io.
+version = "0.7.0-beta.19.1-agentprism"
+repository = "https://github.com/agentprism/rust-genai"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Multi-AI Providers Library for Rust. (OpenAI, Gemini, Anthropic, Ollama, AWS Bedrock, Vertex, Groq, DeepSeek, Kimi, GLM and many more)"
 keywords = ["generative-ai","openai","anthropic","gemini","ollama"]
 homepage = "https://github.com/jeremychone/rust-genai"
-repository = "https://github.com/jeremychone/rust-genai"
 
 [lints.rust]
 unsafe_code = "forbid"

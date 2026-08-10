@@ -1,6 +1,6 @@
 use crate::adapter::{AdapterDispatcher, AdapterKind, ServiceType, WebRequestData};
 use crate::chat::{ChatOptions, ChatOptionsSet, ChatRequest, ChatResponse, ChatStreamResponse};
-use crate::client::{BoundResponseObserver, ModelSpec};
+use crate::client::{BoundResponseObserver, ExecOptions, ModelSpec};
 use crate::embed::{EmbedOptions, EmbedOptionsSet, EmbedRequest, EmbedResponse};
 use crate::resolver::{AuthData, ProviderConfig};
 use crate::{Client, Error, ModelIden, Result, ServiceTarget};
@@ -87,12 +87,36 @@ impl Client {
 	/// - `&str` or `String`: Model name with full inference
 	/// - `ModelIden`: Explicit adapter, resolves auth/endpoint
 	/// - `ServiceTarget`: Uses directly, bypasses model mapping and auth resolution
+	///
+	/// Both exec-hook channels use their construction-time defaults. This delegates to
+	/// [`Client::exec_chat_with_exec_options`] with all-[`ExecHookOverride::Inherit`](crate::ExecHookOverride::Inherit) options
+	/// (byte-identical to the pre-override behavior).
 	pub async fn exec_chat(
 		&self,
 		model: impl Into<ModelSpec>,
 		chat_req: ChatRequest,
 		options: Option<&ChatOptions>,
 	) -> Result<ChatResponse> {
+		self.exec_chat_with_exec_options(model, chat_req, options, None).await
+	}
+
+	/// Sends a chat request with request-scoped exec options, returning the full response.
+	///
+	/// Behaves exactly like [`Client::exec_chat`], except each exec-hook channel resolves through
+	/// `exec_options` (see [`ExecOptions`]): per channel, [`ExecHookOverride::Inherit`](crate::ExecHookOverride::Inherit) keeps the
+	/// construction-time hook, [`ExecHookOverride::Replace`](crate::ExecHookOverride::Replace) fires the request hook instead of it,
+	/// and [`ExecHookOverride::Disable`](crate::ExecHookOverride::Disable) fires no hook. `None` means all channels inherit. At most
+	/// one hook fires per channel for this HTTP attempt, and a request replacement never composes
+	/// with the construction-time default.
+	///
+	pub async fn exec_chat_with_exec_options(
+		&self,
+		model: impl Into<ModelSpec>,
+		chat_req: ChatRequest,
+		options: Option<&ChatOptions>,
+		exec_options: Option<&ExecOptions>,
+	) -> Result<ChatResponse> {
+		let exec_options = exec_options.cloned().unwrap_or_default();
 		let options_set = ChatOptionsSet::default()
 			.with_chat_options(options)
 			.with_client_options(self.config().chat_options());
@@ -127,17 +151,19 @@ impl Client {
 				headers = override_headers;
 			};
 
-			// -- Apply the payload interceptor exec hook (if set), which can replace the payload.
-			let payload = match self.config().payload_interceptor() {
+			// -- Apply the resolved payload interceptor (if any), which can replace the payload.
+			//    Each channel resolves exactly once per attempt: the request override replaces or
+			//    disables the construction-time hook — the two never compose.
+			let payload = match exec_options.payload_interceptor.resolve(self.config().payload_interceptor()) {
 				Some(interceptor) => interceptor.intercept(model.clone(), payload.clone()).await.unwrap_or(payload),
 				None => payload,
 			};
 
-			// -- Bind the response observer exec hook (if set) so it fires on the response head,
+			// -- Bind the resolved response observer (if any) so it fires on the response head,
 			//    before the body is consumed (also on 4xx/5xx).
-			let response_observer = self
-				.config()
-				.response_observer()
+			let response_observer = exec_options
+				.response_observer
+				.resolve(self.config().response_observer())
 				.map(|observer| BoundResponseObserver::new(observer.clone(), model.clone()));
 
 			let web_res = self
@@ -185,12 +211,37 @@ impl Client {
 	/// - `&str` or `String`: Model name with full inference
 	/// - `ModelIden`: Explicit adapter, resolves auth/endpoint
 	/// - `ServiceTarget`: Uses directly, bypasses model mapping and auth resolution
+	///
+	/// Both exec-hook channels use their construction-time defaults. This delegates to
+	/// [`Client::exec_chat_stream_with_exec_options`] with all-[`ExecHookOverride::Inherit`](crate::ExecHookOverride::Inherit)
+	/// options (byte-identical to the pre-override behavior).
 	pub async fn exec_chat_stream(
 		&self,
 		model: impl Into<ModelSpec>,
 		chat_req: ChatRequest,
 		options: Option<&ChatOptions>,
 	) -> Result<ChatStreamResponse> {
+		self.exec_chat_stream_with_exec_options(model, chat_req, options, None).await
+	}
+
+	/// Streams a chat response with request-scoped exec options.
+	///
+	/// Behaves exactly like [`Client::exec_chat_stream`], except each exec-hook channel resolves
+	/// through `exec_options` (see [`ExecOptions`]): per channel, [`ExecHookOverride::Inherit`](crate::ExecHookOverride::Inherit)
+	/// keeps the construction-time hook, [`ExecHookOverride::Replace`](crate::ExecHookOverride::Replace) fires the request hook
+	/// instead of it, and [`ExecHookOverride::Disable`](crate::ExecHookOverride::Disable) fires no hook. `None` means all channels
+	/// inherit. At most one hook fires per channel for this HTTP attempt (the send is lazy, so the
+	/// response observer fires during the first stream poll), and a request replacement never
+	/// composes with the construction-time default.
+	///
+	pub async fn exec_chat_stream_with_exec_options(
+		&self,
+		model: impl Into<ModelSpec>,
+		chat_req: ChatRequest,
+		options: Option<&ChatOptions>,
+		exec_options: Option<&ExecOptions>,
+	) -> Result<ChatStreamResponse> {
+		let exec_options = exec_options.cloned().unwrap_or_default();
 		let options_set = ChatOptionsSet::default()
 			.with_chat_options(options)
 			.with_client_options(self.config().chat_options());
@@ -228,8 +279,10 @@ impl Client {
 				headers = override_headers;
 			};
 
-			// -- Apply the payload interceptor exec hook (if set), which can replace the payload.
-			let payload = match self.config().payload_interceptor() {
+			// -- Apply the resolved payload interceptor (if any), which can replace the payload.
+			//    Each channel resolves exactly once per attempt: the request override replaces or
+			//    disables the construction-time hook — the two never compose.
+			let payload = match exec_options.payload_interceptor.resolve(self.config().payload_interceptor()) {
 				Some(interceptor) => interceptor.intercept(model.clone(), payload.clone()).await.unwrap_or(payload),
 				None => payload,
 			};
@@ -242,12 +295,12 @@ impl Client {
 						webc_error,
 					})?;
 
-			// -- Bind the response observer exec hook (if set) so it fires when the lazy send
+			// -- Bind the resolved response observer (if any) so it fires when the lazy send
 			//    resolves inside the stream — on the response head, before the status check and
 			//    before the stream body is consumed (also on 4xx/5xx).
-			let response_observer = self
-				.config()
-				.response_observer()
+			let response_observer = exec_options
+				.response_observer
+				.resolve(self.config().response_observer())
 				.map(|observer| BoundResponseObserver::new(observer.clone(), model.clone()));
 
 			let res = AdapterDispatcher::to_chat_stream(model, reqwest_builder, options_set, response_observer)?;

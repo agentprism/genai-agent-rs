@@ -10,6 +10,14 @@
 //!
 //! Both follow the resolver idiom (see `AuthResolver`): dedicated types with sync and async
 //! function variants, installed via the `ClientBuilder` and stored in the `ClientConfig`.
+//!
+//! Construction-time hooks are the client-wide default for their channel. A single request can
+//! override each channel independently through [`ExecOptions`] (`exec_chat_with_exec_options` /
+//! `exec_chat_stream_with_exec_options`): each channel resolves to exactly one state —
+//! [`ExecHookOverride::Inherit`] (use the client default), [`ExecHookOverride::Replace`] (use the
+//! request's hook instead), or [`ExecHookOverride::Disable`] (no hook for this request) — so at
+//! most one hook ever fires per channel per HTTP attempt, and a request replacement never
+//! composes with the construction-time default.
 
 use crate::ModelIden;
 use reqwest::StatusCode;
@@ -374,3 +382,129 @@ impl BoundResponseObserver {
 }
 
 // endregion: --- BoundResponseObserver
+
+// region:    --- ExecHookOverride
+
+/// Per-request override state for one exec-hook channel.
+///
+/// Each channel ([`PayloadInterceptor`] / [`ResponseObserver`]) resolves independently, and the
+/// resolved state is applied exactly once per HTTP attempt: a retry loop that re-issues the
+/// request resolves and fires the hooks again for the new attempt.
+#[derive(Debug, Clone, Default)]
+pub enum ExecHookOverride<T> {
+	/// Use the `Client`'s construction-time hook for this channel, if any (the default).
+	#[default]
+	Inherit,
+	/// Use this hook for the request *instead of* the construction-time hook.
+	///
+	/// The construction-time hook is not called for the request: the two never compose, so the
+	/// request hook observes the unmodified serialized payload (payload channel) and exactly one
+	/// hook invocation happens per attempt.
+	Replace(T),
+	/// Fire no hook for this channel on this request, even when a construction-time hook exists.
+	Disable,
+}
+
+impl<T> ExecHookOverride<T> {
+	/// Resolve this override against the construction-time default hook.
+	///
+	/// Exactly one outcome per channel: the default hook (`Inherit`), the request hook
+	/// (`Replace`), or no hook (`Disable`, or `Inherit` with no default configured).
+	pub(crate) fn resolve<'a>(&'a self, default: Option<&'a T>) -> Option<&'a T> {
+		match self {
+			ExecHookOverride::Inherit => default,
+			ExecHookOverride::Replace(hook) => Some(hook),
+			ExecHookOverride::Disable => None,
+		}
+	}
+}
+
+// endregion: --- ExecHookOverride
+
+// region:    --- ExecOptions
+
+/// Request-scoped exec options for the chat exec calls.
+///
+/// Accepted by [`Client::exec_chat_with_exec_options`](crate::Client::exec_chat_with_exec_options)
+/// and [`Client::exec_chat_stream_with_exec_options`](crate::Client::exec_chat_stream_with_exec_options);
+/// the classic [`Client::exec_chat`](crate::Client::exec_chat) /
+/// [`Client::exec_chat_stream`](crate::Client::exec_chat_stream) delegate with an
+/// all-[`ExecHookOverride::Inherit`] value, which is byte-identical to the pre-override behavior.
+///
+/// Each channel is resolved independently and fires at most one hook per HTTP attempt — including
+/// failed (4xx/5xx) attempts observed by the response channel. A request replacement never
+/// composes with the construction-time default.
+///
+/// The struct is `#[non_exhaustive]`: construct it with [`ExecOptions::new`] (all channels
+/// inherit) and select each channel's state with the `with_*` / `without_*` builders.
+///
+/// [`Client`]: crate::Client
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct ExecOptions {
+	/// Payload channel override state (see [`ExecHookOverride`]).
+	pub payload_interceptor: ExecHookOverride<PayloadInterceptor>,
+	/// Response channel override state (see [`ExecHookOverride`]).
+	pub response_observer: ExecHookOverride<ResponseObserver>,
+}
+
+impl ExecOptions {
+	/// Request exec options with every channel in [`ExecHookOverride::Inherit`] state.
+	///
+	/// This is exactly what [`Client::exec_chat`](crate::Client::exec_chat) /
+	/// [`Client::exec_chat_stream`](crate::Client::exec_chat_stream) use.
+	pub fn new() -> Self {
+		Self::default()
+	}
+
+	/// Replace the payload interceptor for this request (construction-time default is not called).
+	pub fn with_payload_interceptor(mut self, payload_interceptor: PayloadInterceptor) -> Self {
+		self.payload_interceptor = ExecHookOverride::Replace(payload_interceptor);
+		self
+	}
+
+	/// Replace the payload interceptor for this request from a sync interceptor function.
+	pub fn with_payload_interceptor_fn(mut self, payload_interceptor_fn: impl IntoPayloadInterceptorFn) -> Self {
+		self.payload_interceptor =
+			ExecHookOverride::Replace(PayloadInterceptor::from_interceptor_fn(payload_interceptor_fn));
+		self
+	}
+
+	/// Set the payload channel override state explicitly.
+	pub fn with_payload_interceptor_override(mut self, override_: ExecHookOverride<PayloadInterceptor>) -> Self {
+		self.payload_interceptor = override_;
+		self
+	}
+
+	/// Disable the payload interceptor for this request, even when a construction-time one exists.
+	pub fn without_payload_interceptor(mut self) -> Self {
+		self.payload_interceptor = ExecHookOverride::Disable;
+		self
+	}
+
+	/// Replace the response observer for this request (construction-time default is not called).
+	pub fn with_response_observer(mut self, response_observer: ResponseObserver) -> Self {
+		self.response_observer = ExecHookOverride::Replace(response_observer);
+		self
+	}
+
+	/// Replace the response observer for this request from a sync observer function.
+	pub fn with_response_observer_fn(mut self, response_observer_fn: impl IntoResponseObserverFn) -> Self {
+		self.response_observer = ExecHookOverride::Replace(ResponseObserver::from_observer_fn(response_observer_fn));
+		self
+	}
+
+	/// Set the response channel override state explicitly.
+	pub fn with_response_observer_override(mut self, override_: ExecHookOverride<ResponseObserver>) -> Self {
+		self.response_observer = override_;
+		self
+	}
+
+	/// Disable the response observer for this request, even when a construction-time one exists.
+	pub fn without_response_observer(mut self) -> Self {
+		self.response_observer = ExecHookOverride::Disable;
+		self
+	}
+}
+
+// endregion: --- ExecOptions
