@@ -25,7 +25,7 @@ pub const OPENAI_BETA_SSE: &str = "responses=experimental";
 pub const OPENAI_BETA_WS: &str = "responses_websockets=2026-02-06";
 
 /// Default `originator` header (openai-codex-responses.ts:1608; matches
-/// rust-genai-auth's `DEFAULT_ORIGINATOR`).
+/// `genai::auth`'s `DEFAULT_ORIGINATOR`).
 pub const DEFAULT_ORIGINATOR: &str = "pi";
 
 /// Resolve the Codex Responses **SSE** endpoint from a base URL.

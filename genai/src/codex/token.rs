@@ -13,10 +13,10 @@
 //!
 //! - a plain async closure `|| async { Ok(CodexToken { .. }) }` (blanket impl),
 //! - [`StaticTokenSource`] for a fixed token (tests / short-lived tools),
-//! - or, with the `auth-resolver` feature, [`ResolverTokenSource`], which wraps
-//!   rust-genai-auth's `CodexTokenResolver` (fresh bearer, expiry-aware refresh
-//!   and persist, with the double-refresh race fix) and derives the account id
-//!   from the bearer JWT via that crate's `jwt` module.
+//! - or, with the `codex-auth-resolver` feature, [`ResolverTokenSource`], which
+//!   wraps `genai::auth`'s `CodexTokenResolver` (fresh bearer, expiry-aware
+//!   refresh and persist, with the double-refresh race fix) and derives the
+//!   account id from the bearer JWT via that module's `jwt`.
 
 use async_trait::async_trait;
 use std::future::Future;
@@ -59,7 +59,7 @@ impl CodexToken {
 /// Source of a fresh Codex bearer + account id, resolved once per request.
 ///
 /// Implementations must be cheap to call repeatedly; a resolver that refreshes
-/// an OAuth token should coordinate its own refresh (rust-genai-auth's
+/// an OAuth token should coordinate its own refresh (`genai::auth`'s
 /// `CodexTokenResolver` does). Returning an error causes
 /// [`CodexStreamFn`](crate::codex::CodexStreamFn) to emit an in-band terminal error
 /// event (never a panic or a thrown error).
@@ -110,8 +110,8 @@ impl TokenSource for StaticTokenSource {
     }
 }
 
-/// Adapter turning rust-genai-auth's `CodexTokenResolver` into a [`TokenSource`]
-/// (feature `auth-resolver`).
+/// Adapter turning `genai::auth`'s `CodexTokenResolver` into a [`TokenSource`]
+/// (feature `codex-auth-resolver`).
 ///
 /// On each `fetch` it calls `CodexTokenResolver::resolve()` — which loads the
 /// stored credential, refreshes it if expired (serialized in-process +

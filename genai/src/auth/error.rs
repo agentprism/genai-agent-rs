@@ -1,4 +1,4 @@
-//! Error and `Result` types for `rust-genai-auth`.
+//! Error and `Result` types for `genai::auth`.
 
 use thiserror::Error;
 

@@ -44,7 +44,7 @@
 //! Per [`StreamFn`], setup failures (token resolution, request send, non-2xx
 //! handshake), stream failures (protocol/transport), and cancellation are all
 //! reported **in-band** as a terminal [`AssistantMessageEvent::Error`] — never a
-//! panic or a returned `Err`. Cancellation yields [`StopReason::Aborted`].
+//! panic or a returned `Err`. Cancellation yields [`StopReason::Aborted`](crate::StopReason::Aborted).
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

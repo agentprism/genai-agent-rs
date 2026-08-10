@@ -2,9 +2,9 @@
 //!
 //! The ChatGPT Codex backend speaks the OpenAI **Responses** event vocabulary
 //! (identical over SSE frames and WebSocket frames). Rather than re-implement the
-//! assistant-event bookkeeping, this crate translates each Codex event into the
+//! assistant-event bookkeeping, this module translates each Codex event into the
 //! same [`ChatStreamEvent`] vocabulary that genai's own OpenAI-Responses adapter
-//! emits, then folds it through rust-genai-agent's [`AssistantAccumulator`] — the
+//! emits, then folds it through this crate's [`AssistantAccumulator`] — the
 //! *exact* path [`GenaiStreamFn`] uses. That guarantees `CodexStreamFn` produces
 //! the identical `AssistantMessageEventStream` contract (start / text deltas /
 //! thinking / tool calls / done / error) as every other stream function.

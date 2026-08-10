@@ -1,9 +1,8 @@
-//! `rust-genai-auth` — OAuth login / token cache / refresh for genai.
+//! `genai::auth` — OAuth login / token cache / refresh for genai.
 //!
-//! This crate is the structural equivalent of pi-ai's `packages/ai/src/auth/`
-//! module. It owns OAuth login, the on-disk token cache, and refresh, so that
-//! [`genai`](https://crates.io/crates/genai) and higher-level agents can stay
-//! auth-agnostic.
+//! This module is the structural equivalent of pi-ai's `packages/ai/src/auth/`.
+//! It owns OAuth login, the on-disk token cache, and refresh, so that the rest of
+//! `genai-agentprism` and higher-level agents can stay auth-agnostic.
 //!
 //! This first release delivers the **ChatGPT Codex** (OpenAI Codex /
 //! ChatGPT-subscription) OAuth flow, ported faithfully from pi-ai's
