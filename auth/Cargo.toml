@@ -1,0 +1,59 @@
+[package]
+name = "rust-genai-auth"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "OAuth login / token cache / refresh for genai — the structural equivalent of pi-ai's auth/ module. First flow: ChatGPT Codex (OpenAI Codex / ChatGPT subscription) OAuth."
+repository = "https://github.com/vikashloomba/rust-genai-auth"
+keywords = ["oauth", "openai", "codex", "chatgpt", "auth"]
+categories = ["authentication", "api-bindings"]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[features]
+default = []
+# Optional local loopback redirect-capture server for the browser login flow.
+# Kept out of the core so the OAuth logic stays headless-testable.
+loopback = []
+# Optional genai integration: an async `AuthResolver` producing a (possibly
+# refreshed) bearer for `genai::Client`. Pulls in genai as a *path* dependency
+# to ../rust-genai — see the fork-branch caveat in README.md / NOTES.md.
+#
+# Also pulls `tokio/sync` (the resolver serializes refreshes with a
+# `tokio::sync::Mutex`) and `fs2` (a cross-process advisory file lock around the
+# read-modify-write refresh) — see the resolver serialization note in README.md.
+genai = ["dep:genai", "dep:fs2", "tokio/sync"]
+
+[dependencies]
+# -- HTTP (mirrors the workspace: reqwest 0.13, rustls TLS backend)
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls"] }
+# -- JSON
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# -- Async runtime (needed for the device-code poll loop's timed sleeps)
+tokio = { version = "1", features = ["time"] }
+# -- PKCE: S256 challenge = base64url(sha256(verifier))
+sha2 = "0.10"
+base64 = "0.22"
+# -- Cryptographically-secure randomness for the PKCE verifier and CSRF state
+getrandom = "0.2"
+# -- Ergonomic error enum (compile-time proc-macro only)
+thiserror = "2"
+
+# -- Optional genai integration (feature = "genai"). Path dep to the sibling fork.
+genai = { path = "../rust-genai", optional = true }
+# -- Optional cross-process advisory file lock (feature = "genai"). Tiny, safe
+#    wrapper around flock(2); depends only on libc (already in the tree). Used to
+#    serialize the resolver's read-modify-write refresh across processes.
+fs2 = { version = "0.4", optional = true }
+
+# -- Secure temp-file open flags (O_NOFOLLOW) for the credential store. Tiny,
+#    already present transitively; used only through safe std/OpenOptionsExt.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+# Full tokio for the mock-server integration tests (TcpListener + macros + io).
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "time", "test-util", "sync"] }
+tempfile = "3"
