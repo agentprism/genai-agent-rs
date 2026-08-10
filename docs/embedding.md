@@ -163,9 +163,10 @@ Exposed surface:
 - **Enums** — `StopReason`, `ThinkingLevel`, `ToolExecutionMode`, `Transport`, `EventKind`.
 - **Errors** — `AgentError`, `ToolHookError` (flat → thrown Swift errors / Kotlin exceptions).
 
-**`serde_json::Value` boundary.** Free-form JSON (tool `args`, result `details`, tool
-`schema`) crosses as a JSON **`string`**, parsed by the host's native JSON — avoiding a
-recursive UniFFI type. Documented explicitly so the host knows those fields are JSON text.
+**`serde_json::Value` boundary.** Free-form JSON (tool `argsJson`, result `detailsJson`, tool
+`schemaJson`) crosses as a JSON **`string`** with a `…Json` suffix on the field name, parsed
+by the host's native JSON — avoiding a recursive UniFFI type. §5 is the authoritative list of
+JSON-text fields, so the JSON-ness is never a silent surprise.
 
 ### Swift, end to end (target shape)
 
@@ -218,19 +219,56 @@ try await agent.prompt("Plan my week")             // drives on the crate-owned 
 2. **B1 — UniFFI proof.** Minimal `genai-agent-ffi`: construct from `AgentSetup`, one
    `EventSink`, `prompt`, cancel — shipped as a generated Swift package the consumer runs
    end-to-end to validate the shape.
-3. **B2 — full surface.** Tools, `StreamFn`, and every hook as callback interfaces; Kotlin
-   target; reference Swift/Kotlin samples; embedding docs.
+3. **B2 — full surface.** Tools and every loop hook as callback interfaces (host-side
+   `StreamFn` intentionally excluded — see §8); Swift samples + embedding docs. Kotlin is a
+   later phase.
 
 ---
 
-## 8. Open questions for the consumer to validate
+## 8. Resolved decisions (consumer-validated, 2026-08)
 
-- **Event delivery:** async callback interface (`emit(event)`) vs. a single flat
-  `on_event(json: String)` sink. UniFFI supports both; async is richer, JSON is simplest to
-  wire. (We can ship both.)
-- **`Value` as JSON string** vs. a structured UniFFI JSON type — string is simplest and
-  lossless; confirm it's acceptable for tool args/schema.
-- **Runtime model:** a single crate-owned multi-thread runtime (proposed) vs. injecting a
-  host-provided executor. The owned runtime is simplest and what we recommend.
-- **Targets now:** Swift-only vs. Swift+Kotlin. Structurally identical under UniFFI; only
-  affects which bindings we generate.
+- **Event delivery — the typed async callback interface is the contract.** We also ship the
+  flat `on_event(json: String)` sink (it doubles as the wire-format proof), but
+  `emit(event: AgentEvent)` is primary: the host `switch`es over a Swift enum with associated
+  values. Two semantics, now fixed and **documented on the interface**:
+  - **Threading:** callbacks fire on **tokio runtime worker threads**. Hosts hop to
+    `MainActor`/the main thread themselves (idiomatic; the crate does not do it for them).
+  - **Ordering / backpressure:** `emit` is **awaited sequentially per event** — the loop does
+    not advance past an event until the sink's `emit` future resolves, so a slow UI applies
+    natural backpressure. (This matches the existing "prompt awaits async subscribers"
+    behavior; see `tests/agent.rs::prompt_awaits_async_subscribers`.)
+- **Rendering pattern (blessed).** `AgentEvent::MessageUpdate` carries the full partial
+  message per delta, so per-token delivery copies a growing record (O(n²) over a long
+  response) — cheap in-process at realistic sizes, but for high-frequency UI the recommended
+  pattern is **treat events as signals and render from `agent.state()` at display refresh**.
+  The FFI surface supports this directly (`Agent::state()` is exported).
+- **`Value` as JSON string — accepted, with a naming rule.** Free-form JSON fields cross as
+  JSON `string` and are consistently suffixed `…Json` (`argsJson`, `schemaJson`,
+  `detailsJson`) so the JSON-ness is discoverable at the call site; §5 is the authoritative
+  list of which fields are JSON text.
+- **Runtime — crate-owned multi-thread, lazy + idempotent.** First use starts the runtime
+  (deterministic app-startup ordering; no init step for the host to sequence); the
+  worker-thread count is **documented and capped** rather than an unbounded `num_cores`
+  pool living for the whole process.
+- **Targets — Swift only for B1/B2.** Kotlin is structurally free under UniFFI and must not
+  gate anything; we add it in a later phase.
+- **Host-implemented `StreamFn` is out of scope for B1/B2.** A host *producing* a stream that
+  Rust consumes is the hardest direction and almost no host needs it — providers go through
+  `GenaiStreamFn`. Host-side `StreamFn` and the exec-hook interceptors stay Rust-only for the
+  first cut; **tools, the event sink, and the loop hooks are the host-facing callback
+  interfaces**. (`StreamFn` remains a Rust trait; this is only about not exposing it as a
+  callback interface yet.)
+
+## 9. Build & packaging notes (XCFramework)
+
+Field-tested guidance from the consumer, folded in so B1 hits none of these:
+
+- **Align deployment targets across rustc and C dependencies.** Set
+  `IPHONEOS_DEPLOYMENT_TARGET` / `MACOSX_DEPLOYMENT_TARGET` consistently for the Rust build
+  and any C deps; a mismatch surfaces as cryptic *undefined-symbol* link errors, not a clear
+  version error.
+- **Declare system framework links in the XCFramework modulemap.** Add
+  `link framework "Security"`, `"CoreFoundation"`, `"SystemConfiguration"` (rustls/reqwest's
+  transitive needs) so consuming apps link with **zero manual linker flags**.
+- **`strip = "debuginfo"`, not `"symbols"`, in the release profile** — keep the symbol table
+  so hosts get **symbolicated** crash reports.
