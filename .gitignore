@@ -1,3 +1,10 @@
 /target
 **/target/
 Cargo.lock.orig
+
+# ffi build artifacts
+ffi/bindings/
+ffi/apple/
+ffi/swiftpm/GenAIAgent.xcframework/
+ffi/swiftpm/Sources/GenAIAgent/genai_agent_ffi.swift
+ffi/swiftpm/.build/
