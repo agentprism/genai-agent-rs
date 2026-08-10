@@ -13,7 +13,8 @@ use crate::{
     AfterToolCallHook, AgentContext, AgentError, AgentEvent, AgentLoopConfig, AgentMessage,
     AgentPrepareNextTurnHook, AgentPrepareNextTurnWithContextHook, AgentShouldStopAfterTurnHook,
     AgentTool, AssistantContent, AssistantMessage, BeforeToolCallHook, BusyContext, ConvertToLlm,
-    OnPayloadHook, OnResponseHook, PriceCatalog, QueueMode, StopReason, StreamFn, ThinkingBudgets,
+    EventSink, OnPayloadHook, OnResponseHook, PriceCatalog, QueueMode, StopReason, StreamFn,
+    ThinkingBudgets,
     ThinkingLevel, ToolExecutionMode, TransformContextHook, Transport, TryAfterToolCallHook,
     TryBeforeToolCallHook, UserContent, UserMessage, default_convert_to_llm, get_default_stream_fn,
     resolve_reasoning_effort, run_agent_loop, run_agent_loop_continue,
@@ -987,6 +988,19 @@ impl Agent {
     {
         self.subscribe(Arc::new(move |event, cancel| {
             Box::pin(listener(event, cancel))
+        }))
+    }
+
+    /// Register an `Arc<dyn EventSink>` as an awaited event listener.
+    ///
+    /// Identical ordering/lifetime to [`Self::subscribe`]: `emit` is awaited before the loop
+    /// advances past each event (sequential backpressure), and fires on a runtime worker thread.
+    /// This is the shared, `&self` sink path (a future UniFFI callback interface); the closure
+    /// [`Self::subscribe`]/[`Self::subscribe_fn`] forms remain for Rust callers.
+    pub fn subscribe_sink(&self, sink: Arc<dyn EventSink>) -> Subscription {
+        self.subscribe(Arc::new(move |event, _cancel| {
+            let sink = sink.clone();
+            Box::pin(async move { sink.emit(event).await })
         }))
     }
 

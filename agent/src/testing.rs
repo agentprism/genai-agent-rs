@@ -550,7 +550,7 @@ fn events_for_message(message: AssistantMessage) -> Vec<AssistantMessageEvent> {
                     signature: signature.clone(),
                 });
                 events.push(AssistantMessageEvent::TextStart {
-                    content_index,
+                    content_index: content_index as u32,
                     partial: partial.clone(),
                 });
                 if let Some(AssistantContent::Text { text: current, .. }) =
@@ -559,12 +559,12 @@ fn events_for_message(message: AssistantMessage) -> Vec<AssistantMessageEvent> {
                     *current = text.clone();
                 }
                 events.push(AssistantMessageEvent::TextDelta {
-                    content_index,
+                    content_index: content_index as u32,
                     delta: text.clone(),
                     partial: partial.clone(),
                 });
                 events.push(AssistantMessageEvent::TextEnd {
-                    content_index,
+                    content_index: content_index as u32,
                     content: text,
                     partial: partial.clone(),
                 });
@@ -578,7 +578,7 @@ fn events_for_message(message: AssistantMessage) -> Vec<AssistantMessageEvent> {
                     signature: signature.clone(),
                 });
                 events.push(AssistantMessageEvent::ThinkingStart {
-                    content_index,
+                    content_index: content_index as u32,
                     partial: partial.clone(),
                 });
                 if let Some(AssistantContent::Thinking {
@@ -588,23 +588,23 @@ fn events_for_message(message: AssistantMessage) -> Vec<AssistantMessageEvent> {
                     *current = thinking.clone();
                 }
                 events.push(AssistantMessageEvent::ThinkingDelta {
-                    content_index,
+                    content_index: content_index as u32,
                     delta: thinking.clone(),
                     partial: partial.clone(),
                 });
                 events.push(AssistantMessageEvent::ThinkingEnd {
-                    content_index,
+                    content_index: content_index as u32,
                     thinking,
                     partial: partial.clone(),
                 });
             }
             AssistantContent::ToolCall(call) => {
                 events.push(AssistantMessageEvent::ToolCallStart {
-                    content_index,
+                    content_index: content_index as u32,
                     partial: partial.clone(),
                 });
                 events.push(AssistantMessageEvent::ToolCallDelta {
-                    content_index,
+                    content_index: content_index as u32,
                     delta: call.arguments.to_string(),
                     partial: partial.clone(),
                 });
@@ -612,7 +612,7 @@ fn events_for_message(message: AssistantMessage) -> Vec<AssistantMessageEvent> {
                     .content
                     .push(AssistantContent::ToolCall(call.clone()));
                 events.push(AssistantMessageEvent::ToolCallEnd {
-                    content_index,
+                    content_index: content_index as u32,
                     tool_call: call,
                     partial: partial.clone(),
                 });

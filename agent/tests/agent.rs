@@ -13,7 +13,8 @@ use rust_genai_agent::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentMessage, AgentPrepareNextTurnHook,
     AgentShouldStopAfterTurnHook, AgentState, AgentTool, AgentToolCall, AgentToolResult,
     AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, BusyContext,
-    CancellationToken, ChatOptions, EventKind, FnTool, StopReason, StreamFn, StreamRequest,
+    CancellationToken, ChatOptions, EventKind, EventSink, FnTool, StopReason, StreamFn,
+    StreamRequest,
     ThinkingLevel, ToolHookError, ToolResultContent, ToolSpec, TryAfterToolCallHook,
     TryBeforeToolCallHook, UpdateSink, set_default_stream_fn,
 };
@@ -1040,5 +1041,71 @@ async fn try_after_tool_call_setter_replaces_completed_result() {
     assert_eq!(
         result.content,
         vec![ToolResultContent::text("facade after failure")]
+    );
+}
+
+/// Shared `&self` sink that appends every observed event to a shared ordered buffer.
+struct RecordingSink {
+    events: Arc<Mutex<Vec<AgentEvent>>>,
+}
+
+#[async_trait]
+impl EventSink for RecordingSink {
+    async fn emit(&self, event: AgentEvent) {
+        self.events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(event);
+    }
+}
+
+// A1: `subscribe_sink` registers an `Arc<dyn EventSink>` on the awaited-listener machinery, so an
+// FFI-style host sink observes the same events, in the same order, as the closure `subscribe` path,
+// and each `emit` is awaited before the run settles.
+#[tokio::test]
+async fn subscribe_sink_observes_awaited_event_sequence() {
+    let (agent, _) = agent_with_streams(vec![script::text_response("hi there")]);
+
+    // Reference listener registered through the closure `subscribe` path (documented awaited).
+    let recorder = EventRecorder::new();
+    let _reference = agent.subscribe(recorder.listener());
+
+    // The sink under test, registered through `subscribe_sink`.
+    let sink_events = Arc::new(Mutex::new(Vec::<AgentEvent>::new()));
+    let _sink = agent.subscribe_sink(Arc::new(RecordingSink {
+        events: sink_events.clone(),
+    }));
+
+    agent.prompt("hello").await.unwrap();
+
+    let observed = sink_events
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+
+    // Reuses the same awaited machinery as `subscribe`: identical events, identical order.
+    assert_eq!(
+        observed,
+        recorder.events(),
+        "sink must observe the identical awaited event sequence as subscribe()"
+    );
+
+    // The run is fully bracketed and the terminal event is already present once prompt() resolves,
+    // proving the sink's `emit` was awaited before run settlement.
+    assert_eq!(observed.first(), Some(&AgentEvent::AgentStart));
+    assert!(matches!(observed.last(), Some(AgentEvent::AgentEnd { .. })));
+
+    // Events are self-synchronizing: the committed assistant message arrives via `MessageEnd`.
+    let delivered_assistant_text = observed.iter().any(|event| {
+        matches!(
+            event,
+            AgentEvent::MessageEnd {
+                message: AgentMessage::Assistant(message),
+            } if message.text() == "hi there"
+        )
+    });
+    assert!(
+        delivered_assistant_text,
+        "sink received the full assistant message payload"
     );
 }

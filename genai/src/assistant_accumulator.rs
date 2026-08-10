@@ -156,7 +156,7 @@ impl AssistantAccumulator {
                 self.partial.content.push(AssistantContent::text(""));
                 self.text_index = Some(index);
                 events.push(AssistantMessageEvent::TextStart {
-                    content_index: index,
+                    content_index: index as u32,
                     partial: self.partial.clone(),
                 });
                 index
@@ -169,7 +169,7 @@ impl AssistantAccumulator {
             text.push_str(&delta);
         }
         events.push(AssistantMessageEvent::TextDelta {
-            content_index,
+            content_index: content_index as u32,
             delta,
             partial: self.partial.clone(),
         });
@@ -192,7 +192,7 @@ impl AssistantAccumulator {
                 });
                 self.thinking_index = Some(index);
                 events.push(AssistantMessageEvent::ThinkingStart {
-                    content_index: index,
+                    content_index: index as u32,
                     partial: self.partial.clone(),
                 });
                 index
@@ -205,7 +205,7 @@ impl AssistantAccumulator {
             thinking.push_str(&delta);
         }
         events.push(AssistantMessageEvent::ThinkingDelta {
-            content_index,
+            content_index: content_index as u32,
             delta,
             partial: self.partial.clone(),
         });
@@ -272,7 +272,7 @@ impl AssistantAccumulator {
 
             if let Some(delta) = delta {
                 events.push(AssistantMessageEvent::ToolCallDelta {
-                    content_index,
+                    content_index: content_index as u32,
                     delta,
                     partial: self.partial.clone(),
                 });
@@ -302,12 +302,12 @@ impl AssistantAccumulator {
             open: true,
         });
         events.push(AssistantMessageEvent::ToolCallStart {
-            content_index,
+            content_index: content_index as u32,
             partial: self.partial.clone(),
         });
         if !raw_arguments.is_empty() {
             events.push(AssistantMessageEvent::ToolCallDelta {
-                content_index,
+                content_index: content_index as u32,
                 delta: raw_arguments,
                 partial: self.partial.clone(),
             });
@@ -426,21 +426,21 @@ impl AssistantAccumulator {
             match (kind, self.partial.content.get(content_index)) {
                 (CloseKind::Text, Some(AssistantContent::Text { text, .. })) => {
                     events.push(AssistantMessageEvent::TextEnd {
-                        content_index,
+                        content_index: content_index as u32,
                         content: text.clone(),
                         partial: self.partial.clone(),
                     });
                 }
                 (CloseKind::Thinking, Some(AssistantContent::Thinking { thinking, .. })) => {
                     events.push(AssistantMessageEvent::ThinkingEnd {
-                        content_index,
+                        content_index: content_index as u32,
                         thinking: thinking.clone(),
                         partial: self.partial.clone(),
                     });
                 }
                 (CloseKind::ToolCall, Some(AssistantContent::ToolCall(call))) => {
                     events.push(AssistantMessageEvent::ToolCallEnd {
-                        content_index,
+                        content_index: content_index as u32,
                         tool_call: call.clone(),
                         partial: self.partial.clone(),
                     });
@@ -489,7 +489,7 @@ impl AssistantAccumulator {
                     signature: signature.clone(),
                 });
                 events.push(AssistantMessageEvent::TextStart {
-                    content_index,
+                    content_index: content_index as u32,
                     partial: self.partial.clone(),
                 });
                 if !text.is_empty() {
@@ -499,13 +499,13 @@ impl AssistantAccumulator {
                         *partial = text.clone();
                     }
                     events.push(AssistantMessageEvent::TextDelta {
-                        content_index,
+                        content_index: content_index as u32,
                         delta: text.clone(),
                         partial: self.partial.clone(),
                     });
                 }
                 events.push(AssistantMessageEvent::TextEnd {
-                    content_index,
+                    content_index: content_index as u32,
                     content: text,
                     partial: self.partial.clone(),
                 });
@@ -519,7 +519,7 @@ impl AssistantAccumulator {
                     signature: signature.clone(),
                 });
                 events.push(AssistantMessageEvent::ThinkingStart {
-                    content_index,
+                    content_index: content_index as u32,
                     partial: self.partial.clone(),
                 });
                 if !thinking.is_empty() {
@@ -530,13 +530,13 @@ impl AssistantAccumulator {
                         *partial = thinking.clone();
                     }
                     events.push(AssistantMessageEvent::ThinkingDelta {
-                        content_index,
+                        content_index: content_index as u32,
                         delta: thinking.clone(),
                         partial: self.partial.clone(),
                     });
                 }
                 events.push(AssistantMessageEvent::ThinkingEnd {
-                    content_index,
+                    content_index: content_index as u32,
                     thinking,
                     partial: self.partial.clone(),
                 });
@@ -548,20 +548,20 @@ impl AssistantAccumulator {
                     .content
                     .push(AssistantContent::ToolCall(partial_call));
                 events.push(AssistantMessageEvent::ToolCallStart {
-                    content_index,
+                    content_index: content_index as u32,
                     partial: self.partial.clone(),
                 });
                 let delta = serde_json::to_string(&call.arguments).unwrap_or_default();
                 self.partial.content[content_index] = AssistantContent::ToolCall(call.clone());
                 if !delta.is_empty() {
                     events.push(AssistantMessageEvent::ToolCallDelta {
-                        content_index,
+                        content_index: content_index as u32,
                         delta,
                         partial: self.partial.clone(),
                     });
                 }
                 events.push(AssistantMessageEvent::ToolCallEnd {
-                    content_index,
+                    content_index: content_index as u32,
                     tool_call: call,
                     partial: self.partial.clone(),
                 });

@@ -197,7 +197,7 @@ impl ProxyAccumulator {
         self.partial.content.push(AssistantContent::text(""));
         self.blocks.push(BlockState::Text { open: true });
         vec![AssistantMessageEvent::TextStart {
-            content_index: index,
+            content_index: index as u32,
             partial: self.partial.clone(),
         }]
     }
@@ -217,7 +217,7 @@ impl ProxyAccumulator {
         };
         text.push_str(&delta);
         vec![AssistantMessageEvent::TextDelta {
-            content_index: index,
+            content_index: index as u32,
             delta,
             partial: self.partial.clone(),
         }]
@@ -247,7 +247,7 @@ impl ProxyAccumulator {
             *open = false;
         }
         vec![AssistantMessageEvent::TextEnd {
-            content_index: index,
+            content_index: index as u32,
             content,
             partial: self.partial.clone(),
         }]
@@ -261,7 +261,7 @@ impl ProxyAccumulator {
         self.partial.content.push(AssistantContent::thinking(""));
         self.blocks.push(BlockState::Thinking { open: true });
         vec![AssistantMessageEvent::ThinkingStart {
-            content_index: index,
+            content_index: index as u32,
             partial: self.partial.clone(),
         }]
     }
@@ -286,7 +286,7 @@ impl ProxyAccumulator {
         };
         thinking.push_str(&delta);
         vec![AssistantMessageEvent::ThinkingDelta {
-            content_index: index,
+            content_index: index as u32,
             delta,
             partial: self.partial.clone(),
         }]
@@ -319,7 +319,7 @@ impl ProxyAccumulator {
             *open = false;
         }
         vec![AssistantMessageEvent::ThinkingEnd {
-            content_index: index,
+            content_index: index as u32,
             thinking,
             partial: self.partial.clone(),
         }]
@@ -348,7 +348,7 @@ impl ProxyAccumulator {
             delta_count: 0,
         });
         vec![AssistantMessageEvent::ToolCallStart {
-            content_index: index,
+            content_index: index as u32,
             partial: self.partial.clone(),
         }]
     }
@@ -431,7 +431,7 @@ impl ProxyAccumulator {
         };
         tool_call.arguments = parse_streaming_json(&raw_arguments);
         vec![AssistantMessageEvent::ToolCallDelta {
-            content_index: index,
+            content_index: index as u32,
             delta,
             partial: self.partial.clone(),
         }]
@@ -461,7 +461,7 @@ impl ProxyAccumulator {
             *open = false;
         }
         vec![AssistantMessageEvent::ToolCallEnd {
-            content_index: index,
+            content_index: index as u32,
             tool_call,
             partial: self.partial.clone(),
         }]

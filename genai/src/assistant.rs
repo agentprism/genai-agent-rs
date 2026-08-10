@@ -434,14 +434,14 @@ pub enum AssistantMessageEvent {
     /// Announces a new user-visible text block.
     TextStart {
         /// Index assigned to the text block.
-        content_index: usize,
+        content_index: u32,
         /// Message snapshot containing the newly opened block.
         partial: AssistantMessage,
     },
     /// Appends generated text to an open text block.
     TextDelta {
         /// Index of the text block being updated.
-        content_index: usize,
+        content_index: u32,
         /// Newly generated text fragment.
         delta: String,
         /// Message snapshot after applying the fragment.
@@ -450,7 +450,7 @@ pub enum AssistantMessageEvent {
     /// Closes a text block with its authoritative captured content.
     TextEnd {
         /// Index of the text block being closed.
-        content_index: usize,
+        content_index: u32,
         /// Complete text for the block.
         content: String,
         /// Message snapshot after finalizing the block.
@@ -459,14 +459,14 @@ pub enum AssistantMessageEvent {
     /// Announces a new provider reasoning block.
     ThinkingStart {
         /// Index assigned to the thinking block.
-        content_index: usize,
+        content_index: u32,
         /// Message snapshot containing the newly opened block.
         partial: AssistantMessage,
     },
     /// Appends provider reasoning to an open thinking block.
     ThinkingDelta {
         /// Index of the thinking block being updated.
-        content_index: usize,
+        content_index: u32,
         /// Newly generated reasoning fragment.
         delta: String,
         /// Message snapshot after applying the fragment.
@@ -475,7 +475,7 @@ pub enum AssistantMessageEvent {
     /// Closes a thinking block with its authoritative captured content.
     ThinkingEnd {
         /// Index of the thinking block being closed.
-        content_index: usize,
+        content_index: u32,
         /// Complete reasoning text for the block.
         thinking: String,
         /// Message snapshot after finalizing the block.
@@ -484,14 +484,14 @@ pub enum AssistantMessageEvent {
     /// Announces a new tool-call block.
     ToolCallStart {
         /// Index assigned to the tool call.
-        content_index: usize,
+        content_index: u32,
         /// Current message snapshot for the opened call.
         partial: AssistantMessage,
     },
     /// Supplies a raw JSON-argument fragment for an open tool call.
     ToolCallDelta {
         /// Index of the tool call being updated.
-        content_index: usize,
+        content_index: u32,
         /// Newly observed raw argument fragment.
         delta: String,
         /// Message snapshot with best-effort parsed arguments.
@@ -500,7 +500,7 @@ pub enum AssistantMessageEvent {
     /// Closes a tool call with its authoritative parsed value.
     ToolCallEnd {
         /// Index of the tool call being closed.
-        content_index: usize,
+        content_index: u32,
         /// Complete provider-neutral tool call.
         tool_call: AgentToolCall,
         /// Message snapshot after finalizing the call.

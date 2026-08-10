@@ -1,17 +1,28 @@
 use std::ops::Deref;
 use std::sync::Arc;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Store a model name with or without namespace
 /// e.g. `gemini-3-flash-preview` or `gemini::gemini-3-flash-preview`
-#[derive(Clone, Debug, Serialize, Hash, Eq, PartialEq)]
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct ModelName(Inner);
 
-#[derive(Clone, Debug, Serialize, Hash, Eq, PartialEq)]
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
 enum Inner {
 	Static(&'static str),
 	Shared(Arc<str>),
+}
+
+// `ModelName` serializes as a bare string (matching its `Deserialize`) rather than leaking the
+// internal `Inner` enum representation, so `ModelIden`/`AssistantMessage`/`AgentEvent` round-trip.
+impl Serialize for ModelName {
+	fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+	where
+		S: Serializer,
+	{
+		serializer.serialize_str(self.as_str())
+	}
 }
 
 impl<'de> Deserialize<'de> for ModelName {
@@ -19,7 +30,8 @@ impl<'de> Deserialize<'de> for ModelName {
 	where
 		D: Deserializer<'de>,
 	{
-		let s: &str = <&str>::deserialize(deserializer)?;
+		// Accept owned strings too (escaped names, `from_reader`), not only borrowed slices.
+		let s = String::deserialize(deserializer)?;
 		Ok(ModelName(Inner::Shared(Arc::<str>::from(s))))
 	}
 }

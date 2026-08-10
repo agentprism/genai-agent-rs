@@ -120,8 +120,10 @@ serde-able. Add `Serialize`/`Deserialize`. This gives:
 
 ### 3.4 `content_index: usize → u32`
 
-The three streaming-delta `content_index: usize` fields (genai-agentprism `assistant.rs:437/444/453`)
-become `u32` — fixed-width and FFI-kind. Breaking; ship with the other breaks in one release.
+**All nine** streaming-delta `content_index: usize` fields on `AssistantMessageEvent` — text,
+thinking, and tool-call × start/delta/end (genai-agentprism `assistant.rs`) — become `u32`.
+`usize` has no UniFFI mapping, so the whole enum must be uniformly fixed-width, not just the
+text variants. Breaking; ship with the other breaks in one release.
 
 ### 3.5 Data-only config + builder
 
