@@ -1,13 +1,14 @@
 import XCTest
 @testable import GenAIAgent
 
-/// Offline tests: exercise the FFI surface (construction, sink registration,
-/// cancellation token) without network access. The full loop is exercised
-/// Rust-side by `cargo test -p genai-agent-ffi --features testing`, which
-/// drives a scripted provider stream through these same objects.
+/// Offline tests: exercise the FFI surface (construction, sink/tool/hook
+/// registration, cancellation token) without network access. The loop itself
+/// is exercised Rust-side by `cargo test -p genai-agent-ffi --features testing`,
+/// which drives a scripted provider stream through these same objects,
+/// including host tool execution and hook blocking.
 final class GenAIAgentTests: XCTestCase {
 
-	// Callbacks fire on tokio worker threads, so the sinks guard their state.
+	// Callbacks fire on tokio worker threads, so sinks guard their state.
 	final class CollectSink: AgentEventSink, @unchecked Sendable {
 		private let lock = NSLock()
 		private var _events: [AgentEvent] = []
@@ -26,35 +27,61 @@ final class GenAIAgentTests: XCTestCase {
 		}
 	}
 
-	func testAgentConstructsFromSetup() throws {
-		let setup = AgentSetup(model: "gpt-5-mini", systemPrompt: "You are concise")
-		_ = try Agent(setup: setup)
-	}
+	final class EchoTool: AgentTool, @unchecked Sendable {
+		func spec() -> ToolSpec {
+			ToolSpec(
+				name: "echo",
+				label: "Echo",
+				description: "Echoes its input",
+				schemaJson: #"{"type":"object","properties":{"text":{"type":"string"}}}"#,
+				strict: nil
+			)
+		}
 
-	func testMalformedInitialMessagesJsonThrows() {
-		let setup = AgentSetup(model: "gpt-5-mini", initialMessagesJson: "not json")
-		XCTAssertThrowsError(try Agent(setup: setup)) { error in
-			guard case AgentError.Other(let message) = error else {
-				return XCTFail("expected AgentError.Other, got \(error)")
-			}
-			XCTAssertTrue(message.contains("initial_messages_json"), "unexpected message: \(message)")
+		func execute(call: ToolCallContext, cancel _: AgentCancelToken) async throws -> AgentToolResult {
+			AgentToolResult(
+				content: [.text(text: "echo: \(call.argsJson)")],
+				detailsJson: "{}",
+				usage: nil,
+				addedToolNames: [],
+				terminate: false
+			)
 		}
 	}
 
-	func testSinkSubscriptionLifecycle() throws {
-		let agent = try Agent(setup: AgentSetup(model: "gpt-5-mini"))
-		let typed = CollectSink()
-		let json = CollectJsonSink()
-		let typedSub = agent.subscribe(sink: typed)
-		let jsonSub = agent.subscribeJson(sink: json)
-		typedSub.unsubscribe()
-		jsonSub.unsubscribe()
-		// Idempotent unsubscribe is safe.
-		typedSub.unsubscribe()
+	final class AllowAll: BeforeToolCallHook, @unchecked Sendable {
+		func before(ctx _: BeforeToolCallContext, cancel _: AgentCancelToken) async -> BeforeToolCallOutcome {
+			BeforeToolCallOutcome(argsJson: nil, decision: nil)
+		}
 	}
 
-	func testSnapshotAndIdleState() throws {
-		let agent = try Agent(setup: AgentSetup(model: "gpt-5-mini", systemPrompt: "Hi"))
+	func testAgentConstructsFromSetup() {
+		_ = Agent(setup: AgentSetup(model: "gpt-5-mini", systemPrompt: "You are concise"))
+	}
+
+	func testAgentConstructsWithApiKeys() {
+		_ = Agent.newWithApiKeys(setup: AgentSetup(model: "gpt-5-mini"), apiKeys: ["openai": "sk-test"])
+	}
+
+	func testSinkSubscriptionLifecycle() {
+		let agent = Agent(setup: AgentSetup(model: "gpt-5-mini"))
+		let typedSub = agent.subscribe(sink: CollectSink())
+		let jsonSub = agent.subscribeJson(sink: CollectJsonSink())
+		typedSub.unsubscribe()
+		jsonSub.unsubscribe()
+		typedSub.unsubscribe() // idempotent
+	}
+
+	func testToolAndHookRegistration() throws {
+		let agent = Agent(setup: AgentSetup(model: "gpt-5-mini"))
+		let tool = EchoTool()
+		agent.setTools(tools: [tool])
+		agent.addTool(tool: tool)
+		try agent.setBeforeToolCallHook(hook: AllowAll())
+	}
+
+	func testSnapshotAndIdleState() {
+		let agent = Agent(setup: AgentSetup(model: "gpt-5-mini", systemPrompt: "Hi"))
 		XCTAssertFalse(agent.isStreaming())
 		let snapshot = agent.snapshot()
 		XCTAssertEqual(snapshot.systemPrompt, "Hi")
@@ -62,8 +89,8 @@ final class GenAIAgentTests: XCTestCase {
 		XCTAssertTrue(snapshot.messages.isEmpty)
 	}
 
-	func testCancelTokenRoundTrip() throws {
-		let agent = try Agent(setup: AgentSetup(model: "gpt-5-mini"))
+	func testCancelTokenRoundTrip() {
+		let agent = Agent(setup: AgentSetup(model: "gpt-5-mini"))
 		XCTAssertNil(agent.signal()) // no run in flight
 		agent.abort() // no-op without a run
 	}

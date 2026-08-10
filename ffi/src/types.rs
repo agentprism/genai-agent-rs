@@ -14,6 +14,8 @@
 //! - `#[non_exhaustive]` core types (`ThinkingBudgets`) are built via
 //!   `Default` + field assignment; non_exhaustive enums get a wildcard arm.
 
+use std::sync::Arc;
+
 use rust_genai_agent as agent;
 
 // region:    --- Error
@@ -168,16 +170,13 @@ impl From<ThinkingBudgets> for agent::ThinkingBudgets {
 }
 
 /// Data-only agent configuration — the host constructs this declaratively.
-///
-/// B1 scope: `chat_options` (provider options) is not yet exposed; it defaults.
-/// The initial transcript crosses as `initial_messages_json` (a JSON array of
-/// core `AgentMessage`, per its serde shape) until typed message construction
-/// lands with the tool surface in B2.
+/// Fully typed: the initial transcript and provider chat options included.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct AgentSetup {
 	pub system_prompt: String,
 	pub model: String,
 	pub session_id: Option<String>,
+	pub messages: Vec<AgentMessage>,
 	pub thinking_level: ThinkingLevel,
 	pub thinking_budgets: Option<ThinkingBudgets>,
 	pub max_retries: Option<u32>,
@@ -186,31 +185,26 @@ pub struct AgentSetup {
 	pub transport: Transport,
 	pub steering_mode: QueueMode,
 	pub follow_up_mode: QueueMode,
-	pub initial_messages_json: Option<String>,
+	pub chat_options: ChatOptions,
 }
 
-impl AgentSetup {
-	pub(crate) fn try_into_core(self) -> Result<agent::AgentSetup, AgentError> {
-		let messages: Vec<agent::AgentMessage> = match &self.initial_messages_json {
-			Some(json) => serde_json::from_str(json)
-				.map_err(|err| AgentError::Other(format!("initial_messages_json: {err}")))?,
-			None => Vec::new(),
-		};
-		Ok(agent::AgentSetup {
-			system_prompt: self.system_prompt,
-			model: self.model,
-			session_id: self.session_id,
-			messages,
-			thinking_level: self.thinking_level.into(),
-			thinking_budgets: self.thinking_budgets.map(Into::into),
-			max_retries: self.max_retries,
-			max_retry_delay_ms: self.max_retry_delay_ms,
-			tool_execution: self.tool_execution.into(),
-			transport: self.transport.into(),
-			steering_mode: self.steering_mode.into(),
-			follow_up_mode: self.follow_up_mode.into(),
-			chat_options: Default::default(),
-		})
+impl From<AgentSetup> for agent::AgentSetup {
+	fn from(v: AgentSetup) -> Self {
+		Self {
+			system_prompt: v.system_prompt,
+			model: v.model,
+			session_id: v.session_id,
+			messages: v.messages.into_iter().map(Into::into).collect(),
+			thinking_level: v.thinking_level.into(),
+			thinking_budgets: v.thinking_budgets.map(Into::into),
+			max_retries: v.max_retries,
+			max_retry_delay_ms: v.max_retry_delay_ms,
+			tool_execution: v.tool_execution.into(),
+			transport: v.transport.into(),
+			steering_mode: v.steering_mode.into(),
+			follow_up_mode: v.follow_up_mode.into(),
+			chat_options: v.chat_options.into(),
+		}
 	}
 }
 
@@ -715,3 +709,590 @@ impl From<agent::AgentState> for AgentSnapshot {
 }
 
 // endregion: --- State snapshot
+
+// region:    --- Inbound conversions for the B1 message tree
+//
+// B2 made the message tree bidirectional (typed initial messages in
+// AgentSetup, host-built tool results/hook outcomes). Conversions are
+// field-wise; `#[non_exhaustive]` core structs build via Default + assign;
+// `*_json` fields parse with Null-on-error here and are validated by the
+// calling adapter before conversion (see lib.rs), so a Null cannot silently
+// reach a provider.
+
+impl From<UserContent> for agent::UserContent {
+	fn from(v: UserContent) -> Self {
+		match v {
+			UserContent::Text { text } => Self::Text { text },
+			UserContent::Image { data, mime_type, name } => Self::Image { data, mime_type, name },
+		}
+	}
+}
+
+impl From<UserMessage> for agent::UserMessage {
+	fn from(v: UserMessage) -> Self {
+		Self {
+			content: v.content.into_iter().map(Into::into).collect(),
+			timestamp: v.timestamp,
+		}
+	}
+}
+
+impl From<ToolResultContent> for agent::ToolResultContent {
+	fn from(v: ToolResultContent) -> Self {
+		match v {
+			ToolResultContent::Text { text } => Self::Text { text },
+			ToolResultContent::Image { data, mime_type, name } => Self::Image { data, mime_type, name },
+		}
+	}
+}
+
+impl From<ToolResultMessage> for agent::ToolResultMessage {
+	fn from(v: ToolResultMessage) -> Self {
+		Self {
+			tool_call_id: v.tool_call_id,
+			tool_name: v.tool_name,
+			content: v.content.into_iter().map(Into::into).collect(),
+			details: serde_json::from_str(&v.details_json).unwrap_or(serde_json::Value::Null),
+			usage: v.usage.map(Into::into),
+			added_tool_names: v.added_tool_names,
+			is_error: v.is_error,
+			timestamp: v.timestamp,
+		}
+	}
+}
+
+impl From<CustomMessage> for agent::CustomMessage {
+	fn from(v: CustomMessage) -> Self {
+		Self {
+			role: v.role,
+			data: serde_json::from_str(&v.data_json).unwrap_or(serde_json::Value::Null),
+			timestamp: v.timestamp,
+		}
+	}
+}
+
+impl From<AgentToolCall> for agent::AgentToolCall {
+	fn from(v: AgentToolCall) -> Self {
+		Self {
+			id: v.id,
+			name: v.name,
+			arguments: serde_json::from_str(&v.arguments_json).unwrap_or(serde_json::Value::Null),
+			thought_signatures: v.thought_signatures,
+		}
+	}
+}
+
+impl From<AssistantContent> for agent::AssistantContent {
+	fn from(v: AssistantContent) -> Self {
+		match v {
+			AssistantContent::Text { text, signature } => Self::Text { text, signature },
+			AssistantContent::Thinking { thinking, signature } => Self::Thinking { thinking, signature },
+			AssistantContent::ToolCall(call) => Self::ToolCall(call.into()),
+		}
+	}
+}
+
+impl From<ModelIden> for genai::ModelIden {
+	fn from(v: ModelIden) -> Self {
+		// AdapterKind round-trips through its serde (variant-name) form.
+		let adapter_kind: genai::adapter::AdapterKind = serde_json::from_str(&format!("\"{}\"", v.adapter_kind))
+			.unwrap_or_else(|_| panic!("unparseable adapter kind: {}", v.adapter_kind));
+		genai::ModelIden::new(adapter_kind, genai::ModelName::from(v.model_name))
+	}
+}
+
+impl From<AgentCost> for agent::AgentCost {
+	fn from(v: AgentCost) -> Self {
+		// #[non_exhaustive] core type: Default + assignment.
+		let mut cost = Self::default();
+		cost.input = v.input;
+		cost.output = v.output;
+		cost.cache_read = v.cache_read;
+		cost.cache_write = v.cache_write;
+		cost.total = v.total;
+		cost
+	}
+}
+
+impl From<AgentUsage> for agent::AgentUsage {
+	fn from(v: AgentUsage) -> Self {
+		// #[non_exhaustive] core type: Default + assignment.
+		let mut usage = Self::default();
+		usage.input_tokens = v.input_tokens;
+		usage.output_tokens = v.output_tokens;
+		usage.cache_read_tokens = v.cache_read_tokens;
+		usage.cache_write_tokens = v.cache_write_tokens;
+		usage.cache_write_1h_tokens = v.cache_write_1h_tokens;
+		usage.cost = v.cost.map(Into::into);
+		usage
+	}
+}
+
+impl From<StopReason> for agent::StopReason {
+	fn from(v: StopReason) -> Self {
+		match v {
+			StopReason::Pending => Self::Pending,
+			StopReason::Stop => Self::Stop,
+			StopReason::Length => Self::Length,
+			StopReason::ToolUse => Self::ToolUse,
+			StopReason::Error => Self::Error,
+			StopReason::Aborted => Self::Aborted,
+		}
+	}
+}
+
+impl From<AssistantMessage> for agent::AssistantMessage {
+	fn from(v: AssistantMessage) -> Self {
+		Self {
+			content: v.content.into_iter().map(Into::into).collect(),
+			stop_reason: v.stop_reason.into(),
+			provider_stop_reason: v.provider_stop_reason,
+			error_message: v.error_message,
+			usage: v.usage.into(),
+			model: v.model.into(),
+			response_id: v.response_id,
+			timestamp: v.timestamp,
+		}
+	}
+}
+
+impl From<AgentMessage> for agent::AgentMessage {
+	fn from(v: AgentMessage) -> Self {
+		match v {
+			AgentMessage::User(m) => Self::User(m.into()),
+			AgentMessage::Assistant(m) => Self::Assistant(m.into()),
+			AgentMessage::ToolResult(m) => Self::ToolResult(m.into()),
+			AgentMessage::Custom(m) => Self::Custom(m.into()),
+		}
+	}
+}
+
+impl From<AgentToolResult> for agent::AgentToolResult {
+	fn from(v: AgentToolResult) -> Self {
+		Self {
+			content: v.content.into_iter().map(Into::into).collect(),
+			details: serde_json::from_str(&v.details_json).unwrap_or(serde_json::Value::Null),
+			usage: v.usage.map(Into::into),
+			added_tool_names: v.added_tool_names,
+			terminate: v.terminate,
+		}
+	}
+}
+
+// endregion: --- Inbound conversions for the B1 message tree
+
+// region:    --- ChatOptions tree (inbound; genai fork types)
+
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum CacheControl {
+	Ephemeral,
+	Memory,
+	Ephemeral5m,
+	Ephemeral1h,
+}
+
+impl From<CacheControl> for genai::chat::CacheControl {
+	fn from(v: CacheControl) -> Self {
+		match v {
+			CacheControl::Ephemeral => Self::Ephemeral,
+			CacheControl::Memory => Self::Memory,
+			CacheControl::Ephemeral5m => Self::Ephemeral5m,
+			CacheControl::Ephemeral1h => Self::Ephemeral1h,
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum ReasoningEffort {
+	Zero,
+	Low,
+	Medium,
+	High,
+	XHigh,
+	Max,
+	Budget(u32),
+}
+
+impl From<ReasoningEffort> for genai::chat::ReasoningEffort {
+	fn from(v: ReasoningEffort) -> Self {
+		match v {
+			ReasoningEffort::Zero => Self::Zero,
+			ReasoningEffort::Low => Self::Low,
+			ReasoningEffort::Medium => Self::Medium,
+			ReasoningEffort::High => Self::High,
+			ReasoningEffort::XHigh => Self::XHigh,
+			ReasoningEffort::Max => Self::Max,
+			ReasoningEffort::Budget(tokens) => Self::Budget(tokens),
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum Verbosity {
+	Low,
+	Medium,
+	High,
+}
+
+impl From<Verbosity> for genai::chat::Verbosity {
+	fn from(v: Verbosity) -> Self {
+		match v {
+			Verbosity::Low => Self::Low,
+			Verbosity::Medium => Self::Medium,
+			Verbosity::High => Self::High,
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum ServiceTier {
+	Auto,
+	Default,
+	Flex,
+}
+
+impl From<ServiceTier> for genai::chat::ServiceTier {
+	fn from(v: ServiceTier) -> Self {
+		match v {
+			ServiceTier::Auto => Self::Auto,
+			ServiceTier::Default => Self::Default,
+			ServiceTier::Flex => Self::Flex,
+		}
+	}
+}
+
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum ToolChoice {
+	Auto,
+	None,
+	Required,
+	Tool { name: String },
+}
+
+impl From<ToolChoice> for genai::chat::ToolChoice {
+	fn from(v: ToolChoice) -> Self {
+		match v {
+			ToolChoice::Auto => Self::Auto,
+			ToolChoice::None => Self::None,
+			ToolChoice::Required => Self::Required,
+			ToolChoice::Tool { name } => Self::Tool { name },
+		}
+	}
+}
+
+/// Structured-output JSON specification.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct JsonSpec {
+	pub name: String,
+	pub description: Option<String>,
+	/// JSON text (core `schema: Value`).
+	pub schema_json: String,
+}
+
+impl From<JsonSpec> for genai::chat::JsonSpec {
+	fn from(v: JsonSpec) -> Self {
+		Self {
+			name: v.name,
+			description: v.description,
+			schema: serde_json::from_str(&v.schema_json).unwrap_or(serde_json::Value::Null),
+		}
+	}
+}
+
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum ChatResponseFormat {
+	JsonMode,
+	JsonSpec(JsonSpec),
+}
+
+impl From<ChatResponseFormat> for genai::chat::ChatResponseFormat {
+	fn from(v: ChatResponseFormat) -> Self {
+		match v {
+			ChatResponseFormat::JsonMode => Self::JsonMode,
+			ChatResponseFormat::JsonSpec(spec) => Self::JsonSpec(spec.into()),
+		}
+	}
+}
+
+/// Base provider chat options. All fields optional except `stop_sequences`
+/// (empty = none) — mirrors `genai::chat::ChatOptions`.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ChatOptions {
+	pub temperature: Option<f64>,
+	pub max_tokens: Option<u32>,
+	pub top_p: Option<f64>,
+	pub stop_sequences: Vec<String>,
+	pub capture_usage: Option<bool>,
+	pub capture_content: Option<bool>,
+	pub capture_reasoning_content: Option<bool>,
+	pub capture_tool_calls: Option<bool>,
+	pub capture_raw_body: Option<bool>,
+	pub response_format: Option<ChatResponseFormat>,
+	pub tool_choice: Option<ToolChoice>,
+	pub normalize_reasoning_content: Option<bool>,
+	pub reasoning_effort: Option<ReasoningEffort>,
+	pub verbosity: Option<Verbosity>,
+	pub seed: Option<u64>,
+	pub service_tier: Option<ServiceTier>,
+	pub extra_headers: Option<std::collections::HashMap<String, String>>,
+	pub cache_control: Option<CacheControl>,
+	pub prompt_cache_key: Option<String>,
+	/// JSON text merged into the request body (core `extra_body: Value`).
+	pub extra_body_json: Option<String>,
+}
+
+impl From<ChatOptions> for genai::chat::ChatOptions {
+	fn from(v: ChatOptions) -> Self {
+		Self {
+			temperature: v.temperature,
+			max_tokens: v.max_tokens,
+			top_p: v.top_p,
+			stop_sequences: v.stop_sequences,
+			capture_usage: v.capture_usage,
+			capture_content: v.capture_content,
+			capture_reasoning_content: v.capture_reasoning_content,
+			capture_tool_calls: v.capture_tool_calls,
+			capture_raw_body: v.capture_raw_body,
+			response_format: v.response_format.map(Into::into),
+			tool_choice: v.tool_choice.map(Into::into),
+			normalize_reasoning_content: v.normalize_reasoning_content,
+			reasoning_effort: v.reasoning_effort.map(Into::into),
+			verbosity: v.verbosity.map(Into::into),
+			seed: v.seed,
+			service_tier: v.service_tier.map(Into::into),
+			extra_headers: v.extra_headers.map(|h| genai::Headers::from(h.into_iter().collect::<Vec<_>>())),
+			cache_control: v.cache_control.map(Into::into),
+			prompt_cache_key: v.prompt_cache_key,
+			extra_body: v
+				.extra_body_json
+				.map(|json| serde_json::from_str(&json).unwrap_or(serde_json::Value::Null)),
+		}
+	}
+}
+
+// endregion: --- ChatOptions tree
+
+// region:    --- Tools & hooks (B2)
+
+/// Provider-facing tool declaration, implemented by host tools.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ToolSpec {
+	pub name: String,
+	pub label: String,
+	pub description: String,
+	/// JSON text (core `schema: Value`) — the tool's parameter JSON schema.
+	pub schema_json: String,
+	pub strict: Option<bool>,
+}
+
+impl From<ToolSpec> for agent::ToolSpec {
+	fn from(v: ToolSpec) -> Self {
+		Self {
+			name: v.name,
+			label: v.label,
+			description: v.description,
+			schema: serde_json::from_str(&v.schema_json).unwrap_or(serde_json::Value::Null),
+			strict: v.strict,
+		}
+	}
+}
+
+impl From<agent::ToolSpec> for ToolSpec {
+	fn from(v: agent::ToolSpec) -> Self {
+		Self {
+			name: v.name,
+			label: v.label,
+			description: v.description,
+			schema_json: serde_json::to_string(&v.schema).unwrap_or_default(),
+			strict: v.strict,
+		}
+	}
+}
+
+/// Execution context handed to a host tool.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ToolCallContext {
+	pub tool_call_id: String,
+	pub tool_name: String,
+	/// JSON text (core `args: Value`).
+	pub args_json: String,
+}
+
+impl From<agent::ToolCallContext> for ToolCallContext {
+	fn from(v: agent::ToolCallContext) -> Self {
+		Self {
+			tool_call_id: v.tool_call_id,
+			tool_name: v.tool_name,
+			args_json: serde_json::to_string(&v.args).unwrap_or_default(),
+		}
+	}
+}
+
+/// Data projection of the loop context handed to hooks. `tools` are
+/// projected to their specs (the trait objects can't cross); rebuilding a
+/// core `AgentContext` from this reuses the running config's tools — hosts
+/// can change prompt/messages, not the tool set.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct AgentContextData {
+	pub system_prompt: String,
+	pub messages: Vec<AgentMessage>,
+	pub tools: Vec<ToolSpec>,
+}
+
+impl AgentContextData {
+	/// Outbound projection; `tools` comes from the core context's tool objects.
+	pub(crate) fn project(context: &agent::AgentContext) -> Self {
+		Self {
+			system_prompt: context.system_prompt.clone(),
+			messages: context.messages.iter().cloned().map(Into::into).collect(),
+			tools: context.tools.iter().map(|tool| tool.spec().into()).collect(),
+		}
+	}
+
+	/// Inbound rebuild; `tools` must come from the original (running) context.
+	pub(crate) fn into_core(self, tools: Vec<Arc<dyn agent::AgentTool>>) -> agent::AgentContext {
+		agent::AgentContext {
+			system_prompt: self.system_prompt,
+			messages: self.messages.into_iter().map(Into::into).collect(),
+			tools,
+		}
+	}
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct BeforeToolCallContext {
+	pub assistant_message: AssistantMessage,
+	pub tool_call: AgentToolCall,
+	/// JSON text (core `args: Value`).
+	pub args_json: String,
+}
+
+impl From<agent::BeforeToolCallContext> for BeforeToolCallContext {
+	fn from(v: agent::BeforeToolCallContext) -> Self {
+		Self {
+			assistant_message: v.assistant_message.into(),
+			tool_call: v.tool_call.into(),
+			args_json: serde_json::to_string(&v.args).unwrap_or_default(),
+		}
+	}
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct BeforeToolCallResult {
+	pub block: bool,
+	pub reason: Option<String>,
+	/// End the loop after blocking.
+	pub terminate: bool,
+}
+
+impl From<BeforeToolCallResult> for agent::BeforeToolCallResult {
+	fn from(v: BeforeToolCallResult) -> Self {
+		Self {
+			block: v.block,
+			reason: v.reason,
+			terminate: v.terminate,
+		}
+	}
+}
+
+/// Host decision for `BeforeToolCallHook`: optional argument rewrite +
+/// optional block/allow. `None` fields leave the call untouched.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct BeforeToolCallOutcome {
+	/// JSON text; parsed `Value` when `Some`.
+	pub args_json: Option<String>,
+	pub decision: Option<BeforeToolCallResult>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct AfterToolCallContext {
+	pub assistant_message: AssistantMessage,
+	pub tool_call: AgentToolCall,
+	/// JSON text (core `args: Value`).
+	pub args_json: String,
+	pub result: AgentToolResult,
+	pub is_error: bool,
+}
+
+impl From<agent::AfterToolCallContext> for AfterToolCallContext {
+	fn from(v: agent::AfterToolCallContext) -> Self {
+		Self {
+			assistant_message: v.assistant_message.into(),
+			tool_call: v.tool_call.into(),
+			args_json: serde_json::to_string(&v.args).unwrap_or_default(),
+			result: v.result.into(),
+			is_error: v.is_error,
+		}
+	}
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct AfterToolCallResult {
+	pub content: Option<Vec<ToolResultContent>>,
+	/// JSON text; parsed `Value` when `Some`.
+	pub details_json: Option<String>,
+	pub is_error: Option<bool>,
+	pub usage: Option<AgentUsage>,
+	pub terminate: Option<bool>,
+}
+
+impl From<AfterToolCallResult> for agent::AfterToolCallResult {
+	fn from(v: AfterToolCallResult) -> Self {
+		Self {
+			content: v.content.map(|parts| parts.into_iter().map(Into::into).collect()),
+			details: v
+				.details_json
+				.map(|json| serde_json::from_str(&json).unwrap_or(serde_json::Value::Null)),
+			is_error: v.is_error,
+			usage: v.usage.map(Into::into),
+			terminate: v.terminate,
+		}
+	}
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct TurnContext {
+	pub message: AssistantMessage,
+	pub tool_results: Vec<ToolResultMessage>,
+	pub context: AgentContextData,
+}
+
+impl From<agent::ShouldStopAfterTurnContext> for TurnContext {
+	/// Projection of core `ShouldStopAfterTurnContext` (aka
+	/// `PrepareNextTurnContext`); tool objects become their specs.
+	fn from(v: agent::ShouldStopAfterTurnContext) -> Self {
+		Self {
+			message: v.message.into(),
+			tool_results: v.tool_results.into_iter().map(Into::into).collect(),
+			context: AgentContextData::project(&v.context),
+		}
+	}
+}
+
+/// Model override for the next turn. `ModelSpec::Target` never crosses (it
+/// carries a resolved service target, including auth).
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum ModelSpec {
+	Name(String),
+	Iden(ModelIden),
+}
+
+impl From<ModelSpec> for genai::ModelSpec {
+	fn from(v: ModelSpec) -> Self {
+		match v {
+			ModelSpec::Name(name) => Self::Name(genai::ModelName::from(name)),
+			ModelSpec::Iden(iden) => Self::Iden(iden.into()),
+		}
+	}
+}
+
+/// Replacements applied before the next turn (host returns from
+/// `PrepareNextTurnHook`). A `None` field keeps the current value.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct AgentLoopTurnUpdate {
+	pub context: Option<AgentContextData>,
+	pub model: Option<ModelSpec>,
+	pub thinking_level: Option<ThinkingLevel>,
+}
+
+// endregion: --- Tools & hooks
