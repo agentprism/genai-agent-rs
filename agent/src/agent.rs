@@ -10,12 +10,14 @@
 //! state snapshots remain available through any clone because all clones share the same agent.
 
 use crate::{
-    AfterToolCallHook, AgentContext, AgentError, AgentEvent, AgentLoopConfig, AgentMessage,
-    AgentPrepareNextTurnHook, AgentPrepareNextTurnWithContextHook, AgentShouldStopAfterTurnHook,
-    AgentTool, AssistantContent, AssistantMessage, BeforeToolCallHook, BusyContext, ConvertToLlm,
-    EventSink, OnPayloadHook, OnResponseHook, PriceCatalog, QueueMode, StopReason, StreamFn,
-    ThinkingBudgets,
-    ThinkingLevel, ToolExecutionMode, TransformContextHook, Transport, TryAfterToolCallHook,
+    AfterToolCall, AfterToolCallContext, AfterToolCallHook, AgentContext, AgentError, AgentEvent,
+    AgentLoopConfig, AgentMessage, AgentPrepareNextTurnHook, AgentPrepareNextTurnWithContextHook,
+    AgentShouldStopAfterTurnHook, AgentTool, AssistantContent, AssistantMessage, BeforeToolCall,
+    BeforeToolCallContext, BeforeToolCallHook, BusyContext, ConvertToLlm, EventSink, MessageConverter,
+    OnPayloadHook, OnResponseHook, PrepareNextTurn, PrepareNextTurnContext, PriceCatalog, QueueMode,
+    QueueMessagesHook, QueueSource, ShouldStopAfterTurn, ShouldStopAfterTurnContext, StopReason,
+    StreamFn, ThinkingBudgets, ThinkingLevel, ToolExecutionMode, TransformContext,
+    TransformContextHook, Transport, TryAfterToolCall, TryAfterToolCallHook, TryBeforeToolCall,
     TryBeforeToolCallHook, UserContent, UserMessage, default_convert_to_llm, get_default_stream_fn,
     resolve_reasoning_effort, run_agent_loop, run_agent_loop_continue,
 };
@@ -190,6 +192,19 @@ pub struct AgentConfig {
     pub steering_mode: QueueMode,
     /// Initial follow-up-queue drain policy.
     pub follow_up_mode: QueueMode,
+    /// Optional host-provided steering message source.
+    ///
+    /// When `None` (the default), each run's loop polls the built-in steering queue fed by
+    /// [`Agent::steer`]. When set, the run's loop polls this source instead of that queue for the
+    /// steering channel; see [`Self::with_steering_source_object`] for the semantics and why the
+    /// facade exposes it at construction time rather than as a runtime setter.
+    pub steering_source: Option<QueueMessagesHook>,
+    /// Optional host-provided follow-up message source.
+    ///
+    /// When `None` (the default), each run's loop polls the built-in follow-up queue fed by
+    /// [`Agent::follow_up`]. When set, the run's loop polls this source instead of that queue for the
+    /// follow-up channel; see [`Self::with_follow_up_source_object`].
+    pub follow_up_source: Option<QueueMessagesHook>,
     /// Tool-call batch execution policy.
     pub tool_execution: ToolExecutionMode,
     /// Optional per-named-level reasoning-token budgets.
@@ -266,6 +281,8 @@ impl std::fmt::Debug for AgentConfig {
             .field("session_id", &self.session_id)
             .field("steering_mode", &self.steering_mode)
             .field("follow_up_mode", &self.follow_up_mode)
+            .field("steering_source", &self.steering_source.is_some())
+            .field("follow_up_source", &self.follow_up_source.is_some())
             .field("tool_execution", &self.tool_execution)
             .field("thinking_budgets", &self.thinking_budgets)
             .field("transport", &self.transport)
@@ -296,6 +313,8 @@ impl Default for AgentConfig {
             session_id: None,
             steering_mode: QueueMode::OneAtATime,
             follow_up_mode: QueueMode::OneAtATime,
+            steering_source: None,
+            follow_up_source: None,
             tool_execution: ToolExecutionMode::Parallel,
             thinking_budgets: None,
             transport: Transport::Auto,
@@ -305,6 +324,15 @@ impl Default for AgentConfig {
             max_retry_delay_ms: None,
         }
     }
+}
+
+/// Adapt an object-safe [`QueueSource`] into the internal [`QueueMessagesHook`] closure the loop
+/// consumes. Each poll clones the `Arc` into the returned future so the hook stays `Fn`.
+fn queue_source_to_hook(source: Arc<dyn QueueSource>) -> QueueMessagesHook {
+    Arc::new(move || {
+        let source = source.clone();
+        Box::pin(async move { source.poll().await })
+    })
 }
 
 impl AgentConfig {
@@ -465,6 +493,36 @@ impl AgentConfig {
     /// Set the initial follow-up-queue drain policy.
     pub fn with_follow_up_mode(mut self, follow_up_mode: QueueMode) -> Self {
         self.follow_up_mode = follow_up_mode;
+        self
+    }
+
+    /// Install an object-safe [`QueueSource`] as the steering message source.
+    ///
+    /// The adapter wraps the trait into the internal [`QueueMessagesHook`] the loop already consumes.
+    /// When installed, the run's loop polls this source for the steering channel **instead of** the
+    /// built-in queue that [`Agent::steer`] feeds (the two are not merged), and the built-in
+    /// steering-queue [`QueueMode`] and the continuation path's initial-steering skip no longer
+    /// apply to this channel — the host owns the source and its poll timing.
+    ///
+    /// This is exposed at construction time rather than as a runtime `set_*_object` setter because
+    /// the facade otherwise has no steering *source* field to mutate: steering input is a push queue
+    /// fed by [`Agent::steer`], and the facade's cross-run continuation decision reads that same
+    /// internal queue directly. Binding a pull-based source at construction keeps the injection point
+    /// unambiguous; a runtime setter would have to redefine that continuation interaction, which is
+    /// out of scope for this additive layer.
+    pub fn with_steering_source_object(mut self, source: Arc<dyn QueueSource>) -> Self {
+        self.steering_source = Some(queue_source_to_hook(source));
+        self
+    }
+
+    /// Install an object-safe [`QueueSource`] as the follow-up message source.
+    ///
+    /// Behaves like [`Self::with_steering_source_object`] for the follow-up channel: the run's loop
+    /// polls this source **instead of** the built-in queue that [`Agent::follow_up`] feeds. A
+    /// non-empty poll continues the loop for another turn, exactly as the built-in follow-up queue
+    /// does.
+    pub fn with_follow_up_source_object(mut self, source: Arc<dyn QueueSource>) -> Self {
+        self.follow_up_source = Some(queue_source_to_hook(source));
         self
     }
 
@@ -909,6 +967,190 @@ impl Agent {
         self.update_runtime_config(move |config| {
             config.prepare_next_turn_with_context = prepare_next_turn;
         })
+    }
+
+    // ---------------------------------------------------------------------------
+    // Object-safe hook registration (Layer A1).
+    //
+    // Each `set_*_object` adapts an `Arc<dyn Trait>` mirror into the existing closure hook alias and
+    // delegates to the closure setter above, reusing its `Busy` guard. These are strictly additive:
+    // the closure setters remain the primary Rust API. See `crate::hooks` for the trait definitions.
+    // ---------------------------------------------------------------------------
+
+    /// Register an object-safe [`MessageConverter`] as the transcript converter for the next run.
+    ///
+    /// Adapts the (synchronous) trait into the async [`ConvertToLlm`] closure and delegates to
+    /// [`Self::set_convert_to_llm`]; returns [`AgentError::Busy`] while a run is active.
+    pub fn set_convert_to_llm_object(
+        &self,
+        converter: Arc<dyn MessageConverter>,
+    ) -> Result<(), AgentError> {
+        let closure: ConvertToLlm = Arc::new(move |messages: Vec<AgentMessage>| {
+            let converter = converter.clone();
+            Box::pin(async move { converter.convert(&messages) })
+        });
+        self.set_convert_to_llm(closure)
+    }
+
+    /// Register an object-safe [`TransformContext`] as the context transform for the next run.
+    ///
+    /// Adapts the trait into a [`TransformContextHook`] and delegates to
+    /// [`Self::set_transform_context`]; returns [`AgentError::Busy`] while a run is active.
+    pub fn set_transform_context_object(
+        &self,
+        hook: Arc<dyn TransformContext>,
+    ) -> Result<(), AgentError> {
+        let closure: TransformContextHook =
+            Arc::new(move |messages: Vec<AgentMessage>, cancel: CancellationToken| {
+                let hook = hook.clone();
+                Box::pin(async move { hook.transform(messages, cancel).await })
+            });
+        self.set_transform_context(Some(closure))
+    }
+
+    /// Register an object-safe [`BeforeToolCall`] as the before-tool-call hook for the next run.
+    ///
+    /// The trait takes an owned [`BeforeToolCallContext`] and returns an owned
+    /// [`crate::BeforeToolCallOutcome`]; the adapter writes any returned `args` back into the loop's
+    /// borrowed `&mut` context before returning the decision (the borrow bridge), so loop semantics
+    /// are identical to the closure form. Delegates to [`Self::set_before_tool_call`]; returns
+    /// [`AgentError::Busy`] while a run is active.
+    pub fn set_before_tool_call_object(
+        &self,
+        hook: Arc<dyn BeforeToolCall>,
+    ) -> Result<(), AgentError> {
+        let closure: BeforeToolCallHook =
+            Arc::new(move |ctx: &mut BeforeToolCallContext, cancel: CancellationToken| {
+                let hook = hook.clone();
+                let owned = ctx.clone();
+                Box::pin(async move {
+                    let out = hook.before(owned, cancel).await;
+                    if let Some(args) = out.args {
+                        ctx.args = args;
+                    }
+                    out.decision
+                })
+            });
+        self.set_before_tool_call(Some(closure))
+    }
+
+    /// Register an object-safe [`AfterToolCall`] as the after-tool-call hook for the next run.
+    ///
+    /// Delegates to [`Self::set_after_tool_call`]; returns [`AgentError::Busy`] while a run is active.
+    pub fn set_after_tool_call_object(
+        &self,
+        hook: Arc<dyn AfterToolCall>,
+    ) -> Result<(), AgentError> {
+        let closure: AfterToolCallHook =
+            Arc::new(move |ctx: AfterToolCallContext, cancel: CancellationToken| {
+                let hook = hook.clone();
+                Box::pin(async move { hook.after(ctx, cancel).await })
+            });
+        self.set_after_tool_call(Some(closure))
+    }
+
+    /// Register an object-safe [`TryBeforeToolCall`] as the fallible before-tool-call hook.
+    ///
+    /// Same borrow bridge as [`Self::set_before_tool_call_object`]: on `Ok`, any returned `args` are
+    /// written back and the `decision` is returned; `Err` is propagated (skips execution and becomes
+    /// the call's in-band error result). Delegates to [`Self::set_try_before_tool_call`]; returns
+    /// [`AgentError::Busy`] while a run is active.
+    pub fn set_try_before_tool_call_object(
+        &self,
+        hook: Arc<dyn TryBeforeToolCall>,
+    ) -> Result<(), AgentError> {
+        let closure: TryBeforeToolCallHook =
+            Arc::new(move |ctx: &mut BeforeToolCallContext, cancel: CancellationToken| {
+                let hook = hook.clone();
+                let owned = ctx.clone();
+                Box::pin(async move {
+                    let out = hook.before(owned, cancel).await?;
+                    if let Some(args) = out.args {
+                        ctx.args = args;
+                    }
+                    Ok(out.decision)
+                })
+            });
+        self.set_try_before_tool_call(Some(closure))
+    }
+
+    /// Register an object-safe [`TryAfterToolCall`] as the fallible after-tool-call hook.
+    ///
+    /// Delegates to [`Self::set_try_after_tool_call`]; returns [`AgentError::Busy`] while a run is
+    /// active.
+    pub fn set_try_after_tool_call_object(
+        &self,
+        hook: Arc<dyn TryAfterToolCall>,
+    ) -> Result<(), AgentError> {
+        let closure: TryAfterToolCallHook =
+            Arc::new(move |ctx: AfterToolCallContext, cancel: CancellationToken| {
+                let hook = hook.clone();
+                Box::pin(async move { hook.after(ctx, cancel).await })
+            });
+        self.set_try_after_tool_call(Some(closure))
+    }
+
+    /// Register an object-safe [`ShouldStopAfterTurn`] as the graceful-stop predicate.
+    ///
+    /// Delegates to [`Self::set_should_stop_after_turn`]; returns [`AgentError::Busy`] while a run is
+    /// active.
+    pub fn set_should_stop_after_turn_object(
+        &self,
+        hook: Arc<dyn ShouldStopAfterTurn>,
+    ) -> Result<(), AgentError> {
+        let closure: AgentShouldStopAfterTurnHook =
+            Arc::new(move |ctx: ShouldStopAfterTurnContext, cancel: CancellationToken| {
+                let hook = hook.clone();
+                Box::pin(async move { hook.should_stop(ctx, cancel).await })
+            });
+        self.set_should_stop_after_turn(Some(closure))
+    }
+
+    /// Register an object-safe [`PrepareNextTurn`] as the context-aware next-turn hook.
+    ///
+    /// Delegates to [`Self::set_prepare_next_turn_with_context`]; returns [`AgentError::Busy`] while a
+    /// run is active.
+    pub fn set_prepare_next_turn_object(
+        &self,
+        hook: Arc<dyn PrepareNextTurn>,
+    ) -> Result<(), AgentError> {
+        let closure: AgentPrepareNextTurnWithContextHook =
+            Arc::new(move |ctx: PrepareNextTurnContext, cancel: CancellationToken| {
+                let hook = hook.clone();
+                Box::pin(async move { hook.prepare(ctx, cancel).await })
+            });
+        self.set_prepare_next_turn_with_context(Some(closure))
+    }
+
+    /// Install (or, with `None`, clear) an object-safe [`QueueSource`] as the steering message
+    /// source for the next run.
+    ///
+    /// Adapts the trait into the internal [`QueueMessagesHook`] the loop consumes and stores it in
+    /// the runtime config (read fresh at each run), so an idle replacement takes effect on the next
+    /// run; returns [`AgentError::Busy`] while a run is active. When set, the loop polls this source
+    /// for the steering channel **instead of** the built-in queue that [`Self::steer`] feeds — see
+    /// [`AgentConfig::with_steering_source_object`] for the full semantics. Clearing restores the
+    /// built-in [`Self::steer`] queue.
+    pub fn set_steering_source_object(
+        &self,
+        source: Option<Arc<dyn QueueSource>>,
+    ) -> Result<(), AgentError> {
+        let hook = source.map(queue_source_to_hook);
+        self.update_runtime_config(move |config| config.steering_source = hook)
+    }
+
+    /// Install (or, with `None`, clear) an object-safe [`QueueSource`] as the follow-up message
+    /// source for the next run.
+    ///
+    /// Behaves like [`Self::set_steering_source_object`] for the follow-up channel (polled
+    /// **instead of** the built-in queue that [`Self::follow_up`] feeds); returns
+    /// [`AgentError::Busy`] while a run is active. See [`AgentConfig::with_follow_up_source_object`].
+    pub fn set_follow_up_source_object(
+        &self,
+        source: Option<Arc<dyn QueueSource>>,
+    ) -> Result<(), AgentError> {
+        let hook = source.map(queue_source_to_hook);
+        self.update_runtime_config(move |config| config.follow_up_source = hook)
     }
 
     /// Replace or clear the pre-send payload hook for the next run.
@@ -1498,35 +1740,49 @@ impl Agent {
             None
         };
 
-        let steering_inner = self.inner.clone();
-        let skip_initial_poll = Arc::new(AtomicBool::new(skip_initial_steering_poll));
-        let get_steering_messages: crate::QueueMessagesHook = Arc::new(move || {
-            let steering_inner = steering_inner.clone();
-            let skip_initial_poll = skip_initial_poll.clone();
-            Box::pin(async move {
-                if skip_initial_poll.swap(false, Ordering::AcqRel) {
-                    Vec::new()
-                } else {
-                    steering_inner
-                        .steering
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .drain()
-                }
-            })
-        });
+        // A host-installed steering source replaces the built-in queue drain for this run; otherwise
+        // the loop polls the internal steering queue fed by `steer()`, honoring the continuation
+        // path's initial-poll skip.
+        let get_steering_messages: crate::QueueMessagesHook = match runtime.steering_source {
+            Some(source) => source,
+            None => {
+                let steering_inner = self.inner.clone();
+                let skip_initial_poll = Arc::new(AtomicBool::new(skip_initial_steering_poll));
+                Arc::new(move || {
+                    let steering_inner = steering_inner.clone();
+                    let skip_initial_poll = skip_initial_poll.clone();
+                    Box::pin(async move {
+                        if skip_initial_poll.swap(false, Ordering::AcqRel) {
+                            Vec::new()
+                        } else {
+                            steering_inner
+                                .steering
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .drain()
+                        }
+                    })
+                })
+            }
+        };
 
-        let follow_up_inner = self.inner.clone();
-        let get_follow_up_messages: crate::QueueMessagesHook = Arc::new(move || {
-            let follow_up_inner = follow_up_inner.clone();
-            Box::pin(async move {
-                follow_up_inner
-                    .follow_up
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .drain()
-            })
-        });
+        // A host-installed follow-up source likewise replaces the built-in queue drain for this run.
+        let get_follow_up_messages: crate::QueueMessagesHook = match runtime.follow_up_source {
+            Some(source) => source,
+            None => {
+                let follow_up_inner = self.inner.clone();
+                Arc::new(move || {
+                    let follow_up_inner = follow_up_inner.clone();
+                    Box::pin(async move {
+                        follow_up_inner
+                            .follow_up
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .drain()
+                    })
+                })
+            }
+        };
 
         AgentLoopConfig {
             model: state.model.clone(),

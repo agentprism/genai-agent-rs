@@ -20,8 +20,10 @@ use crate::{
     AgentContext, AgentMessage, AgentToolCall, AgentToolResult, AgentUsage, AssistantMessage,
     ThinkingLevel, ToolHookError, ToolResultContent, ToolResultMessage,
 };
+use async_trait::async_trait;
 use futures::future::BoxFuture;
 use genai::ModelSpec;
+use genai::chat::ChatMessage;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -264,3 +266,149 @@ pub type AgentPrepareNextTurnWithContextHook = Arc<
         + Send
         + Sync,
 >;
+
+// ---------------------------------------------------------------------------
+// Object-safe trait mirrors (Layer A1) — foreign-friendly hook surface.
+// ---------------------------------------------------------------------------
+//
+// Each `Arc<dyn Fn…>` hook alias above has an object-safe `#[async_trait]` trait counterpart here.
+// These traits carry no foreign-hostile constructs: no closures, no borrowed callback arguments,
+// and no higher-ranked lifetimes. A host (Swift/Kotlin via UniFFI, or a plain Rust struct) can
+// implement the trait; the agent adapts `Arc<dyn Trait>` back into the existing closure alias and
+// registers it through the same `Busy`-guarded setter the Rust-native closure form uses (see the
+// `set_*_object` methods on [`crate::Agent`]). The closure aliases remain the primary Rust API;
+// these traits are strictly additive.
+
+/// Owned result of a [`BeforeToolCall`] (or [`TryBeforeToolCall`]) trait invocation.
+///
+/// The closure-form [`BeforeToolCallHook`] mutates [`BeforeToolCallContext::args`] in place across a
+/// borrowed `&mut` context. A trait callback cannot hold that mutable borrow across the boundary, so
+/// the trait mirror takes an **owned** context and returns this **owned** outcome; the adapter writes
+/// `args` back into the loop's borrowed context (owned-in / owned-out equivalent of the in-place
+/// mutation) and then returns `decision`.
+#[derive(Debug, Clone, Default)]
+pub struct BeforeToolCallOutcome {
+    /// Rewritten tool arguments to execute with. `None` leaves the prepared args unchanged.
+    pub args: Option<Value>,
+    /// Block/allow decision, identical to the closure form's return.
+    pub decision: Option<BeforeToolCallResult>,
+}
+
+/// Object-safe mirror of [`TransformContextHook`].
+///
+/// Register with [`crate::Agent::set_transform_context_object`].
+#[async_trait]
+pub trait TransformContext: Send + Sync {
+    /// Transform the transcript for a single provider request. See [`TransformContextHook`].
+    async fn transform(
+        &self,
+        messages: Vec<AgentMessage>,
+        cancel: CancellationToken,
+    ) -> Vec<AgentMessage>;
+}
+
+/// Object-safe mirror of the legacy infallible [`BeforeToolCallHook`].
+///
+/// Takes an owned [`BeforeToolCallContext`] and returns an owned [`BeforeToolCallOutcome`]; the
+/// adapter writes any returned `args` back into the loop's borrowed context before returning the
+/// `decision` (the `&mut` borrow bridge). Register with
+/// [`crate::Agent::set_before_tool_call_object`].
+#[async_trait]
+pub trait BeforeToolCall: Send + Sync {
+    /// Inspect the prepared call; optionally rewrite `args` and/or return a block/allow decision.
+    async fn before(
+        &self,
+        ctx: BeforeToolCallContext,
+        cancel: CancellationToken,
+    ) -> BeforeToolCallOutcome;
+}
+
+/// Object-safe mirror of the legacy infallible [`AfterToolCallHook`].
+///
+/// Register with [`crate::Agent::set_after_tool_call_object`].
+#[async_trait]
+pub trait AfterToolCall: Send + Sync {
+    /// Optionally override the executed result. `None` preserves it unchanged.
+    async fn after(
+        &self,
+        ctx: AfterToolCallContext,
+        cancel: CancellationToken,
+    ) -> Option<AfterToolCallResult>;
+}
+
+/// Object-safe mirror of the fallible [`TryBeforeToolCallHook`].
+///
+/// Like [`BeforeToolCall`], but `Err` skips execution and becomes the call's in-band error tool
+/// result. On `Ok`, the adapter writes any returned `args` back into the borrowed context and returns
+/// the `decision`. Register with [`crate::Agent::set_try_before_tool_call_object`].
+#[async_trait]
+pub trait TryBeforeToolCall: Send + Sync {
+    /// Fallible pre-execution inspection; `Err` becomes the call's in-band error tool result.
+    async fn before(
+        &self,
+        ctx: BeforeToolCallContext,
+        cancel: CancellationToken,
+    ) -> Result<BeforeToolCallOutcome, ToolHookError>;
+}
+
+/// Object-safe mirror of the fallible [`TryAfterToolCallHook`].
+///
+/// Register with [`crate::Agent::set_try_after_tool_call_object`].
+#[async_trait]
+pub trait TryAfterToolCall: Send + Sync {
+    /// Fallible post-execution override; `Err` replaces the result with an in-band error result.
+    async fn after(
+        &self,
+        ctx: AfterToolCallContext,
+        cancel: CancellationToken,
+    ) -> Result<Option<AfterToolCallResult>, ToolHookError>;
+}
+
+/// Object-safe mirror of the stateful-agent [`AgentShouldStopAfterTurnHook`].
+///
+/// Register with [`crate::Agent::set_should_stop_after_turn_object`].
+#[async_trait]
+pub trait ShouldStopAfterTurn: Send + Sync {
+    /// Returning `true` gracefully ends the current run after the completed turn.
+    async fn should_stop(
+        &self,
+        ctx: ShouldStopAfterTurnContext,
+        cancel: CancellationToken,
+    ) -> bool;
+}
+
+/// Object-safe mirror of the context-aware [`AgentPrepareNextTurnWithContextHook`].
+///
+/// Register with [`crate::Agent::set_prepare_next_turn_object`].
+#[async_trait]
+pub trait PrepareNextTurn: Send + Sync {
+    /// Return explicit replacements for later turns in the active run; `None` preserves them.
+    async fn prepare(
+        &self,
+        ctx: PrepareNextTurnContext,
+        cancel: CancellationToken,
+    ) -> Option<AgentLoopTurnUpdate>;
+}
+
+/// Object-safe mirror of [`QueueMessagesHook`], the steering/follow-up message source.
+///
+/// An empty vector means no messages are queued at that poll. Register a source with
+/// [`crate::AgentConfig::with_steering_source_object`] or
+/// [`crate::AgentConfig::with_follow_up_source_object`]; see those methods for why the facade exposes
+/// this at construction time rather than as a runtime setter.
+#[async_trait]
+pub trait QueueSource: Send + Sync {
+    /// Poll for messages to inject at this steering or follow-up point.
+    async fn poll(&self) -> Vec<AgentMessage>;
+}
+
+/// Object-safe mirror of [`crate::ConvertToLlm`], the provider-boundary transcript converter.
+///
+/// The method is synchronous (it mirrors the synchronous [`crate::convert_messages_to_llm`] work the
+/// default converter performs); the adapter wraps the returned vector in a ready future to satisfy
+/// the async [`crate::ConvertToLlm`] closure alias. Register with
+/// [`crate::Agent::set_convert_to_llm_object`].
+pub trait MessageConverter: Send + Sync {
+    /// Convert the widened transcript snapshot into provider chat messages.
+    fn convert(&self, messages: &[AgentMessage]) -> Vec<ChatMessage>;
+}

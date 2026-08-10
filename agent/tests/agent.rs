@@ -12,13 +12,13 @@ use rust_genai_agent::testing::{EventRecorder, MockStreamFn, ScriptedStream, fix
 use rust_genai_agent::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentMessage, AgentPrepareNextTurnHook,
     AgentShouldStopAfterTurnHook, AgentState, AgentTool, AgentToolCall, AgentToolResult,
-    AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, BusyContext,
-    CancellationToken, ChatOptions, EventKind, EventSink, FnTool, StopReason, StreamFn,
-    StreamRequest,
-    ThinkingLevel, ToolHookError, ToolResultContent, ToolSpec, TryAfterToolCallHook,
-    TryBeforeToolCallHook, UpdateSink, set_default_stream_fn,
+    AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, BeforeToolCall,
+    BeforeToolCallContext, BeforeToolCallOutcome, BusyContext, CancellationToken, ChatOptions,
+    EventKind, EventSink, FnTool, QueueSource, ShouldStopAfterTurn, ShouldStopAfterTurnContext,
+    StopReason, StreamFn, StreamRequest, ThinkingLevel, ToolHookError, ToolResultContent, ToolSpec,
+    TryAfterToolCallHook, TryBeforeToolCallHook, UpdateSink, set_default_stream_fn,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -1107,5 +1107,168 @@ async fn subscribe_sink_observes_awaited_event_sequence() {
     assert!(
         delivered_assistant_text,
         "sink received the full assistant message payload"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Layer A1: object-safe hook trait mirrors register through the closure setters.
+// ---------------------------------------------------------------------------
+
+/// Rewrites the prepared tool arguments via the owned-in/owned-out trait form. Returning
+/// `args: Some(..)` exercises the `&mut` borrow bridge: the adapter must write these back into the
+/// loop's borrowed context so the tool executes with the rewritten value.
+struct RewriteArgsHook;
+
+#[async_trait]
+impl BeforeToolCall for RewriteArgsHook {
+    async fn before(
+        &self,
+        ctx: BeforeToolCallContext,
+        _cancel: CancellationToken,
+    ) -> BeforeToolCallOutcome {
+        // Prove the owned context crossed the boundary intact before rewriting.
+        assert_eq!(ctx.args, json!({ "value": "original" }));
+        BeforeToolCallOutcome {
+            args: Some(json!({ "value": "rewritten" })),
+            decision: None,
+        }
+    }
+}
+
+// Registers a `BeforeToolCall` trait object via `set_before_tool_call_object` and asserts the tool
+// executed with the REWRITTEN args — the load-bearing proof that the borrow bridge writes back.
+#[tokio::test]
+async fn before_tool_call_object_rewrites_args_via_borrow_bridge() {
+    let received = Arc::new(Mutex::new(None::<Value>));
+    let received_by_tool = received.clone();
+    let tool: Arc<dyn AgentTool> = Arc::new(FnTool::from_value_fn(
+        ToolSpec::new(
+            "echo",
+            "echo tool",
+            json!({ "type": "object", "properties": { "value": {} } }),
+        ),
+        move |args| {
+            let received = received_by_tool.clone();
+            async move {
+                *received.lock().unwrap() = Some(args.clone());
+                Ok(AgentToolResult::text("echoed"))
+            }
+        },
+    ));
+    let stream_fn = Arc::new(MockStreamFn::from_streams(vec![
+        script::tool_call_turn(vec![AgentToolCall::new(
+            "tool-1",
+            "echo",
+            json!({ "value": "original" }),
+        )]),
+        script::text_response("done"),
+    ]));
+    let mut state = AgentState::default();
+    state.tools = vec![tool];
+    let agent = Agent::new(
+        AgentConfig::default()
+            .with_initial_state(state)
+            .with_stream_fn(stream_fn.clone()),
+    );
+    agent
+        .set_before_tool_call_object(Arc::new(RewriteArgsHook))
+        .unwrap();
+
+    agent.prompt("start").await.unwrap();
+
+    assert_eq!(
+        received.lock().unwrap().clone(),
+        Some(json!({ "value": "rewritten" })),
+        "the tool executed with the trait hook's rewritten args (borrow bridge wrote them back)"
+    );
+    assert_eq!(stream_fn.call_count(), 2, "the run continued after the tool call");
+}
+
+/// A non-tool hook that always ends the run after the current turn.
+struct AlwaysStop;
+
+#[async_trait]
+impl ShouldStopAfterTurn for AlwaysStop {
+    async fn should_stop(
+        &self,
+        _ctx: ShouldStopAfterTurnContext,
+        _cancel: CancellationToken,
+    ) -> bool {
+        true
+    }
+}
+
+// Registers a `ShouldStopAfterTurn` trait object via `set_should_stop_after_turn_object` and asserts
+// it takes effect: the run stops after the first (tool-call) turn, before the second stream.
+#[tokio::test]
+async fn should_stop_after_turn_object_ends_the_run_after_one_turn() {
+    let noop: Arc<dyn AgentTool> = Arc::new(FnTool::from_value_fn(
+        empty_tool_spec("noop"),
+        |_args| async { Ok(AgentToolResult::text("tool complete")) },
+    ));
+    let stream_fn = Arc::new(MockStreamFn::from_streams(vec![
+        script::tool_call_turn(vec![AgentToolCall::new("tool-1", "noop", json!({}))]),
+        script::text_response("should not run"),
+    ]));
+    let mut state = AgentState::default();
+    state.tools = vec![noop];
+    let agent = Agent::new(
+        AgentConfig::default()
+            .with_initial_state(state)
+            .with_stream_fn(stream_fn.clone()),
+    );
+    agent
+        .set_should_stop_after_turn_object(Arc::new(AlwaysStop))
+        .unwrap();
+
+    agent.prompt("start").await.unwrap();
+
+    assert_eq!(
+        stream_fn.call_count(),
+        1,
+        "the trait stop predicate ended the run after the first turn, before the second stream"
+    );
+}
+
+/// A follow-up source that yields its queued messages exactly once, then reports empty.
+struct OneShotFollowUp {
+    remaining: Mutex<Vec<AgentMessage>>,
+}
+
+#[async_trait]
+impl QueueSource for OneShotFollowUp {
+    async fn poll(&self) -> Vec<AgentMessage> {
+        std::mem::take(&mut *self.remaining.lock().unwrap())
+    }
+}
+
+// Registers a `QueueSource` trait object as the follow-up source via `set_follow_up_source_object`
+// and asserts it drives a continuation turn (the loop restarts with the injected message).
+#[tokio::test]
+async fn follow_up_source_object_drives_a_continuation_turn() {
+    let stream_fn = Arc::new(MockStreamFn::from_streams(vec![
+        script::text_response("first"),
+        script::text_response("second"),
+    ]));
+    let agent = Agent::new(AgentConfig::default().with_stream_fn(stream_fn.clone()));
+    let source = Arc::new(OneShotFollowUp {
+        remaining: Mutex::new(vec![AgentMessage::user("continue please")]),
+    });
+    agent.set_follow_up_source_object(Some(source)).unwrap();
+
+    agent.prompt("start").await.unwrap();
+
+    assert_eq!(
+        stream_fn.call_count(),
+        2,
+        "the follow-up source injected a message and the loop ran a second turn"
+    );
+    assert!(
+        agent
+            .state()
+            .messages
+            .iter()
+            .any(|message| message_has_user_text(message, "continue please")),
+        "the injected follow-up message entered the committed transcript"
     );
 }
