@@ -1,0 +1,37 @@
+# Fresh-consumer fixture for DIST-01 (scripts/check-distribution.sh).
+#
+# This manifest is the exact shape an interim consumer must use while the fork-only `genai` APIs
+# remain unpublished: depend on the packaged `rust-genai-agent` archive by path, declare the exact
+# fork `genai` version as a registry requirement, and satisfy that requirement with a
+# `[patch.crates-io]` entry pointing at the extracted `genai` crate archive (the exact local
+# archive equivalent of the pinned fork commit — never a sibling source path, never a range).
+#
+# The `../vendor/...` layout is produced by scripts/check-distribution.sh, which extracts
+# `cargo package` archives for both crates into a temporary `vendor/` directory next to the
+# copied consumer project. The versioned directory names are part of the release gate: the script
+# fails if they drift from the manifests it pins.
+[package]
+name = "fresh-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+rust-genai-agent = { path = "../vendor/rust-genai-agent-0.2.0" }
+# The requirement is a tight window whose floor is the last published crates.io beta: cargo's
+# [patch] mechanics require the requirement to match at least one published registry version. The
+# actual code always comes from the patched fork archive below (its version
+# 0.7.0-beta.19.1-agentprism is the only in-window candidate above the floor, and the <0.7.0-beta.20
+# bound keeps any future upstream pre-release from outranking the fork patch).
+genai = ">=0.7.0-beta.18, <0.7.0-beta.20"
+futures = "0.3"
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util"] }
+tokio-util = { version = "0.7" }
+
+# The whole point of the interim strategy: the exact fork version of `genai` (which carries
+# request-level `ExecOptions`, `ToolResponse::parts`, and streaming HTTP error headers) is not on
+# crates.io, so the requirement above is satisfied by the exact local archive equivalent of the
+# pinned fork commit.
+[patch.crates-io]
+genai = { path = "../vendor/genai-0.7.0-beta.19.1-agentprism" }

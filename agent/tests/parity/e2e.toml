@@ -1,0 +1,72 @@
+# Port of pi-agent's faux-provider end-to-end matrix.
+# Each entry maps one concrete Vitest case to a passing Rust parity test.
+
+[[case]]
+source_file = "pi/packages/agent/test/e2e.test.ts"
+source_name = "handles a basic text prompt"
+rust_test = "tests/e2e_scripted.rs::handles_a_basic_text_prompt"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/e2e.test.ts"
+source_name = "executes tools and tracks pending tool calls"
+rust_test = "tests/e2e_scripted.rs::executes_tools_and_tracks_pending_tool_calls"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/e2e.test.ts"
+source_name = "handles abort during streaming"
+rust_test = "tests/e2e_scripted.rs::handles_abort_during_streaming"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/e2e.test.ts"
+source_name = "emits lifecycle updates while streaming"
+rust_test = "tests/e2e_scripted.rs::emits_lifecycle_updates_while_streaming"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/e2e.test.ts"
+source_name = "maintains context across multiple turns"
+rust_test = "tests/e2e_scripted.rs::maintains_context_across_multiple_turns"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/e2e.test.ts"
+source_name = "preserves thinking content blocks"
+rust_test = "tests/e2e_scripted.rs::preserves_thinking_content_blocks"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/e2e.test.ts"
+source_name = "throws when no messages in context"
+rust_test = "tests/e2e_scripted.rs::continue_throws_when_no_messages_in_context"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/e2e.test.ts"
+source_name = "throws when last message is assistant"
+rust_test = "tests/e2e_scripted.rs::continue_throws_when_last_message_is_assistant"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/e2e.test.ts"
+source_name = "continues and gets a response when last message is user"
+rust_test = "tests/e2e_scripted.rs::continues_and_gets_a_response_when_last_message_is_user"
+milestone = "M4"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/e2e.test.ts"
+source_name = "continues and processes tool results"
+rust_test = "tests/e2e_scripted.rs::continues_and_processes_tool_results"
+milestone = "M4"
+status = "green"

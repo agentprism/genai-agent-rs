@@ -1,0 +1,163 @@
+# Port of all concrete `it(...)` cases in pi/packages/agent/test/agent-loop.test.ts.
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "uses the configured default when a legacy caller omits streamFn"
+rust_test = "tests/agent_loop.rs::uses_configured_default_when_stream_fn_is_none"
+milestone = "M2"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should emit events with AgentMessage types"
+rust_test = "tests/agent_loop.rs::emits_events_with_agent_message_types"
+milestone = "M2"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should handle custom message types via convertToLlm"
+rust_test = "tests/agent_loop.rs::handles_custom_message_types_via_convert_to_llm"
+milestone = "M2"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should apply transformContext before convertToLlm"
+rust_test = "tests/agent_loop.rs::applies_transform_context_before_convert_to_llm"
+milestone = "M2"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should handle tool calls and results"
+rust_test = "tests/agent_loop.rs::handles_tool_calls_and_results"
+milestone = "M3"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should not execute tool calls from a length-truncated assistant message"
+rust_test = "tests/agent_loop.rs::does_not_execute_tool_calls_from_length_truncated_message"
+milestone = "M3"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should execute mutated beforeToolCall args without revalidation"
+rust_test = "tests/agent_loop.rs::executes_mutated_before_tool_call_args_without_revalidation"
+milestone = "M3"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should prepare tool arguments for validation"
+rust_test = "tests/agent_loop.rs::prepares_tool_arguments_for_validation"
+milestone = "M2"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should emit tool_execution_end in completion order but persist tool results in source order"
+rust_test = "tests/agent_loop.rs::tool_execution_end_is_completion_order_results_are_source_order"
+milestone = "M3"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should inject queued messages after all tool calls complete"
+rust_test = "tests/agent_loop.rs::injects_queued_messages_after_all_tool_calls_complete"
+milestone = "M2"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should force sequential execution when a tool has executionMode=sequential even with default parallel config"
+rust_test = "tests/agent_loop.rs::sequential_tool_override_forces_sequential_with_default_parallel_config"
+milestone = "M3"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should force sequential execution when one of multiple tools has executionMode=sequential"
+rust_test = "tests/agent_loop.rs::one_sequential_tool_forces_whole_batch_sequential"
+milestone = "M3"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should allow parallel execution when all tools have executionMode=parallel"
+rust_test = "tests/agent_loop.rs::all_parallel_tools_allow_parallel_execution"
+milestone = "M3"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should use prepareNextTurn snapshot before continuing"
+rust_test = "tests/agent_loop.rs::uses_prepare_next_turn_snapshot_before_continuing"
+milestone = "M2"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should stop after the current turn when shouldStopAfterTurn returns true"
+rust_test = "tests/agent_loop.rs::stops_after_current_turn_when_should_stop_after_turn_is_true"
+milestone = "M2"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should stop after a tool batch when every tool result sets terminate=true"
+rust_test = "tests/agent_loop.rs::stops_after_tool_batch_when_every_result_terminates"
+milestone = "M3"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should stop after a blocked tool call when beforeToolCall sets terminate=true"
+rust_test = "tests/agent_loop.rs::stops_after_blocked_call_when_before_hook_sets_terminate"
+milestone = "post-M6"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should continue after a mixed batch with one terminating blocked call"
+rust_test = "tests/agent_loop.rs::continues_after_mixed_batch_with_one_terminating_blocked_call"
+milestone = "post-M6"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should continue after parallel tool calls when not all tool results terminate"
+rust_test = "tests/agent_loop.rs::continues_after_parallel_calls_when_not_all_results_terminate"
+milestone = "M3"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should allow afterToolCall to mark a tool batch as terminating"
+rust_test = "tests/agent_loop.rs::after_tool_call_can_mark_batch_as_terminating"
+milestone = "M3"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should throw when context has no messages"
+rust_test = "tests/agent_loop.rs::continue_errors_when_context_has_no_messages"
+milestone = "M2"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should continue from existing context without emitting user message events"
+rust_test = "tests/agent_loop.rs::continues_existing_context_without_user_message_events"
+milestone = "M2"
+status = "green"
+
+[[case]]
+source_file = "pi/packages/agent/test/agent-loop.test.ts"
+source_name = "should allow custom message types as last message (caller responsibility)"
+rust_test = "tests/agent_loop.rs::allows_custom_message_as_last_message_for_continuation"
+milestone = "M2"
+status = "green"
+
