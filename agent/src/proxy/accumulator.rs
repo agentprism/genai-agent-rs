@@ -583,17 +583,13 @@ impl ProxyAccumulator {
 
 fn agent_usage(usage: ProxyUsage) -> AgentUsage {
     // The proxy wire carries no 1h-retention split, reasoning breakdown, or monetary cost, so
-    // those extended fields stay absent.
-    AgentUsage {
-        input_tokens: usage.input,
-        output_tokens: usage.output,
-        cache_read_tokens: usage.cache_read,
-        cache_write_tokens: usage.cache_write,
-        cache_write_1h_tokens: None,
-        reasoning_tokens: None,
-        total_tokens: usage.total_tokens,
-        cost: None,
-    }
+    // those extended fields stay absent. `AgentUsage` moved into the `genai` fork crate and is
+    // `#[non_exhaustive]`, so it is built through its public constructor/builders rather than a
+    // struct literal (which is not permitted across the crate boundary).
+    AgentUsage::new(usage.input, usage.output)
+        .with_cache_read_tokens(usage.cache_read)
+        .with_cache_write_tokens(usage.cache_write)
+        .with_total_tokens(usage.total_tokens)
 }
 
 fn proxy_event_name(event: &ProxyAssistantMessageEvent) -> &'static str {

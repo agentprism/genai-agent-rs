@@ -21,7 +21,7 @@ use crate::{
     ThinkingLevel, ToolHookError, ToolResultContent, ToolResultMessage,
 };
 use futures::future::BoxFuture;
-use genai::{ModelIden, ModelSpec};
+use genai::ModelSpec;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -231,70 +231,11 @@ pub type PrepareNextTurnHook = Arc<
 /// An empty vector means no messages are queued at that poll.
 pub type QueueMessagesHook = Arc<dyn Fn() -> BoxFuture<'static, Vec<AgentMessage>> + Send + Sync>;
 
-/// HTTP response head observed by an [`OnResponseHook`], mirroring pi's
-/// `onResponse({status, headers}, model)` payload.
-///
-/// The struct carries only the response head — status code and header pairs — never the body,
-/// so observing a response cannot leak or consume body content. Header names follow the
-/// producing HTTP client's normalization (lowercase for reqwest-backed stream functions), a
-/// repeated header contributes one pair per value, and non-UTF-8 header values are lossily
-/// converted by [`crate::header_pairs`]. Custom [`crate::StreamFn`] implementations construct
-/// this value themselves when invoking the hook.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct StreamResponseInfo {
-    /// HTTP status code of the provider response (also set for 4xx/5xx responses).
-    pub status: u16,
-    /// Response header `(name, value)` pairs in iteration order.
-    pub headers: Vec<(String, String)>,
-}
-
-impl StreamResponseInfo {
-    /// Construct a response head from a status code and owned header pairs.
-    pub fn new(status: u16, headers: Vec<(String, String)>) -> Self {
-        Self { status, headers }
-    }
-
-    /// Return the first value of a response header, comparing names case-insensitively.
-    pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(header, _)| header.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
-    }
-}
-
-/// Pre-send provider payload hook, mirroring pi's `onPayload(payload, model)`.
-///
-/// The hook receives the serialized provider payload by value plus the target [`ModelIden`], and
-/// may inspect or replace it: returning `Some(value)` replaces the payload sent over the wire,
-/// returning `None` keeps it unchanged. Like the other hooks it is infallible — a decision is
-/// encoded in the return value and the hook must not panic.
-///
-/// The production [`crate::GenaiStreamFn`] honors the per-request
-/// [`crate::StreamRequest::on_payload`] hook as a replacement of its construction-time hook (see
-/// [`crate::GenaiStreamFn::with_exec_hooks`]): when the request carries one, the
-/// construction-time hook does not fire for that execution — the two never compose, and exactly
-/// one hook invocation happens per physical attempt, including retries. The `proxy`-feature
-/// `ProxyStreamFn` honors the per-request hook directly.
-pub type OnPayloadHook =
-    Arc<dyn Fn(Value, ModelIden) -> BoxFuture<'static, Option<Value>> + Send + Sync>;
-
-/// HTTP response observation hook, mirroring pi's `onResponse({status, headers}, model)`.
-///
-/// The hook receives the response head ([`StreamResponseInfo`]) plus the target [`ModelIden`] as
-/// soon as the HTTP response arrives — before its body/stream is consumed, including on 4xx/5xx
-/// responses. It is purely observational and infallible: it returns nothing and must not panic.
-///
-/// The production [`crate::GenaiStreamFn`] honors the per-request
-/// [`crate::StreamRequest::on_response`] hook as a replacement of its construction-time hook (see
-/// [`crate::GenaiStreamFn::with_exec_hooks`]): when the request carries one, the
-/// construction-time hook does not fire for that execution — the two never compose, and exactly
-/// one hook invocation happens per physical attempt, including retries and HTTP-error responses.
-/// On that path the HTTP send is lazy, so the hook fires during stream consumption. The
-/// `proxy`-feature `ProxyStreamFn` honors the per-request hook directly and fires it before the
-/// SSE body (or error body) is read.
-pub type OnResponseHook =
-    Arc<dyn Fn(StreamResponseInfo, ModelIden) -> BoxFuture<'static, ()> + Send + Sync>;
+// `StreamResponseInfo`, `OnPayloadHook`, and `OnResponseHook` were relocated into the `genai` fork
+// crate alongside the stream-function contract that consumes them. Re-exported here so this
+// module's public paths (`crate::hooks::{StreamResponseInfo, OnPayloadHook, OnResponseHook}`) and
+// their crate-root re-exports stay unchanged.
+pub use genai::stream_fn::{OnPayloadHook, OnResponseHook, StreamResponseInfo};
 
 /// Stateful-agent post-turn predicate.
 ///

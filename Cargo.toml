@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = ["genai", "agent"]
+
+# genai-agent-rs — a two-crate workspace: our owned `genai` fork plus the first-party agent
+# crate built on it:
+#
+#   genai   — genai-agentprism: vendored fork of jeremychone/rust-genai (git subtree; pull-only
+#             upstream sync via `git subtree pull --prefix=genai upstream main`). We own the fork's
+#             changes. This is the pi-ai equivalent: besides the multi-provider client it also
+#             carries the folded, feature-gated `auth` (OAuth login / token cache / refresh — the
+#             ChatGPT Codex flow, mirroring pi-ai's `auth/`) and `codex` (the ChatGPT-plan Codex
+#             backend StreamFn, mirroring pi-ai's `api/openai-codex-responses.ts`) modules. Both
+#             are off by default; enable with the `auth` / `loopback` / `codex` /
+#             `codex-auth-resolver` features. (The former standalone `auth/` and `codex/` crates
+#             were folded into these modules.)
+#   agent   — rust-genai-agent: provider-neutral streaming agent loops and tools (pi-agent-core).
+#
+# The agent crate depends on `genai` via a path to the vendored member, so the whole workspace
+# builds against the fork with no registry, git, or [patch] indirection. It stays unpublishable
+# (`publish = false`) until the fork-only APIs land upstream and ship on crates.io.

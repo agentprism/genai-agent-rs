@@ -6,32 +6,25 @@ rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 description = "Provider-neutral streaming agent loops and tools for rust-genai"
 readme = "README.md"
-repository = "https://github.com/agentprism/rust-genai-agent"
+repository = "https://github.com/agentprism/genai-agent-rs"
 keywords = ["ai", "agents", "llm", "generative-ai", "rust-genai"]
 categories = ["asynchronous", "api-bindings"]
-# DIST-01: this crate depends on fork-only `genai` APIs that are not on any registry, so it must
-# not be published until a registry-only fresh consumer can resolve them. Distribution is via
-# locally packaged crate archives plus an exact pinned patch — see scripts/check-distribution.sh
-# (the release gate also fails if this flag is removed or flipped).
-publish = false
+# Publishable to crates.io. It depends on the fork-only APIs of `genai-agentprism` (its exact
+# version is pinned below), so `genai-agentprism` must be published FIRST; cargo enforces that
+# order (publishing this crate fails until the pinned genai-agentprism version is on the registry).
 
 [features]
 default = []
-testing = []
+# `stream_fn::stream_error_model` moved into the `genai` fork crate behind its own `testing`
+# feature; forward to it so this crate's testing helpers (which call it) keep compiling.
+testing = ["genai/testing"]
 proxy = ["dep:eventsource-stream", "tokio/net", "tokio/io-util"]
 
 [dependencies]
-# Fork pin window. The crate compiles against fork-only genai APIs from the pinned fork commit
-# (fork version 0.7.0-beta.19.1-agentprism), which no registry serves. Cargo's [patch] mechanics
-# require the dependency requirement to match at least one published registry version, so the
-# requirement is a tight window over the 0.7.0-beta line whose floor is the last published beta;
-# the actual code always comes from the pinned fork — locally via `path` (dual-source form), for
-# packaged consumers via their own [patch.crates-io] entry pointing at the extracted genai
-# archive (the window's upper bound keeps any future upstream pre-release from outranking the
-# fork patch). `cargo package` strips the `path` and re-resolves the window against the registry
-# (floor beta.18), which is exactly why publication must stay disabled. The exact fork version
-# and commit are verified by scripts/check-distribution.sh.
-genai = { version = ">=0.7.0-beta.18, <0.7.0-beta.20", path = "../rust-genai" }
+# The genai-agentprism fork (pi-ai). Dual-source: `path` for local workspace builds, `version`
+# (exact pin — this crate uses fork-only APIs) for the packaged form `cargo publish` uploads, which
+# resolves genai-agentprism from crates.io. The two must be published in lockstep.
+genai = { package = "genai-agentprism", version = "=0.7.0-beta.19.1-agentprism", path = "../genai" }
 async-trait = "0.1"
 eventsource-stream = { version = "0.2.3", optional = true }
 futures = "0.3"

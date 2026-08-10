@@ -152,13 +152,10 @@ impl ToolError {
     }
 }
 
-/// A malformed assistant event stream (for example, one that closes without a terminal event).
-#[derive(Debug, Clone, Error, PartialEq, Eq)]
-pub enum StreamProtocolError {
-    /// The stream closed before publishing a terminal `Done` or `Error` event.
-    #[error("assistant event stream closed without a terminal Done or Error event")]
-    MissingTerminalEvent,
-}
+// `StreamProtocolError` was relocated into the `genai` fork crate alongside the assistant
+// event-stream adapters that produce it. Re-exported here so this module's public path
+// (`crate::error::StreamProtocolError`) and its crate-root re-export stay unchanged.
+pub use genai::assistant_stream::StreamProtocolError;
 
 /// Errors produced while validating tool arguments.
 #[derive(Debug, Error, PartialEq, Eq)]

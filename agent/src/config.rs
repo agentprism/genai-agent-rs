@@ -183,29 +183,10 @@ impl ThinkingBudgets {
     }
 }
 
-/// Preferred provider transport advisory forwarded to the stream function.
-///
-/// This mirrors the TypeScript `Transport` contract (`packages/ai/src/types.ts`). It is purely
-/// advisory: providers that do not support an alternate transport ignore it, and the TS contract
-/// states that ignoring it is compliant. The production [`crate::GenaiStreamFn`] is SSE-only and
-/// therefore ignores this option; custom [`crate::StreamFn`] implementations may honor it.
-///
-/// The serde spellings match the TypeScript union members verbatim (`"sse"`, `"websocket"`,
-/// `"websocket-cached"`, `"auto"`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-#[non_exhaustive]
-pub enum Transport {
-    /// Server-sent events transport.
-    Sse,
-    /// A WebSocket transport.
-    Websocket,
-    /// A cache-aware WebSocket transport.
-    WebsocketCached,
-    /// Let the provider choose its transport.
-    #[default]
-    Auto,
-}
+// `Transport` was relocated into the `genai` fork crate alongside `StreamRequest`, which carries
+// it. Re-exported here so this module's public path (`crate::config::Transport`), the crate-root
+// re-export, and this file's own unqualified `Transport` references stay unchanged.
+pub use genai::stream_fn::Transport;
 
 /// Owned conversation snapshot passed into a low-level loop invocation.
 ///
