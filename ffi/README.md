@@ -16,6 +16,7 @@ SwiftPM package that a SwiftUI app can embed directly.
 | `agent.subscribe(sink:)` / `subscribeJson(sink:)` | typed `AgentEvent`s / serde JSON (wire-format proof) |
 | `agent.setTools(tools:)` / `addTool(tool:)` | host tools via the `AgentTool` callback interface |
 | `agent.setBeforeToolCallHook(hook:)` … | all loop hooks as callback interfaces (`Before/AfterToolCall`, `Try*`, `TransformContext`, `ShouldStopAfterTurn`, `PrepareNextTurn`) |
+| `agent.setSteeringSource(source:)` / `setFollowUpSource(source:)` | `QueueSource` message injection (steering mid-run, follow-up between runs); `nil` clears |
 
 Everything is typed: `AgentSetup` (including `messages` and `chatOptions`),
 the full message/event tree, `ToolSpec`/`ToolCallContext`/`AgentToolResult`,
@@ -25,10 +26,10 @@ Free-form JSON crosses only in `…Json`-suffixed fields (`argsJson`,
 per the §8 naming rule.
 
 **Deliberately out** (additive later, none breaking): host-side `StreamFn`
-(providers go through `GenaiStreamFn`), steering/follow-up `QueueSource`s
-(they register via *consuming* builder methods, which don't fit a shared FFI
-`Agent` — needs a core `set_*` variant), `ConvertToLlm` (hosts keep the
-default), per-tool `executionMode` and the tool `UpdateSink`.
+(providers go through `GenaiStreamFn`), `ConvertToLlm` (hosts keep the
+default), per-tool `executionMode`, and the tool `UpdateSink`. Note: core
+hook setters take a required `Arc` (no clear variant) except the queue
+sources, so hooks can't currently be cleared once set.
 
 ## Semantics (from §8, resolved)
 
@@ -55,8 +56,10 @@ cargo test -p genai-agent-ffi --features testing   # offline e2e (scripted strea
 
 `build_apple.sh` verifies each XCFramework slice (presence, arch, exported
 symbols for crash symbolication, deployment target) and fails loudly on
-drift. Deployment targets (26.5) are aligned across the script's
-`IPHONEOS/MACOSX_DEPLOYMENT_TARGET` and `swiftpm/Package.swift`.
+drift. Deployment targets default to 26.5 and are aligned across the script's
+`IPHONEOS/MACOSX_DEPLOYMENT_TARGET` and `swiftpm/Package.swift` — override
+the env vars for apps with a lower minimum (and lower `platforms:` in the
+manifest to match).
 
 ## App integration (dev)
 

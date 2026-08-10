@@ -309,6 +309,23 @@ impl agent::TryAfterToolCall for TryAfterToolCallAdapter {
 	}
 }
 
+/// A source of queued messages — steering (mid-run) or follow-up (post-run).
+/// Polled by the loop; return an empty vec when nothing is queued.
+#[uniffi::export(with_foreign)]
+#[async_trait::async_trait]
+pub trait QueueMessageSource: Send + Sync {
+	async fn poll(&self) -> Vec<AgentMessage>;
+}
+
+struct QueueSourceAdapter(Arc<dyn QueueMessageSource>);
+
+#[async_trait::async_trait]
+impl agent::QueueSource for QueueSourceAdapter {
+	async fn poll(&self) -> Vec<agent::AgentMessage> {
+		self.0.poll().await.into_iter().map(Into::into).collect()
+	}
+}
+
 /// Decides whether the loop stops after a turn.
 #[uniffi::export(with_foreign)]
 #[async_trait::async_trait]
@@ -407,6 +424,8 @@ impl AgentCancelToken {
 #[derive(uniffi::Object)]
 pub struct Agent {
 	inner: agent::Agent,
+	/// Serializes tool-set read-modify-write (`add_tool`).
+	tools_lock: Mutex<()>,
 }
 
 #[uniffi::export]
@@ -419,6 +438,7 @@ impl Agent {
 	pub fn new(setup: AgentSetup) -> Arc<Self> {
 		Arc::new(Self {
 			inner: agent::AgentBuilder::new(setup.into()).build(),
+			tools_lock: Mutex::new(()),
 		})
 	}
 
@@ -437,6 +457,7 @@ impl Agent {
 		let stream_fn = genai::stream_fn::GenaiStreamFn::new(client);
 		Arc::new(Self {
 			inner: agent::AgentBuilder::new(setup.into()).stream_fn(Arc::new(stream_fn)).build(),
+			tools_lock: Mutex::new(()),
 		})
 	}
 
@@ -509,6 +530,7 @@ impl Agent {
 
 	/// Register one host-implemented tool (keeps existing tools).
 	pub fn add_tool(&self, tool: Arc<dyn AgentTool>) {
+		let _guard = self.tools_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 		let mut tools = self.inner.state().tools.clone();
 		tools.push(Arc::new(ToolAdapter(tool)) as Arc<dyn agent::AgentTool>);
 		self.inner.set_tools(tools);
@@ -562,14 +584,29 @@ impl Agent {
 			.set_prepare_next_turn_object(Arc::new(PrepareNextTurnAdapter(hook)) as Arc<dyn agent::PrepareNextTurn>)
 			.map_err(AgentError::from)
 	}
+
+	/// Set (or clear with `None`) the steering message source (polled mid-run).
+	pub fn set_steering_source(&self, source: Option<Arc<dyn QueueMessageSource>>) -> Result<(), AgentError> {
+		self.inner
+			.set_steering_source_object(source.map(|s| Arc::new(QueueSourceAdapter(s)) as Arc<dyn agent::QueueSource>))
+			.map_err(AgentError::from)
+	}
+
+	/// Set (or clear with `None`) the follow-up message source (polled between runs).
+	pub fn set_follow_up_source(&self, source: Option<Arc<dyn QueueMessageSource>>) -> Result<(), AgentError> {
+		self.inner
+			.set_follow_up_source_object(source.map(|s| Arc::new(QueueSourceAdapter(s)) as Arc<dyn agent::QueueSource>))
+			.map_err(AgentError::from)
+	}
 }
 
 // Not exported over FFI: test-only construction with an injected stream function.
-#[cfg(feature = "testing")]
+#[cfg(all(test, feature = "testing"))]
 impl Agent {
 	pub(crate) fn new_with_stream_fn(setup: AgentSetup, stream_fn: Arc<dyn agent::StreamFn>) -> Arc<Self> {
 		Arc::new(Self {
 			inner: agent::AgentBuilder::new(setup.into()).stream_fn(stream_fn).build(),
+			tools_lock: Mutex::new(()),
 		})
 	}
 }
@@ -762,6 +799,43 @@ mod tests {
 			)
 		});
 		assert!(saw_tool_end, "expected ToolExecutionEnd with the host tool's result");
+	}
+
+	#[tokio::test]
+	async fn steering_source_injects_message_into_run() {
+		let mock = MockStreamFn::from_messages(vec![
+			fixtures::text_msg("first answer"),
+			fixtures::text_msg("answer after steering"),
+		]);
+		let agent = Agent::new_with_stream_fn(test_setup(), Arc::new(mock));
+
+		struct SteerOnce;
+		#[async_trait::async_trait]
+		impl QueueMessageSource for SteerOnce {
+			async fn poll(&self) -> Vec<AgentMessage> {
+				vec![AgentMessage::User(UserMessage {
+					content: vec![UserContent::Text {
+						text: "steer me".to_string(),
+					}],
+					timestamp: 0,
+				})]
+			}
+		}
+
+		agent
+			.set_steering_source(Some(Arc::new(SteerOnce)))
+			.expect("source registration while idle");
+		agent.prompt("start".to_string()).await.unwrap();
+
+		let snapshot = agent.snapshot();
+		let transcript_has = |needle: &str| {
+			snapshot.messages.iter().any(|m| {
+				matches!(m, AgentMessage::User(u) if u.content.iter().any(|c| matches!(c, UserContent::Text { text } if text.contains(needle))))
+					|| matches!(m, AgentMessage::Assistant(a) if a.content.iter().any(|c| matches!(c, AssistantContent::Text { text, .. } if text.contains(needle))))
+			})
+		};
+		assert!(transcript_has("steer me"), "steered message should be in the transcript");
+		assert!(transcript_has("answer after steering"), "loop should continue after steering");
 	}
 
 	#[tokio::test]

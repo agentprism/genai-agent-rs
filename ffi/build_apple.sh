@@ -12,10 +12,11 @@ WORKSPACE_ROOT="$(cd "$ROOT/.." && pwd)"
 SWIFTPM_DIR="$ROOT/swiftpm"
 
 # Minimum OS versions for ALL builds (Rust link + C deps like aws-lc-sys via the
-# cc crate). Kept in lockstep with swiftpm/Package.swift `platforms:`.
-# Misalignment shows up as cryptic undefined-symbol link errors (e.g. __chkstk_darwin).
-export IPHONEOS_DEPLOYMENT_TARGET="26.5"
-export MACOSX_DEPLOYMENT_TARGET="26.5"
+# cc crate). Misalignment shows up as cryptic undefined-symbol link errors
+# (e.g. __chkstk_darwin). Override via the environment for apps with a lower
+# minimum — and lower `platforms:` in swiftpm/Package.swift to match.
+export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-26.5}"
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-26.5}"
 
 if [[ "${1:-}" == "--clean" ]]; then
 	cargo clean

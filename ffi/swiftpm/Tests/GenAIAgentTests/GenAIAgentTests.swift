@@ -55,6 +55,10 @@ final class GenAIAgentTests: XCTestCase {
 		}
 	}
 
+	final class EmptySource: QueueMessageSource, @unchecked Sendable {
+		func poll() async -> [AgentMessage] { [] }
+	}
+
 	func testAgentConstructsFromSetup() {
 		_ = Agent(setup: AgentSetup(model: "gpt-5-mini", systemPrompt: "You are concise"))
 	}
@@ -78,6 +82,8 @@ final class GenAIAgentTests: XCTestCase {
 		agent.setTools(tools: [tool])
 		agent.addTool(tool: tool)
 		try agent.setBeforeToolCallHook(hook: AllowAll())
+		try agent.setSteeringSource(source: EmptySource())
+		try agent.setSteeringSource(source: nil) // clear
 	}
 
 	func testSnapshotAndIdleState() {
