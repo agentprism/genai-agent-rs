@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    # macOS runner: required for the Swift package tests and the Apple-target
+    # builds (Apple Silicon runners match the aarch64 targets).
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      # agent + ffi with all features. Two deliberate choices:
+      # - --all-features: agent/tests/*.rs are `#![cfg(feature = "testing")]`-gated,
+      #   so a default-features run compiles them to nothing and reports false
+      #   green (this exact gap once shipped a regression on this branch).
+      # - not --workspace: genai's TLS features are mutually exclusive BY DESIGN
+      #   (compile_error), and its live-provider tests need API keys, so the
+      #   fork's suite isn't part of this gate.
+      - name: cargo test (agent + ffi, all features)
+        run: cargo test -p rust-genai-agent -p genai-agent-ffi --all-features --locked
+
+      # Builds the XCFramework (all three Apple slices) + verifies artifacts.
+      - name: Build Apple package
+        run: ffi/build_apple.sh
+
+      - name: Swift package tests
+        run: swift test
+        working-directory: ffi/swiftpm
