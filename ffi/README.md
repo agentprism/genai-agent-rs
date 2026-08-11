@@ -4,6 +4,10 @@ UniFFI (Swift) bindings for `rust-genai-agent` — **Layer B** of
 [`docs/embedding.md`](../docs/embedding.md). Ships as an XCFramework +
 SwiftPM package that a SwiftUI app can embed directly.
 
+> **Using the package? Start with [`docs/using-from-swift.md`](../docs/using-from-swift.md)** —
+> integration steps, the event-sink contract, a complete SwiftUI view-model
+> pattern, tools/hooks, and the gotchas. This README is the surface reference.
+
 ## Surface
 
 | Swift | Core |
