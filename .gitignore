@@ -8,3 +8,6 @@ ffi/apple/
 ffi/swiftpm/GenAIAgent.xcframework/
 ffi/swiftpm/Sources/GenAIAgent/genai_agent_ffi.swift
 ffi/swiftpm/.build/
+
+# SwiftPM/Xcode user state
+ffi/swiftpm/.swiftpm/
