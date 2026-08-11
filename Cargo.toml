@@ -1,6 +1,16 @@
 [workspace]
 resolver = "2"
-members = ["genai", "agent"]
+members = ["genai", "agent", "ffi"]
+
+# Release profile for the mobile/FFI artifact (see ffi/): small and symbolicated.
+# `debuginfo` strip keeps symbol tables (production crash reports stay symbolicated;
+# final stripping is the consuming app's link decision). panic=unwind is kept on
+# purpose: UniFFI catches panics at the FFI boundary and surfaces them as errors.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "debuginfo"
 
 # genai-agent-rs — a two-crate workspace: our owned `genai` fork plus the first-party agent
 # crate built on it:

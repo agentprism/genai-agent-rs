@@ -990,9 +990,9 @@ impl Agent {
     /// [`Self::set_transform_context`]; returns [`AgentError::Busy`] while a run is active.
     pub fn set_transform_context_object(
         &self,
-        hook: Arc<dyn TransformContext>,
+        hook: Option<Arc<dyn TransformContext>>,
     ) -> Result<(), AgentError> {
-        self.set_transform_context(Some(transform_context_to_hook(hook)))
+        self.set_transform_context(hook.map(transform_context_to_hook))
     }
 
     /// Register an object-safe [`BeforeToolCall`] as the before-tool-call hook for the next run.
@@ -1004,9 +1004,9 @@ impl Agent {
     /// [`AgentError::Busy`] while a run is active.
     pub fn set_before_tool_call_object(
         &self,
-        hook: Arc<dyn BeforeToolCall>,
+        hook: Option<Arc<dyn BeforeToolCall>>,
     ) -> Result<(), AgentError> {
-        self.set_before_tool_call(Some(before_tool_call_to_hook(hook)))
+        self.set_before_tool_call(hook.map(before_tool_call_to_hook))
     }
 
     /// Register an object-safe [`AfterToolCall`] as the after-tool-call hook for the next run.
@@ -1014,9 +1014,9 @@ impl Agent {
     /// Delegates to [`Self::set_after_tool_call`]; returns [`AgentError::Busy`] while a run is active.
     pub fn set_after_tool_call_object(
         &self,
-        hook: Arc<dyn AfterToolCall>,
+        hook: Option<Arc<dyn AfterToolCall>>,
     ) -> Result<(), AgentError> {
-        self.set_after_tool_call(Some(after_tool_call_to_hook(hook)))
+        self.set_after_tool_call(hook.map(after_tool_call_to_hook))
     }
 
     /// Register an object-safe [`TryBeforeToolCall`] as the fallible before-tool-call hook.
@@ -1027,9 +1027,9 @@ impl Agent {
     /// [`AgentError::Busy`] while a run is active.
     pub fn set_try_before_tool_call_object(
         &self,
-        hook: Arc<dyn TryBeforeToolCall>,
+        hook: Option<Arc<dyn TryBeforeToolCall>>,
     ) -> Result<(), AgentError> {
-        self.set_try_before_tool_call(Some(try_before_tool_call_to_hook(hook)))
+        self.set_try_before_tool_call(hook.map(try_before_tool_call_to_hook))
     }
 
     /// Register an object-safe [`TryAfterToolCall`] as the fallible after-tool-call hook.
@@ -1038,9 +1038,9 @@ impl Agent {
     /// active.
     pub fn set_try_after_tool_call_object(
         &self,
-        hook: Arc<dyn TryAfterToolCall>,
+        hook: Option<Arc<dyn TryAfterToolCall>>,
     ) -> Result<(), AgentError> {
-        self.set_try_after_tool_call(Some(try_after_tool_call_to_hook(hook)))
+        self.set_try_after_tool_call(hook.map(try_after_tool_call_to_hook))
     }
 
     /// Register an object-safe [`ShouldStopAfterTurn`] as the graceful-stop predicate.
@@ -1049,9 +1049,9 @@ impl Agent {
     /// active.
     pub fn set_should_stop_after_turn_object(
         &self,
-        hook: Arc<dyn ShouldStopAfterTurn>,
+        hook: Option<Arc<dyn ShouldStopAfterTurn>>,
     ) -> Result<(), AgentError> {
-        self.set_should_stop_after_turn(Some(should_stop_after_turn_to_hook(hook)))
+        self.set_should_stop_after_turn(hook.map(should_stop_after_turn_to_hook))
     }
 
     /// Register an object-safe [`PrepareNextTurn`] as the context-aware next-turn hook.
@@ -1060,9 +1060,9 @@ impl Agent {
     /// run is active.
     pub fn set_prepare_next_turn_object(
         &self,
-        hook: Arc<dyn PrepareNextTurn>,
+        hook: Option<Arc<dyn PrepareNextTurn>>,
     ) -> Result<(), AgentError> {
-        self.set_prepare_next_turn_with_context(Some(prepare_next_turn_to_hook(hook)))
+        self.set_prepare_next_turn_with_context(hook.map(prepare_next_turn_to_hook))
     }
 
     /// Install (or, with `None`, clear) an object-safe [`QueueSource`] as the steering message

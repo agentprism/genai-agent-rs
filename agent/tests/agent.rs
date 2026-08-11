@@ -1171,7 +1171,7 @@ async fn before_tool_call_object_rewrites_args_via_borrow_bridge() {
             .with_stream_fn(stream_fn.clone()),
     );
     agent
-        .set_before_tool_call_object(Arc::new(RewriteArgsHook))
+        .set_before_tool_call_object(Some(Arc::new(RewriteArgsHook)))
         .unwrap();
 
     agent.prompt("start").await.unwrap();
@@ -1218,7 +1218,7 @@ async fn should_stop_after_turn_object_ends_the_run_after_one_turn() {
             .with_stream_fn(stream_fn.clone()),
     );
     agent
-        .set_should_stop_after_turn_object(Arc::new(AlwaysStop))
+        .set_should_stop_after_turn_object(Some(Arc::new(AlwaysStop)))
         .unwrap();
 
     agent.prompt("start").await.unwrap();
