@@ -26,14 +26,18 @@ jobs:
 
       # genai fork: lib tests + offline integration suites (yakbak replay,
       # auth/codex harnesses). The `tests_p_*` targets hit live providers and
-      # fail keyless with ApiKeyEnvNotFound — excluded by name. NOTE: cargo test
-      # fail-fasts across test targets, so a partial failure can hide untested
-      # targets; this enumeration keeps coverage explicit.
+      # fail keyless with ApiKeyEnvNotFound — excluded by name. Two gotchas kept
+      # explicit: cargo test fail-fasts across test targets (a failing target
+      # hides later ones), and the auth/loopback/codex harnesses are
+      # feature-gated — without --features they compile to empty binaries and
+      # report a silent "0 passed", so the features are enabled here (they are
+      # compatible with the default rustls-tls; only native-tls conflicts).
       - name: cargo test (genai fork, offline suites)
         run: |
           targets=$(ls genai/tests/*.rs | xargs -n1 basename | sed 's/\.rs$//' \
             | grep -v '^tests_p_' | sed 's/^/--test /' | tr '\n' ' ')
-          cargo test -p genai-agentprism --locked --lib $targets
+          cargo test -p genai-agentprism --locked \
+            --features "auth loopback codex codex-auth-resolver" --lib $targets
 
   # Apple-specific work stays on macOS (iOS SDK + Swift toolchain needed).
   apple:
