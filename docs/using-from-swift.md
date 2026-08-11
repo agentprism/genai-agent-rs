@@ -7,6 +7,15 @@ verified against a real SwiftUI app integration — including the mistakes.
 **Contents:** build & integration → creating an agent → events → streaming
 UI pattern → cancellation → tools & hooks → gotchas.
 
+**Design intent:** the package's callback protocols are `AnyObject & Sendable`
+with `async` methods — satisfiable by `final class` types with checked
+`Sendable` conformance. Consumer code should never need `@unchecked Sendable`;
+the only place it appears anywhere in this stack is inside the
+UniFFI-generated object classes, where the Rust side (`Arc`/`Mutex`) enforces
+thread safety across the FFI boundary. If you find yourself reaching for
+`@unchecked` to satisfy the protocols, that's a package bug worth raising,
+not a consumer hack to ship.
+
 ---
 
 ## 1. Build & integrate
@@ -62,14 +71,20 @@ there is deliberately no default model).
 Subscribe once, receive typed events:
 
 ```swift
-final class Forwarder: AgentEventSink, @unchecked Sendable {
-    var handler: (@MainActor (AgentEvent) -> Void)?
-    func emit(event: AgentEvent) async { await handler?(event) }
+// A final class whose only stored property is an immutable MainActor
+// closure: Sendable (required by AgentEventSink) is fully checked —
+// no @unchecked needed in consumer code.
+final class Forwarder: AgentEventSink {
+    let handler: @MainActor (AgentEvent) -> Void
+    init(handler: @escaping @MainActor (AgentEvent) -> Void) { self.handler = handler }
+    func emit(event: AgentEvent) async { await handler(event) }
 }
 
-let forwarder = Forwarder()
-let subscription = agent.subscribe(sink: forwarder)
-forwarder.handler = { [weak self] event in self?.handle(event: event) }
+// Wire the handler with `self` capture AFTER the owning object is fully
+// initialized (see §4 — `@Observable` types need `lazy` + `@ObservationIgnored`).
+let subscription = agent.subscribe(sink: Forwarder { [weak self] event in
+    self?.handle(event: event)
+})
 ```
 
 The semantics (from §8 of the design doc, all verified in practice):
@@ -117,17 +132,22 @@ final class ChatModel {
     private(set) var usageSummary: String?
 
     private let agent: Agent
-    private var subscription: Subscription?
     private var promptTask: Task<Void, Never>?
+
+    /// Lazily subscribed at the end of `init`, so the event closure may
+    /// capture `self` after every stored property is initialized.
+    /// `@ObservationIgnored`: not view state — and @Observable can't
+    /// transform `lazy`.
+    @ObservationIgnored
+    private lazy var subscription: Subscription = agent.subscribe(
+        sink: EventForwarder { [weak self] event in self?.handle(event: event) }
+    )
 
     var isActive: Bool { state == .connecting || state == .streaming }
 
     init(apiKeys: [String: String], model: String) {
         agent = Agent.newWithApiKeys(setup: AgentSetup(model: model), apiKeys: apiKeys)
-        let forwarder = EventForwarder()
-        subscription = agent.subscribe(sink: forwarder)
-        // NOTE: capture self only after all stored properties are initialized.
-        forwarder.handler = { [weak self] event in self?.handle(event: event) }
+        _ = subscription   // start the event stream
     }
 
     isolated deinit { promptTask?.cancel() }   // Swift 6.1+
@@ -180,9 +200,10 @@ final class ChatModel {
     }
 }
 
-private final class EventForwarder: AgentEventSink, @unchecked Sendable {
-    var handler: (@MainActor (AgentEvent) -> Void)?
-    func emit(event: AgentEvent) async { await handler?(event) }
+private final class EventForwarder: AgentEventSink {
+    let handler: @MainActor (AgentEvent) -> Void
+    init(handler: @escaping @MainActor (AgentEvent) -> Void) { self.handler = handler }
+    func emit(event: AgentEvent) async { await handler(event) }
 }
 ```
 
@@ -190,11 +211,15 @@ Why the pieces are shaped this way:
 
 - `withTaskCancellationHandler` bridges Swift task cancellation to the run's
   cancellation token — the Stop button is just `promptTask?.cancel()`.
-- `EventForwarder` is `@unchecked Sendable` because the callback protocol
-  requires `Sendable` and the class is MainActor-isolated (app default), so
-  the one-time `handler` write is race-free. Under Swift 6 language mode a
-  plain `var` on a `Sendable` class is a compile *error* — this is the
-  documented escape hatch.
+- The sink is a `final class` with one immutable MainActor closure, so
+  `Sendable` (required by `AgentEventSink`) is fully compiler-checked. The
+  only `@unchecked Sendable` anywhere in this stack lives *inside* the
+  UniFFI-generated object classes, where thread safety is enforced by Rust's
+  `Arc`/`Mutex` on the other side of the FFI — the intended use of the escape
+  hatch. Consumer code needs none of it.
+- The handler captures `self` weakly; `lazy` defers the closure to first
+  access (after `init`), and `@ObservationIgnored` opts the subscription out
+  of `@Observable`'s tracking (which otherwise can't transform `lazy`).
 - `isolated deinit` lets deinit touch MainActor-isolated state.
 
 ## 5. Tools & hooks
@@ -202,7 +227,7 @@ Why the pieces are shaped this way:
 Implement a tool in Swift, register it, done:
 
 ```swift
-final class Weather: AgentTool, @unchecked Sendable {
+final class Weather: AgentTool {   // final + immutable state = checked Sendable
     func spec() -> ToolSpec {
         ToolSpec(
             name: "get_weather",
@@ -231,10 +256,13 @@ agent.addTool(tool: Weather())
 Hooks are the same shape — e.g. an approval gate:
 
 ```swift
-final class Approval: BeforeToolCallHook, @unchecked Sendable {
-    var enabled = true
+final class Approval: BeforeToolCallHook {
+    // Mutable state protected by the stdlib mutex (Swift 6 Synchronization).
+    // Mutex is Sendable, so the class stays fully checked-Sendable.
+    private let enabled = Mutex(true)
+
     func before(ctx: BeforeToolCallContext, cancel: AgentCancelToken) async -> BeforeToolCallOutcome {
-        guard enabled else { return BeforeToolCallOutcome(argsJson: nil, decision: nil) }
+        guard enabled.withLock({ $0 }) else { return BeforeToolCallOutcome(argsJson: nil, decision: nil) }
         let allow = askUser(ctx.tool_call.name) // your UX here
         return BeforeToolCallOutcome(
             argsJson: nil,
@@ -271,9 +299,12 @@ Also available: `setAfterToolCallHook`, `setTryBeforeToolCallHook`,
 - **Wire sink handlers after full initialization** — capturing `self` (even
   weakly) before every stored property has a value is a compile error.
   Assign the handler after `subscribe`, as in §4.
-- **Sink classes must be Sendable-correct.** The protocols are
-  `AnyObject & Sendable`; either isolate to an actor or use
-  `@unchecked Sendable` with a written-down safety argument (see §4).
+- **Sink/tool/hook types are `AnyObject & Sendable`.** Conform with
+  `final class` + immutable state for checked conformance — no `@unchecked`
+  needed. For mutable state (e.g. an approval toggle), protect it with
+  `Synchronization.Mutex` rather than reaching for `@unchecked Sendable`; the
+  only `@unchecked Sendable` in this stack lives inside the generated object
+  classes (Rust-side `Arc`/`Mutex` enforces safety).
 - **Cancellation is `agent.abort()` / `agent.signal()?.cancel()`**, not task
   cancellation alone — UniFFI futures don't observe Swift task cancellation,
   which is why §4 pairs them with `withTaskCancellationHandler`.
