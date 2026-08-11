@@ -263,7 +263,7 @@ final class Approval: BeforeToolCallHook {
 
     func before(ctx: BeforeToolCallContext, cancel: AgentCancelToken) async -> BeforeToolCallOutcome {
         guard enabled.withLock({ $0 }) else { return BeforeToolCallOutcome(argsJson: nil, decision: nil) }
-        let allow = askUser(ctx.tool_call.name) // your UX here
+        let allow = askUser(ctx.toolCall.name) // your UX here
         return BeforeToolCallOutcome(
             argsJson: nil,
             decision: BeforeToolCallResult(block: !allow, reason: allow ? nil : "denied", terminate: false)
