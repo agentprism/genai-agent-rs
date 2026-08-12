@@ -107,12 +107,24 @@ After every pull, before committing the merge result:
 
 ## Publishing
 
-The two crates publish in order (cargo enforces it — `rust-genai-agent` pins an exact
-`genai-agentprism` version):
+Releases run through **Actions → "Publish to crates.io"** (`workflow_dispatch`, dry‑run by
+default) behind the `crates-io` environment approval. The workflow:
+
+1. publishes the two crates in lockstep via crates.io Trusted Publishing (no stored token):
+   `genai-agentprism` first, then `rust-genai-agent` (which exact‑pins it). Already‑published
+   versions are skipped, so a dispatch with unchanged crates is a no‑op;
+2. then the `apple` job releases the **Swift package** at the same version: rebuilds the
+   XCFramework, rewrites the root distribution `Package.swift` (zip URL + checksum), commits
+   it plus the regenerated UniFFI bindings, tags the bare semver (`0.2.0` — the Swift Package
+   Index ignores the crate‑prefixed tags), and creates the GitHub Release holding the zip.
+
+So bumping both crate versions and dispatching the workflow ships the Rust crates **and** the
+Swift package in one gated release. Manual fallback (emergencies only):
 
 ```bash
 cargo publish -p genai-agentprism      # pi-ai layer, first
 cargo publish -p rust-genai-agent      # depends on it, second
+ffi/release_swift.sh                 # Swift package (macOS only; honors --dry-run)
 ```
 
 ## License

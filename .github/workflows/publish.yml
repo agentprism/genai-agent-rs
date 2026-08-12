@@ -7,6 +7,11 @@ name: Publish to crates.io
 #      filename, and the environment) against the per-crate trusted-publishing configs.
 #   3. The two crates publish in lockstep: genai-agentprism first, because rust-genai-agent
 #      exact-pins it and cargo refuses to upload a package whose deps are not on the registry.
+#   4. The `apple` job then releases the Swift package at the SAME version (bare-semver tag +
+#      GitHub Release holding the XCFramework zip the root Package.swift references), keeping
+#      GenAIAgent coupled to every rust-genai-agent release. Crate publishes are idempotent
+#      (already-published versions are skipped), so dispatching with both crates current cuts
+#      only the Swift release.
 on:
   workflow_dispatch:
     inputs:
@@ -54,14 +59,33 @@ jobs:
 
       - name: Publish genai-agentprism
         run: >
-          cargo publish -p genai-agentprism
-          --token "${{ steps.auth.outputs.token }}"
-          ${{ inputs.dry-run && '--dry-run' || '' }}
+          bash .github/workflows/publish-crate.sh genai-agentprism
+          "${{ steps.auth.outputs.token }}" "${{ inputs.dry-run }}"
 
       # cargo publish blocks until the index serves the just-uploaded genai-agentprism, so the
       # agent crate's exact-pin dependency resolves by the time this step runs.
       - name: Publish rust-genai-agent
         run: >
-          cargo publish -p rust-genai-agent
-          --token "${{ steps.auth.outputs.token }}"
-          ${{ inputs.dry-run && '--dry-run' || '' }}
+          bash .github/workflows/publish-crate.sh rust-genai-agent
+          "${{ steps.auth.outputs.token }}" "${{ inputs.dry-run }}"
+
+  # Swift package stage: rebuilds the XCFramework off this exact commit, rewrites the root
+  # distribution Package.swift (url+checksum), tags the bare-semver Swift version, and creates
+  # the GitHub Release holding the zip. Runs after the crates job so a release only ever couples
+  # a live crate pair; its own `crates-io` environment approval is a second, independent gate.
+  apple:
+    needs: publish
+    runs-on: macos-latest
+    environment: crates-io
+    permissions:
+      contents: write # push the release commit + tag, create the GitHub Release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Release Swift package
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ffi/release_swift.sh ${{ inputs.dry-run && '--dry-run' || '' }}

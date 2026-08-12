@@ -20,11 +20,30 @@ not a consumer hack to ship.
 
 ## 1. Build & integrate
 
+### As a released package (recommended for apps)
+
+The repo root doubles as the distribution Swift package (this is also what the
+[Swift Package Index](https://swiftpackageindex.com) lists). In Xcode: **File →
+Add Package Dependencies…** → paste
+`https://github.com/agentprism/genai-agent-rs.git` → version rule **Up to Next
+Minor** from the latest release — or in a `Package.swift`:
+
+```swift
+.package(url: "https://github.com/agentprism/genai-agent-rs.git", from: "0.2.0")
+```
+
+Then add the **GenAIAgent** product to your app target. SwiftPM fetches the
+prebuilt `GenAIAgent.xcframework` from the repo's GitHub Releases (the root
+manifest pins the zip URL + checksum of the release matching the tag). No Rust
+toolchain needed.
+
+### From a local checkout (developing the Rust side)
+
 ```sh
 ffi/build_apple.sh        # bindings → 3 release slices → XCFramework → ffi/swiftpm/
 ```
 
-Run this first (and after every pull that touches `ffi/src`): the package
+Run this first (and after every pull that touches `ffi/src`): the local package
 references `GenAIAgent.xcframework` and the generated
 `genai_agent_ffi.swift`, both of which only exist after a build.
 
@@ -293,9 +312,11 @@ Also available: `setAfterToolCallHook`, `setTryBeforeToolCallHook`,
 - **`…Json` fields are JSON text**, not decoded values (`argsJson`,
   `detailsJson`, `schemaJson`, `extraBodyJson`). Decode/encode with your
   usual JSON tools; the suffix is deliberate so this is never a surprise.
-- **Run `ffi/build_apple.sh` before adding the package to Xcode** and after
-  pulling changes that touch `ffi/src` — the XCFramework and generated Swift
-  are build products, not committed.
+- **Run `ffi/build_apple.sh` before adding the LOCAL package to Xcode** and
+  after pulling changes that touch `ffi/src` — the XCFramework is a build
+  product, not committed. (The generated bindings ARE committed per release
+  for the root distribution manifest; treat them as read-only. Consumers of
+  the released package need neither step — SwiftPM downloads the binary.)
 - **Wire sink handlers after full initialization** — capturing `self` (even
   weakly) before every stored property has a value is a compile error.
   Assign the handler after `subscribe`, as in §4.
