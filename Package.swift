@@ -30,7 +30,7 @@ let package = Package(
 		.binaryTarget(
 			name: "genai_agent_ffiFFI",
 			url: "https://github.com/agentprism/genai-agent-rs/releases/download/0.2.0/GenAIAgent.xcframework.zip",
-			checksum: "PLACEHOLDER-UPDATED-BY-ffi/release_swift.sh"
+			checksum: "fb82dd841978dce65d8f0fbd1bae368c96aed9ec8471001aed1b911355827abd"
 		),
 		// UniFFI-generated bindings (committed at release time) + hand-written conveniences;
 		// this is the module apps import.
