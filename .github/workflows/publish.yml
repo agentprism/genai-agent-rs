@@ -1,0 +1,67 @@
+name: Publish to crates.io
+
+# Manual, gated release workflow (crates.io Trusted Publishing — no stored API token):
+#   1. Someone with write access clicks "Run workflow" (leave dry-run=true to rehearse).
+#   2. The `crates-io` GitHub environment requires approval from a designated reviewer before
+#      the job starts; crates.io independently verifies the OIDC claims (repo, this workflow's
+#      filename, and the environment) against the per-crate trusted-publishing configs.
+#   3. The two crates publish in lockstep: genai-agentprism first, because rust-genai-agent
+#      exact-pins it and cargo refuses to upload a package whose deps are not on the registry.
+on:
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Package and verify only (cargo publish --dry-run); upload nothing"
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # This environment name is part of the trusted-publishing contract configured on
+    # crates.io; renaming it here requires updating the crates.io configs to match.
+    environment: crates-io
+    permissions:
+      id-token: write # mint the OIDC token the crates.io token exchange consumes
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Preflight — lockstep version check
+        run: |
+          set -euo pipefail
+          GENAI_VER=$(grep -m1 '^version' genai/Cargo.toml | cut -d'"' -f2)
+          AGENT_VER=$(grep -m1 '^version' agent/Cargo.toml | cut -d'"' -f2)
+          PIN=$(grep -oP 'package = "genai-agentprism", version = "=\K[^"]+' agent/Cargo.toml)
+          echo "genai-agentprism: $GENAI_VER | rust-genai-agent: $AGENT_VER | agent's genai pin: =$PIN"
+          test -n "$PIN"
+          test "$GENAI_VER" = "$PIN" || {
+            echo "::error::agent's exact pin (=$PIN) != genai crate version ($GENAI_VER); bump them together"
+            exit 1
+          }
+
+      - name: Get temporary crates.io token (trusted publishing)
+        id: auth
+        # v1.0.5
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18
+
+      - name: Publish genai-agentprism
+        run: >
+          cargo publish -p genai-agentprism
+          --token "${{ steps.auth.outputs.token }}"
+          ${{ inputs.dry-run && '--dry-run' || '' }}
+
+      # cargo publish blocks until the index serves the just-uploaded genai-agentprism, so the
+      # agent crate's exact-pin dependency resolves by the time this step runs.
+      - name: Publish rust-genai-agent
+        run: >
+          cargo publish -p rust-genai-agent
+          --token "${{ steps.auth.outputs.token }}"
+          ${{ inputs.dry-run && '--dry-run' || '' }}
