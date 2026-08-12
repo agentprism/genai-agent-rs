@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Manual re-runs (e.g. to CI a commit pushed by the publish workflow — GITHUB_TOKEN pushes
+  # do not trigger runs).
+  workflow_dispatch:
 
 jobs:
   # Platform-neutral Rust suites run on the cheap/fast runner.
