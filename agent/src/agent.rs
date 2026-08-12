@@ -19,7 +19,7 @@ use crate::{
     AgentMessage, AgentPrepareNextTurnHook, AgentPrepareNextTurnWithContextHook,
     AgentShouldStopAfterTurnHook, AgentTool, AssistantContent, AssistantMessage, BeforeToolCall,
     BeforeToolCallHook, BusyContext, ConvertToLlm, EventSink, MessageConverter, OnPayloadHook,
-    OnResponseHook, PrepareNextTurn, PriceCatalog, QueueMode, QueueMessagesHook, QueueSource,
+    OnResponseHook, PrepareNextTurn, PriceCatalog, QueueMessagesHook, QueueMode, QueueSource,
     ShouldStopAfterTurn, StopReason, StreamFn, ThinkingBudgets, ThinkingLevel, ToolExecutionMode,
     TransformContext, TransformContextHook, Transport, TryAfterToolCall, TryAfterToolCallHook,
     TryBeforeToolCall, TryBeforeToolCallHook, UserContent, UserMessage, default_convert_to_llm,
@@ -329,7 +329,6 @@ impl Default for AgentConfig {
         }
     }
 }
-
 
 impl AgentConfig {
     /// Install an agent-specific provider stream function.

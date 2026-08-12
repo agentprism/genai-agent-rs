@@ -1181,7 +1181,11 @@ async fn before_tool_call_object_rewrites_args_via_borrow_bridge() {
         Some(json!({ "value": "rewritten" })),
         "the tool executed with the trait hook's rewritten args (borrow bridge wrote them back)"
     );
-    assert_eq!(stream_fn.call_count(), 2, "the run continued after the tool call");
+    assert_eq!(
+        stream_fn.call_count(),
+        2,
+        "the run continued after the tool call"
+    );
 }
 
 /// A non-tool hook that always ends the run after the current turn.

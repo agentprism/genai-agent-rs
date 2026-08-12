@@ -370,11 +370,8 @@ pub trait TryAfterToolCall: Send + Sync {
 #[async_trait]
 pub trait ShouldStopAfterTurn: Send + Sync {
     /// Returning `true` gracefully ends the current run after the completed turn.
-    async fn should_stop(
-        &self,
-        ctx: ShouldStopAfterTurnContext,
-        cancel: CancellationToken,
-    ) -> bool;
+    async fn should_stop(&self, ctx: ShouldStopAfterTurnContext, cancel: CancellationToken)
+    -> bool;
 }
 
 /// Object-safe mirror of the context-aware [`AgentPrepareNextTurnWithContextHook`].
@@ -434,13 +431,13 @@ pub(crate) fn message_converter_to_hook(converter: Arc<dyn MessageConverter>) ->
 }
 
 /// Adapt an object-safe [`TransformContext`] into a [`TransformContextHook`].
-pub(crate) fn transform_context_to_hook(
-    hook: Arc<dyn TransformContext>,
-) -> TransformContextHook {
-    Arc::new(move |messages: Vec<AgentMessage>, cancel: CancellationToken| {
-        let hook = hook.clone();
-        Box::pin(async move { hook.transform(messages, cancel).await })
-    })
+pub(crate) fn transform_context_to_hook(hook: Arc<dyn TransformContext>) -> TransformContextHook {
+    Arc::new(
+        move |messages: Vec<AgentMessage>, cancel: CancellationToken| {
+            let hook = hook.clone();
+            Box::pin(async move { hook.transform(messages, cancel).await })
+        },
+    )
 }
 
 /// Adapt an object-safe [`BeforeToolCall`] into a [`BeforeToolCallHook`].
@@ -449,25 +446,29 @@ pub(crate) fn transform_context_to_hook(
 /// [`BeforeToolCallOutcome`]; this adapter writes any returned `args` back into the loop's borrowed
 /// `&mut` context before returning the `decision`, so loop semantics match the closure form exactly.
 pub(crate) fn before_tool_call_to_hook(hook: Arc<dyn BeforeToolCall>) -> BeforeToolCallHook {
-    Arc::new(move |ctx: &mut BeforeToolCallContext, cancel: CancellationToken| {
-        let hook = hook.clone();
-        let owned = ctx.clone();
-        Box::pin(async move {
-            let out = hook.before(owned, cancel).await;
-            if let Some(args) = out.args {
-                ctx.args = args;
-            }
-            out.decision
-        })
-    })
+    Arc::new(
+        move |ctx: &mut BeforeToolCallContext, cancel: CancellationToken| {
+            let hook = hook.clone();
+            let owned = ctx.clone();
+            Box::pin(async move {
+                let out = hook.before(owned, cancel).await;
+                if let Some(args) = out.args {
+                    ctx.args = args;
+                }
+                out.decision
+            })
+        },
+    )
 }
 
 /// Adapt an object-safe [`AfterToolCall`] into an [`AfterToolCallHook`].
 pub(crate) fn after_tool_call_to_hook(hook: Arc<dyn AfterToolCall>) -> AfterToolCallHook {
-    Arc::new(move |ctx: AfterToolCallContext, cancel: CancellationToken| {
-        let hook = hook.clone();
-        Box::pin(async move { hook.after(ctx, cancel).await })
-    })
+    Arc::new(
+        move |ctx: AfterToolCallContext, cancel: CancellationToken| {
+            let hook = hook.clone();
+            Box::pin(async move { hook.after(ctx, cancel).await })
+        },
+    )
 }
 
 /// Adapt an object-safe [`TryBeforeToolCall`] into a [`TryBeforeToolCallHook`].
@@ -478,47 +479,53 @@ pub(crate) fn after_tool_call_to_hook(hook: Arc<dyn AfterToolCall>) -> AfterTool
 pub(crate) fn try_before_tool_call_to_hook(
     hook: Arc<dyn TryBeforeToolCall>,
 ) -> TryBeforeToolCallHook {
-    Arc::new(move |ctx: &mut BeforeToolCallContext, cancel: CancellationToken| {
-        let hook = hook.clone();
-        let owned = ctx.clone();
-        Box::pin(async move {
-            let out = hook.before(owned, cancel).await?;
-            if let Some(args) = out.args {
-                ctx.args = args;
-            }
-            Ok(out.decision)
-        })
-    })
+    Arc::new(
+        move |ctx: &mut BeforeToolCallContext, cancel: CancellationToken| {
+            let hook = hook.clone();
+            let owned = ctx.clone();
+            Box::pin(async move {
+                let out = hook.before(owned, cancel).await?;
+                if let Some(args) = out.args {
+                    ctx.args = args;
+                }
+                Ok(out.decision)
+            })
+        },
+    )
 }
 
 /// Adapt an object-safe [`TryAfterToolCall`] into a [`TryAfterToolCallHook`].
-pub(crate) fn try_after_tool_call_to_hook(
-    hook: Arc<dyn TryAfterToolCall>,
-) -> TryAfterToolCallHook {
-    Arc::new(move |ctx: AfterToolCallContext, cancel: CancellationToken| {
-        let hook = hook.clone();
-        Box::pin(async move { hook.after(ctx, cancel).await })
-    })
+pub(crate) fn try_after_tool_call_to_hook(hook: Arc<dyn TryAfterToolCall>) -> TryAfterToolCallHook {
+    Arc::new(
+        move |ctx: AfterToolCallContext, cancel: CancellationToken| {
+            let hook = hook.clone();
+            Box::pin(async move { hook.after(ctx, cancel).await })
+        },
+    )
 }
 
 /// Adapt an object-safe [`ShouldStopAfterTurn`] into an [`AgentShouldStopAfterTurnHook`].
 pub(crate) fn should_stop_after_turn_to_hook(
     hook: Arc<dyn ShouldStopAfterTurn>,
 ) -> AgentShouldStopAfterTurnHook {
-    Arc::new(move |ctx: ShouldStopAfterTurnContext, cancel: CancellationToken| {
-        let hook = hook.clone();
-        Box::pin(async move { hook.should_stop(ctx, cancel).await })
-    })
+    Arc::new(
+        move |ctx: ShouldStopAfterTurnContext, cancel: CancellationToken| {
+            let hook = hook.clone();
+            Box::pin(async move { hook.should_stop(ctx, cancel).await })
+        },
+    )
 }
 
 /// Adapt an object-safe [`PrepareNextTurn`] into an [`AgentPrepareNextTurnWithContextHook`].
 pub(crate) fn prepare_next_turn_to_hook(
     hook: Arc<dyn PrepareNextTurn>,
 ) -> AgentPrepareNextTurnWithContextHook {
-    Arc::new(move |ctx: PrepareNextTurnContext, cancel: CancellationToken| {
-        let hook = hook.clone();
-        Box::pin(async move { hook.prepare(ctx, cancel).await })
-    })
+    Arc::new(
+        move |ctx: PrepareNextTurnContext, cancel: CancellationToken| {
+            let hook = hook.clone();
+            Box::pin(async move { hook.prepare(ctx, cancel).await })
+        },
+    )
 }
 
 /// Adapt an object-safe [`QueueSource`] into the internal [`QueueMessagesHook`] the loop consumes.

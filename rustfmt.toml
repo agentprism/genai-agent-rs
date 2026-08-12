@@ -1,0 +1,4 @@
+# Workspace style for first-party code (agent/, ffi/): rustfmt defaults on the 2024 edition.
+# The vendored genai/ subtree keeps upstream's JC style (genai/rustfmt.toml, hard tabs) and is
+# EXEMPT from the CI fmt gate — reformatting it would make every `git subtree pull` conflict.
+edition = "2024"

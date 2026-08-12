@@ -14,6 +14,14 @@ jobs:
 
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      # First-party crates only: the vendored genai/ subtree keeps upstream's style
+      # (genai/rustfmt.toml, hard tabs) and is deliberately exempt — reformatting it would
+      # make every upstream `git subtree pull` conflict.
+      - name: cargo fmt --check (first-party crates)
+        run: cargo fmt -p rust-genai-agent -p genai-agent-ffi -- --check
 
       # --all-features matters: agent/tests/*.rs are
       # `#![cfg(feature = "testing")]`-gated, so a default-features run compiles
