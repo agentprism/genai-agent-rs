@@ -1,7 +1,9 @@
 # rust-genai-agent
 
 Provider-neutral, streaming agent loops and tools for Rust, built on
-[`genai`](https://docs.rs/genai). The crate supplies a stateful [`Agent`], a stateless loop, an
+[`genai-agentprism`](https://docs.rs/genai-agentprism) (the AgentPrism fork of
+[`genai`](https://github.com/jeremychone/rust-genai), consumed under the `genai` module path).
+The crate supplies a stateful [`Agent`], a stateless loop, an
 injectable provider boundary, schema-validated tools, ordered lifecycle events, steering and
 follow-up queues, cancellation, offline scripted testing, and an optional authenticated proxy
 transport.
@@ -25,57 +27,36 @@ resolution for next-turn thinking updates, and fallible tool preparation and bef
 channels whose errors become in-band tool results — brings the current suite to **215/215** green.
 The execution-seam batch — request-level `on_payload`/`on_response` overrides honored by
 `GenaiStreamFn` through the fork's new `ExecOptions` execution methods, a saturating retry-delay
-conversion, and the DIST-01 interim distribution gate — brings the current suite to **220/220**
+conversion, and the DIST-01 distribution gate — brings the current suite to **220/220**
 green.
 
 ## Installation
 
 The minimum supported Rust version is 1.88.
 
-**This crate is not available on crates.io.** It depends on fork-only `genai` APIs that no
-registry serves, so its manifest carries `publish = false` and there is no version-only
-dependency line to copy. The supported interim consumption path is **locally packaged crate
-archives plus an exact pinned `[patch.crates-io]` entry**:
-
-1. Package both crates from the sibling checkouts:
-   `cargo package --allow-dirty --no-verify` in `rust-genai` (produces
-   `genai-0.7.0-beta.19.1-agentprism.crate`) and in this repository (produces
-   `rust-genai-agent-0.2.0.crate`).
-2. Extract both archives into a `vendor/` directory inside your workspace.
-3. Depend on the extracted agent archive and patch the exact fork `genai` version to the
-   extracted fork archive:
+This crate is published to crates.io as [`rust-genai-agent`](https://crates.io/crates/rust-genai-agent).
+It depends on the AgentPrism fork of `genai`, published as
+[`genai-agentprism`](https://crates.io/crates/genai-agentprism) — the dependency is pinned to an
+exact fork version, so cargo resolves it from the registry automatically; keep the `genai` module
+path by renaming the package:
 
 ```toml
 [dependencies]
-rust-genai-agent = { path = "vendor/rust-genai-agent-0.2.0" }
-# Requirement window whose floor is the last published crates.io beta (cargo's [patch] mechanics
-# require a registry-matching requirement); the code always comes from the patched fork archive.
-genai = ">=0.7.0-beta.18, <0.7.0-beta.20"
+rust-genai-agent = "0.2.0"
+genai = { package = "genai-agentprism", version = "=0.7.0-beta.19.1-agentprism" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-
-[patch.crates-io]
-genai = { path = "vendor/genai-0.7.0-beta.19.1-agentprism" }
 ```
 
-[`tests/fixtures/fresh-consumer/`](tests/fixtures/fresh-consumer/Cargo.toml) is a runnable
-reference consumer in exactly this shape, and [`scripts/check-distribution.sh`](scripts/check-distribution.sh)
-is the release gate that packages both crates, extracts the archives into a fresh temporary
-consumer, applies the patch, builds/tests it, and asserts the resolution pinned `genai` to the
-exact fork version from the extracted archive — failing on pin or version drift, missing package
-contents, `publish = true`, or documentation implying registry-only installation. No publication
-is performed by any step of the workflow.
-
-> **Note:** this release line builds against the [agentprism `genai` fork](https://github.com/agentprism/rust-genai)
-> until upstream [PR #277](https://github.com/jeremychone/rust-genai/pull/277) merges. The crate
-> uses fork APIs (for example `ToolResponse::parts`, the client-level
-> `PayloadInterceptor`/`ResponseObserver` exec hooks plus their request-level `ExecOptions`
-> overrides backing `on_payload`/`on_response`, and the response `headers` carried by
-> streaming-path HTTP errors — `Error::HttpError.headers` — that the `GenaiStreamFn` retry layer
-> reads to honor `retry-after`/`x-should-retry`), so a plain crates.io `genai` version field
-> cannot resolve them. The fork version `0.7.0-beta.19.1-agentprism` is pinned to fork commit
-> `cee6008346595fcf14f77b53ee3bffe682d651c6` (the `feat/exec-interceptors-error-headers-tool-parts`
-> branch head) plus subsequent reviewed fork changes; the gate script re-verifies both the commit
-> pin and the exact version on every run.
+> **Note:** this release line builds against the AgentPrism `genai` fork (vendored in the
+> [genai-agent-rs workspace](https://github.com/agentprism/genai-agent-rs); fork lineage from the
+> [agentprism/rust-genai](https://github.com/agentprism/rust-genai) mirror) until upstream
+> [PR #277](https://github.com/jeremychone/rust-genai/pull/277) merges. The crate uses fork APIs
+> (for example `ToolResponse::parts`, the client-level `PayloadInterceptor`/`ResponseObserver`
+> exec hooks plus their request-level `ExecOptions` overrides backing `on_payload`/`on_response`,
+> and the response `headers` carried by streaming-path HTTP errors — `Error::HttpError.headers` —
+> that the `GenaiStreamFn` retry layer reads to honor `retry-after`/`x-should-retry`), which no
+> crates.io release of upstream `genai` provides; the fork carries them under the
+> `genai-agentprism` name instead.
 
 The feature layers are intentionally small:
 

@@ -26,6 +26,7 @@ strip = "debuginfo"
 #             were folded into these modules.)
 #   agent   — rust-genai-agent: provider-neutral streaming agent loops and tools (pi-agent-core).
 #
-# The agent crate depends on `genai` via a path to the vendored member, so the whole workspace
-# builds against the fork with no registry, git, or [patch] indirection. It stays unpublishable
-# (`publish = false`) until the fork-only APIs land upstream and ship on crates.io.
+# The agent crate depends on `genai` via Cargo's dual-source form (`path` for local builds,
+# exact `version` pin for the packaged form), so the whole workspace builds against the fork
+# with no registry, git, or [patch] indirection. Both crates are published to crates.io in
+# lockstep: `genai-agentprism` first, then `rust-genai-agent` (cargo enforces the order).

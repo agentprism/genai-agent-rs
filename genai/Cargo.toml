@@ -12,7 +12,10 @@ name = "genai-agentprism"
 version = "0.7.0-beta.19.1-agentprism"
 repository = "https://github.com/agentprism/genai-agent-rs"
 edition = "2024"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
+readme = "README.md"
+categories = ["api-bindings", "asynchronous", "web-programming"]
 description = "AgentPrism fork of genai (rust-genai): multi-AI-provider client plus the pi-ai layer — assistant/stream contract, GenaiStreamFn, and optional OAuth (auth) and ChatGPT-plan Codex backend."
 keywords = ["generative-ai","openai","anthropic","gemini","agent"]
 homepage = "https://github.com/agentprism/genai-agent-rs"
@@ -169,3 +172,9 @@ http-body-util = "0.1"
 # mock servers the auth/codex integration tests spin up.
 tempfile = "3"
 tokio = { version = "1", features = ["net"] }
+
+# docs.rs: build the folded first-party modules (auth/codex) so they appear in the published
+# docs. NOT `all-features`: `rustls-tls` (default) and `native-tls` are mutually exclusive by
+# design (`compile_error!` in src/lib.rs), so the all-features combination can never build.
+[package.metadata.docs.rs]
+features = ["auth", "loopback", "codex", "codex-auth-resolver", "bedrock-sigv4", "otel"]

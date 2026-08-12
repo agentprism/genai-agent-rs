@@ -1,9 +1,25 @@
 # genai
 
+> **This is the [AgentPrism fork](https://github.com/agentprism/genai-agent-rs) of
+> [jeremychone/rust-genai](https://github.com/jeremychone/rust-genai), published to crates.io as
+> [`genai-agentprism`](https://crates.io/crates/genai-agentprism).** It tracks upstream via
+> `git subtree` and adds the pi-ai layer: request-level exec hooks (`PayloadInterceptor` /
+> `ResponseObserver` / `ExecOptions`), `ToolResponse` binary parts, streaming-error response
+> headers, the assistant/stream contract (`StreamFn`, `AssistantMessage`, …), `GenaiStreamFn`,
+> and the feature-gated `auth` (OAuth) and `codex` (ChatGPT-plan backend) modules. To depend on
+> it while keeping the `genai` module path:
+>
+> ```toml
+> genai = { package = "genai-agentprism", version = "0.7.0-beta.19.1-agentprism" }
+> ```
+>
+> Everything below is the upstream README; where it says `genai = "…"`, use the dependency line
+> above.
+
 **A Native-Protocol Multi-AI Provider Library for Rust**
 
 ```toml
-genai = "0.6"
+genai = { package = "genai-agentprism", version = "0.7.0-beta.19.1-agentprism" }
 ```
 
 <div align="center">

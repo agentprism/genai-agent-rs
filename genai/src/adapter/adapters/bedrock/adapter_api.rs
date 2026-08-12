@@ -2,7 +2,7 @@
 //!
 //! Requires the `bedrock-api` Cargo feature. Pulls in no new dependencies.
 //!
-//! See: https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys.html
+//! See: <https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys.html>
 
 use crate::adapter::adapters::bedrock::converse::{build_converse_payload, parse_converse_response};
 use crate::adapter::adapters::bedrock::shared::{BEDROCK_RUNTIME_HOST_PREFIX, async_stream_bytes, build_service_url};

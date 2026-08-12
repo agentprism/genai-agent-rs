@@ -275,17 +275,17 @@ pub struct Agent { /* state: RwLock<AgentState>, listeners, queues, active run h
 ## 9. Current package and crate shape
 
 The manifest pins the MSRV and uses Cargo's dual-source dependency form over the **single fork
-version** (`0.7.0-beta.19.1-agentprism`, pinned to the fork commit): local review builds use the
-sibling checkout, while packaged consumers satisfy the requirement through a `[patch.crates-io]`
-entry pointing at the extracted fork archive. Because cargo's patch mechanics require the
-dependency requirement to match at least one published registry version, the requirement is a
-tight window over the published beta line and the exactness guarantee comes from the fork
-manifest version + the commit pin + the gate's fresh-consumer resolution assertion. The crate is
-**not published** (`publish = false`) while the fork-only `genai` APIs remain unpublished;
-distribution is by locally packaged crate archives only, verified end to end by
-`scripts/check-distribution.sh` (the DIST-01 gate: commit/version pins, publication disabled,
-documentation honesty, package contents, and a fresh-consumer build+test against the extracted
-archives). No CI step performs any publication action.
+version** (`=0.7.0-beta.19.1-agentprism`): local workspace builds use the sibling `genai/`
+subtree checkout via `path`, while the packaged form `cargo publish` uploads resolves
+`genai-agentprism` from crates.io by exact version pin. Both crates live in the
+[genai-agent-rs workspace](https://github.com/agentprism/genai-agent-rs) and are **published to
+crates.io** — the fork as `genai-agentprism` (lib target still named `genai`) and this crate as
+`rust-genai-agent` — so consumers need no `[patch.crates-io]` indirection. Because this crate
+uses fork-only APIs, the pin is exact and the two crates are published in lockstep
+(`genai-agentprism` first; cargo refuses to upload `rust-genai-agent` until the pinned fork
+version is on the registry). The earlier interim distribution model — locally packaged archives
+plus a consumer-side `[patch.crates-io]` entry, gated by `scripts/check-distribution.sh`
+(DIST-01) while `publish = false` was in effect — is retired.
 
 ```toml
 [package]
@@ -294,22 +294,16 @@ version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 readme = "README.md"
-publish = false
 
 [dependencies]
-# Requirement window over the last published beta line; the code always comes from the pinned
-# fork (fork version 0.7.0-beta.19.1-agentprism) — locally via `path`, packaged via the
-# consumer's [patch.crates-io] entry (cargo's patch mechanics require a registry-matching
-# requirement, so an exact unpublished version cannot be named here).
-genai = { version = ">=0.7.0-beta.18, <0.7.0-beta.20", path = "../rust-genai" }
+# Dual-source: `path` for local workspace builds, `version` (exact pin — this crate uses
+# fork-only APIs) for the packaged form, which resolves genai-agentprism from crates.io.
+genai = { package = "genai-agentprism", version = "=0.7.0-beta.19.1-agentprism", path = "../genai" }
 
 [features]
 default = []
-testing = []
+testing = ["genai/testing"]
 proxy = ["dep:eventsource-stream", "tokio/net", "tokio/io-util"]
-
-[patch.crates-io]
-genai = { path = "../rust-genai" }
 ```
 
 ```text

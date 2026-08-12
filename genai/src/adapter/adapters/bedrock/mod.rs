@@ -19,8 +19,8 @@
 //!   `bedrock_sigv4::amazon.nova-pro-v1:0`
 //!
 //! API Documentation:
-//!   - Converse:        https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html
-//!   - ConverseStream:  https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ConverseStream.html
+//!   - Converse:        <https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html>
+//!   - ConverseStream:  <https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ConverseStream.html>
 
 mod adapter_api;
 mod converse;

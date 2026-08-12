@@ -8,8 +8,8 @@ All notable changes to this crate are documented here. The format is based on
 
 Core-runtime batch (independent request fields, shared thinking-budget resolution, fallible tool
 channels) plus the execution-seam batch (request-level exec-hook overrides honored by
-`GenaiStreamFn`, a saturating retry-delay conversion, and the DIST-01 interim distribution
-gate). The all-feature repository suite is **220/220** green.
+`GenaiStreamFn`, a saturating retry-delay conversion, and the crates.io publication switch). The
+all-feature repository suite is **220/220** green.
 
 ### Added
 
@@ -22,21 +22,17 @@ gate). The all-feature repository suite is **220/220** green.
   via `GenaiStreamFn::with_exec_hooks`. Combined with the facade's run-admission snapshots, an
   idle `Agent::set_on_payload` / `set_on_response` replacement takes effect on the next run while
   an in-flight run keeps its snapshot.
-- **DIST-01 interim distribution workflow.** `scripts/check-distribution.sh` is the release gate:
-  it verifies the exact commit/version pins, the `publish = false` flag, documentation honesty
-  (no registry-only install claims), and the packaged archive contents, then extracts both
-  `cargo package` archives into a fresh temporary consumer, patches `genai` to the exact local
-  archive equivalent of the pinned fork commit, and builds/tests the consumer without sibling
-  source paths. `tests/fixtures/fresh-consumer/` is the runnable reference consumer.
-- **CI gate.** `.github/workflows/distribution.yml` runs the distribution gate; no workflow
-  performs any publication action.
-
 ### Changed
 
-- **Publication is explicitly disabled.** The manifest sets `publish = false` and drops the
-  docs.rs `documentation` link while the fork-only `genai` APIs remain unpublished; the `genai`
-  dependency now pins the exact fork version `=0.7.0-beta.19.1-agentprism` (dual-source path
-  form). The README installation section documents only the interim archive+patch flow.
+- **Published to crates.io.** The crate is published as `rust-genai-agent` and depends on the
+  AgentPrism `genai` fork as `genai-agentprism` via Cargo's dual-source form —
+  `genai = { package = "genai-agentprism", version = "=0.7.0-beta.19.1-agentprism", path = "../genai" }` —
+  so packaged consumers resolve the fork from the registry with no `[patch.crates-io]`
+  indirection. The exact pin means the two crates publish in lockstep, `genai-agentprism` first.
+  The earlier interim distribution model (locally packaged crate archives plus a consumer-side
+  `[patch.crates-io]` entry, gated by the since-retired DIST-01 `scripts/check-distribution.sh`
+  while `publish = false` was in effect) is removed; CI (`.github/workflows/ci.yml`) runs the
+  test matrix and no publication step.
 
 ### Fixed
 

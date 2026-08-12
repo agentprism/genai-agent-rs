@@ -13,7 +13,7 @@
 //! We only care about `:event-type` (string, type=7) to dispatch, and `:message-type` (also
 //! string) to detect errors.
 //!
-//! See: https://docs.aws.amazon.com/transcribe/latest/dg/event-stream.html
+//! See: <https://docs.aws.amazon.com/transcribe/latest/dg/event-stream.html>
 
 use crate::adapter::adapters::support::{StreamerCapturedData, StreamerOptions};
 use crate::adapter::inter_stream::{InterStreamEnd, InterStreamEvent};
