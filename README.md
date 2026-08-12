@@ -77,8 +77,33 @@ git remote add upstream https://github.com/jeremychone/rust-genai   # once
 git subtree pull --prefix=genai upstream main                       # merge upstream
 ```
 
+The subtree was added **without `--squash`** (full upstream history is in this repo), so pulls
+must stay plain `git subtree pull` — never add `--squash`, which would realign history against a
+different (squashed) upstream lineage. On a fresh clone the first pull recomputes the subtree
+split of our local `genai/`-touching commits; it can take minutes and looks idle — let it run
+(the result is cached afterwards).
+
 Our additions live in new modules (`genai/src/{assistant,stream_fn,auth,codex,…}`), so
 upstream merges mostly touch only `genai/src/lib.rs` and `genai/Cargo.toml`.
+
+After every pull, before committing the merge result:
+
+1. **Re‑derive the fork version.** If upstream bumped `genai/Cargo.toml`'s `version` (e.g. to
+   `0.7.0-beta.20`), re‑apply our lineage scheme: `<upstream-version>.<n>-agentprism` (reset
+   `<n>` to `1` on an upstream bump, increment it for fork‑only releases). Keep
+   `repository`/`homepage` pointing at this repo.
+2. **Reconcile the lockstep pin.** `agent/Cargo.toml`'s
+   `genai = { package = "genai-agentprism", version = "=…", path = "../genai" }` must exact‑match
+   the new fork version — the publish workflow's preflight fails the release otherwise.
+3. **Check feature drift.** Compare upstream's `[features]` against ours; keep the folded
+   `auth`/`loopback`/`codex`/`codex-auth-resolver`/`testing` features and the TLS
+   mutual‑exclusion `compile_error!` intact, and mirror any genuinely new upstream feature in
+   `[package.metadata.docs.rs]` if it should be documented.
+4. **Never `cargo fmt` the subtree** (it keeps upstream's style; CI's fmt gate covers only
+   `agent/` + `ffi/`).
+5. **Re‑run the offline matrix** (the two `cargo test` commands from Build & test) and curate
+   `genai/CHANGELOG.md` — upstream entries keep their `.`/`-`/`+`/`^`/`!` markers; add ours the
+   same way.
 
 ## Publishing
 
