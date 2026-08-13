@@ -1,0 +1,11 @@
+# ---- proxy.toml ----
+# Port of all concrete `it(...)` cases in pi/packages/agent/test/proxy.test.ts.
+# Added when the parity pin fast-forwarded past pi-agent-core's toolcall_end metadata change
+# (toolcall_end now delivers the finalized tool call on the wire).
+
+[[case]]
+source_file = "pi/packages/agent/test/proxy.test.ts"
+source_name = "preserves tool-call metadata received only on toolcall_end"
+rust_test = "tests/proxy.rs::preserves_tool_call_metadata_received_only_on_toolcall_end"
+milestone = "post-M6"
+status = "green"

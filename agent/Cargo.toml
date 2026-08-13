@@ -1,6 +1,6 @@
 [package]
 name = "rust-genai-agent"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -24,7 +24,7 @@ proxy = ["dep:eventsource-stream", "tokio/net", "tokio/io-util"]
 # The genai-agentprism fork (pi-ai). Dual-source: `path` for local workspace builds, `version`
 # (exact pin — this crate uses fork-only APIs) for the packaged form `cargo publish` uploads, which
 # resolves genai-agentprism from crates.io. The two must be published in lockstep.
-genai = { package = "genai-agentprism", version = "=0.7.0-beta.19.1-agentprism", path = "../genai" }
+genai = { package = "genai-agentprism", version = "=0.7.0-beta.19.2-agentprism", path = "../genai" }
 async-trait = "0.1"
 eventsource-stream = { version = "0.2.3", optional = true }
 futures = "0.3"

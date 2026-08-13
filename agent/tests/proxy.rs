@@ -11,8 +11,8 @@ use genai::resolver::{AuthData, Endpoint};
 use genai::{Headers, ModelIden, ModelSpec, ServiceTarget};
 use rust_genai_agent::proxy::{
     ProxyAssistantMessageEvent, ProxyConfigError, ProxyDoneReason, ProxyErrorReason,
-    ProxyRequestError, ProxyRequestV1, ProxyStreamFn, ProxyStreamOptions, ProxyUsage,
-    ProxyUsageCost, stream_proxy,
+    ProxyRequestError, ProxyRequestV1, ProxyStreamFn, ProxyStreamOptions, ProxyToolCall,
+    ProxyUsage, ProxyUsageCost, stream_proxy,
 };
 use rust_genai_agent::{
     AgentToolCall, AssistantContent, AssistantMessage, AssistantMessageEvent,
@@ -456,11 +456,25 @@ fn compact_proxy_events_use_ts_camel_case_and_round_trip() {
             ProxyAssistantMessageEvent::ToolCallEnd {
                 content_index: 3,
                 thought_signatures: vec!["tool-sig".to_owned()],
+                tool_call: Some(ProxyToolCall::ToolCall {
+                    id: "call-1".to_owned(),
+                    name: "weather".to_owned(),
+                    arguments: json!({"city": "München"}),
+                    thought_signature: None,
+                    namespace: Some("dynamic_tools".to_owned()),
+                }),
             },
             json!({
                 "type": "toolcall_end",
                 "contentIndex": 3,
-                "thoughtSignatures": ["tool-sig"]
+                "thoughtSignatures": ["tool-sig"],
+                "toolCall": {
+                    "type": "toolCall",
+                    "id": "call-1",
+                    "name": "weather",
+                    "arguments": {"city": "München"},
+                    "namespace": "dynamic_tools"
+                }
             }),
         ),
         (
@@ -543,6 +557,68 @@ fn compact_proxy_events_use_ts_camel_case_and_round_trip() {
         }
     });
     assert!(serde_json::from_value::<ProxyAssistantMessageEvent>(negative_usage).is_err());
+}
+
+#[tokio::test]
+async fn preserves_tool_call_metadata_received_only_on_toolcall_end() {
+    // Parity case: pi-agent-core `test/proxy.test.ts` "preserves tool-call metadata received
+    // only on toolcall_end". A server may deliver the finalized tool call (id, name, parsed
+    // arguments, and the pi-ai `namespace`) only with the closing wire event; the client merges
+    // it onto the open tool-call block (TS `Object.assign(content, proxyEvent.toolCall)`).
+    let events = vec![
+        json!({ "type": "start" }),
+        json!({
+            "type": "toolcall_start",
+            "contentIndex": 0,
+            "id": "call_test|fc_test",
+            "toolName": "lookup"
+        }),
+        json!({ "type": "toolcall_delta", "contentIndex": 0, "delta": "{\"value\":\"hello\"}" }),
+        json!({
+            "type": "toolcall_end",
+            "contentIndex": 0,
+            "toolCall": {
+                "type": "toolCall",
+                "id": "call_test|fc_test",
+                "name": "lookup",
+                "arguments": { "value": "hello" },
+                "namespace": "dynamic_tools"
+            }
+        }),
+        json!({
+            "type": "done",
+            "reason": "toolUse",
+            "usage": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 0,
+                "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0 }
+            }
+        }),
+    ];
+    let response = http_response("200 OK", "text/event-stream", sse_body(events));
+    let server = RawServer::spawn(ResponsePlan::every_byte(response)).await;
+    let options = ProxyStreamOptions::new(&server.base_url, "token").expect("proxy options");
+    let request = default_request(ModelIden::new(AdapterKind::OpenAI, "gpt-5.4"));
+
+    let (events, result) = collect_stream(stream_proxy(request, options).await).await;
+    let end_event = events
+        .iter()
+        .find_map(|event| match event {
+            AssistantMessageEvent::ToolCallEnd { tool_call, .. } => Some(tool_call),
+            _ => None,
+        })
+        .expect("toolcall_end event");
+    assert_eq!(end_event.namespace.as_deref(), Some("dynamic_tools"));
+    assert_eq!(end_event.arguments, json!({ "value": "hello" }));
+
+    let Some(AssistantContent::ToolCall(content)) = result.content.first() else {
+        panic!("expected a tool call as the first content block");
+    };
+    assert_eq!(content.arguments, json!({ "value": "hello" }));
+    assert_eq!(content.namespace.as_deref(), Some("dynamic_tools"));
 }
 
 #[test]

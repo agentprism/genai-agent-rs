@@ -4534,6 +4534,7 @@ public struct AgentToolCall: Equatable, Hashable {
      * JSON text (core `arguments: Value`).
      */
     public var argumentsJson: String
+    public var namespace: String?
     public var thoughtSignatures: [String]
 
     // Default memberwise initializers are never public by default, so we
@@ -4541,10 +4542,11 @@ public struct AgentToolCall: Equatable, Hashable {
     public init(id: String, name: String, 
         /**
          * JSON text (core `arguments: Value`).
-         */argumentsJson: String, thoughtSignatures: [String]) {
+         */argumentsJson: String, namespace: String?, thoughtSignatures: [String]) {
         self.id = id
         self.name = name
         self.argumentsJson = argumentsJson
+        self.namespace = namespace
         self.thoughtSignatures = thoughtSignatures
     }
 
@@ -4567,6 +4569,7 @@ public struct FfiConverterTypeAgentToolCall: FfiConverterRustBuffer {
                 id: FfiConverterString.read(from: &buf), 
                 name: FfiConverterString.read(from: &buf), 
                 argumentsJson: FfiConverterString.read(from: &buf), 
+                namespace: FfiConverterOptionString.read(from: &buf),
                 thoughtSignatures: FfiConverterSequenceString.read(from: &buf)
         )
     }
@@ -4575,6 +4578,7 @@ public struct FfiConverterTypeAgentToolCall: FfiConverterRustBuffer {
         FfiConverterString.write(value.id, into: &buf)
         FfiConverterString.write(value.name, into: &buf)
         FfiConverterString.write(value.argumentsJson, into: &buf)
+        FfiConverterOptionString.write(value.namespace, into: &buf)
         FfiConverterSequenceString.write(value.thoughtSignatures, into: &buf)
     }
 }

@@ -105,6 +105,39 @@ After every pull, before committing the merge result:
    `genai/CHANGELOG.md` — upstream entries keep their `.`/`-`/`+`/`^`/`!` markers; add ours the
    same way.
 
+## Staying current with pi-agent-core
+
+`rust-genai-agent` is a port of `@earendil-works/pi-agent-core`, and the port **tracks the
+latest pi releases** — it is not a one-time snapshot. The tracking mechanism is the parity
+matrix in [`agent/tests/parity_manifest.toml`](agent/tests/parity_manifest.toml): it pins the
+`earendil-works/pi` commit the matrix was last synced against (`upstream_commit`) and maps every
+concrete vitest case in the four non-harness test files of `pi/packages/agent`
+(`agent-loop.test.ts`, `agent.test.ts`, `e2e.test.ts`, `proxy.test.ts`) one-for-one to a Rust
+parity test, each with a milestone and a `green`/`active`/`divergence` status. The gate is
+`python3 agent/scripts/check_test_parity.py`: it re-reads the pinned upstream sources from the
+`pi/` checkout beside the workspace (check the pi repo out at `genai-agent-rs/pi`, or symlink a
+sibling checkout there — the path is gitignored), fails when their concrete case set has drifted
+from the script's baseline (“update the parity baseline deliberately”), and verifies the
+aggregate manifest, its ordered fragments, and every mapped Rust test name.
+
+When a new pi-agent-core release lands upstream, the matrix is re-synced deliberately:
+
+1. Fast-forward the `pi/` checkout to the new release commit.
+2. Run `python3 agent/scripts/check_test_parity.py` — it reports the drifted case set by name.
+3. Re-baseline the source counts in the script, bump `expected_cases` in the manifest, and set
+   `upstream_commit` to the new pin.
+4. Port every added, removed, or renamed case: implement the mapped Rust parity test, update the
+   manifest and its ordered fragments (`agent/tests/parity/*.toml`), and keep every entry
+   `green` — a `divergence` status needs a documented reason in
+   [`agent/docs/parity-roadmap.md`](agent/docs/parity-roadmap.md).
+5. Refresh the count claims in `agent/README.md` and the roadmap so docs and matrix never
+   disagree.
+
+All mapped cases must be green at release time; the roadmap's "Dropped" section records the
+upstream behaviors deliberately not ported (no production consumer). The most recent sync
+(pi `581d75a89…`) ported the `toolcall_end` metadata change and grew the matrix from 55 to
+**56/56** mapped cases — see the agent [changelog](agent/CHANGELOG.md).
+
 ## Publishing
 
 Releases run through **Actions → "Publish to crates.io"** (`workflow_dispatch`, dry‑run by

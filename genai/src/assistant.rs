@@ -232,20 +232,31 @@ pub struct AgentToolCall {
     pub name: String,
     /// Parsed JSON arguments supplied to the tool.
     pub arguments: Value,
+    /// Provider namespace for calls to dynamically loaded or namespaced tools
+    /// (pi-ai `ToolCall.namespace`, e.g. OpenAI Responses `namespace`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
     /// Opaque provider signatures that must accompany the call in later requests.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub thought_signatures: Vec<String>,
 }
 
 impl AgentToolCall {
-    /// Construct a tool call without provider thought signatures.
+    /// Construct a tool call without provider thought signatures or namespace.
     pub fn new(id: impl Into<String>, name: impl Into<String>, arguments: Value) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
             arguments,
+            namespace: None,
             thought_signatures: Vec::new(),
         }
+    }
+
+    /// Attach a provider tool namespace to the call.
+    pub fn with_namespace(mut self, namespace: impl Into<String>) -> Self {
+        self.namespace = Some(namespace.into());
+        self
     }
 
     /// Attach opaque provider thought signatures to the call.
@@ -261,6 +272,7 @@ impl From<genai::chat::ToolCall> for AgentToolCall {
             id: value.call_id,
             name: value.fn_name,
             arguments: value.fn_arguments,
+            namespace: None,
             thought_signatures: value.thought_signatures.unwrap_or_default(),
         }
     }

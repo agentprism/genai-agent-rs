@@ -7,14 +7,14 @@
 > reducer, reference tools, skills, prompt templates, telemetry, and the Node entry point are out of
 > scope; no feature silently supplies them).
 
-> **Current status — M1-M6 implementation complete.** The M5 package, README, examples, and docs
-> closeout completes the milestone set after the M6 proxy landed. The pinned non-harness matrix is
-> **52/52 mapped and green**. The M1-M6 completion checkpoint was **112/112 green**; eight later
-> proxy/streaming-JSON security regressions bring the current all-feature suite to **120/120**,
-> alongside accumulator/protocol, event-stream lifetime, runtime-configuration, and tool-update
-> concurrency coverage. T0-T2 below are retained only as a historical test-first record; they do
-> not describe the current runtime. Pure accumulator tests have landed. Yakbak cassette replay
-> remains planned and has **not** landed.
+> **Current status — M1-M6 implementation complete, later parity batches landed.** The pinned
+> non-harness matrix is **56/56 mapped and green** at pi commit `581d75a89…`; the latest sync adds
+> the `proxy.test.ts` `toolcall_end` metadata case and pi-ai's `ToolCall.namespace`. The M1-M6
+> completion checkpoint was **112/112 green**; release-hardening, production-parity,
+> core-runtime, execution-seam, and latest pi-sync additions bring the current agent-crate
+> all-feature suite to **206/206**, while the workspace's 7 FFI tests bring the agent + FFI gate
+> to **213/213**. T0-T2 below are retained only as a historical test-first record; they do not
+> describe the current runtime.
 
 ## 1. What is being ported (source inventory)
 
@@ -275,7 +275,7 @@ pub struct Agent { /* state: RwLock<AgentState>, listeners, queues, active run h
 ## 9. Current package and crate shape
 
 The manifest pins the MSRV and uses Cargo's dual-source dependency form over the **single fork
-version** (`=0.7.0-beta.19.1-agentprism`): local workspace builds use the sibling `genai/`
+version** (`=0.7.0-beta.19.2-agentprism`): local workspace builds use the sibling `genai/`
 subtree checkout via `path`, while the packaged form `cargo publish` uploads resolves
 `genai-agentprism` from crates.io by exact version pin. Both crates live in the
 [genai-agent-rs workspace](https://github.com/agentprism/genai-agent-rs) and are **published to
@@ -290,7 +290,7 @@ plus a consumer-side `[patch.crates-io]` entry, gated by `scripts/check-distribu
 ```toml
 [package]
 name = "rust-genai-agent"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 readme = "README.md"
@@ -298,7 +298,7 @@ readme = "README.md"
 [dependencies]
 # Dual-source: `path` for local workspace builds, `version` (exact pin — this crate uses
 # fork-only APIs) for the packaged form, which resolves genai-agentprism from crates.io.
-genai = { package = "genai-agentprism", version = "=0.7.0-beta.19.1-agentprism", path = "../genai" }
+genai = { package = "genai-agentprism", version = "=0.7.0-beta.19.2-agentprism", path = "../genai" }
 
 [features]
 default = []
@@ -385,10 +385,12 @@ Porting conventions:
   `stream_fn` is `None`" tests.
 - Every ported behavior test had a substantive, enabled body. T2 intentionally ended with a red
   `cargo test --features testing` run while `--no-run` remained green.
-- Implementation then proceeded case-by-case; entries moved from `active` to `green` only with passing real
-  behavior. At the current checkpoint all 52 are `green`, with no ignored mapped tests.
-- Historical reporting separated compilation health from `green / 52 total`; current reporting records
-  52/52 mapped parity, the 112-test M1-M6 checkpoint, and the hardened 120-test repository total.
+- Implementation then proceeded case-by-case; entries moved from `active` to `green` only with
+  passing real behavior. The matrix grew from the original 52 cases to 56 as upstream added
+  cases; all 56 are `green`, with no ignored mapped tests.
+- Historical reporting separated compilation health from `green / 52 total`; current reporting
+  records 56/56 mapped parity, the 112-test M1-M6 checkpoint, the **206/206** agent suite, and
+  the **213/213** agent + FFI workspace gate.
 
 ### Adapter coverage — landed and planned offline layers
 
@@ -403,7 +405,7 @@ The original `GenaiStreamFn` accumulator plan called for two offline test layers
    gemini thinking, openai_resp reasoning/multi-tool-ordering/utf8-chunking, github_copilot, ollama_cloud).
    A future replay-only local server can serve them to a real `genai::Client` and assert the accumulated
    assistant message/event sequence per provider. This replay harness is a follow-up plan, not part of the
-   current 120-test suite and not a prerequisite for the completed M1 implementation.
+   current 206-test agent suite and not a prerequisite for the completed M1 implementation.
 
 ### Live-provider smoke (manual)
 
@@ -416,7 +418,7 @@ repository tests compile them but never execute a provider request.
 |---|---|---|
 | **T0** | API skeleton (`todo!()` bodies) | Historical and superseded |
 | **T1** | `testing` module | Historical foundation; support remains available behind `testing` |
-| **T2** | substantive parity bodies before runtime behavior | Historical red baseline, superseded by 52/52 green |
+| **T2** | substantive parity bodies before runtime behavior | Historical red baseline, superseded by the current 56/56 green matrix |
 | **M1** | message/assistant/event types, accumulator, `GenaiStreamFn`, validation | Complete; pure fold/protocol tests landed, Yakbak replay remains a separate plan |
 | **M2** | loop core: sequential tools, steering/follow-up, error/abort paths | Complete |
 | **M3** | parallel tool engine, hooks, truncation guard, terminate | Complete |
@@ -424,7 +426,8 @@ repository tests compile them but never execute a provider request.
 | **M5** | default stream function, package docs, `c01-basic`, `c02-tools`, `c03-steering-abort` | Complete |
 | **M6** | feature-gated proxy HTTP/SSE transport | Complete with mock-server, trust-boundary, and resource-cap regression coverage |
 
-Current alignment is **52/52 mapped green** and **120/120 total all-feature tests green**. The
-M1-M6 completion checkpoint was 112/112; eight proxy/streaming-JSON hardening regressions account
-for the increase. Future case or regression additions must update the documentation and parity
-baseline deliberately.
+Current alignment is **56/56 mapped green**, **206/206** agent-crate all-feature tests green,
+and **213/213** for the workspace's agent + FFI gate. The M1-M6 completion checkpoint was
+112/112; release-hardening, upstream case additions (52 → 55 → 56), and later parity/runtime
+batches account for the increase. Future case or regression additions must update the upstream
+pin, parity matrix, documentation, and declared test counts deliberately.

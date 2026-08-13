@@ -9,7 +9,7 @@ name = "genai-agentprism"
 # and `codex` modules). The numeric `.N` + `-agentprism` pre-release suffix keeps the artifact
 # distinct from — and predictably ordered against — anything upstream may publish
 # (beta.19 < this < beta.20). Published to crates.io as `genai-agentprism`.
-version = "0.7.0-beta.19.1-agentprism"
+version = "0.7.0-beta.19.2-agentprism"
 repository = "https://github.com/agentprism/genai-agent-rs"
 edition = "2024"
 rust-version = "1.88"

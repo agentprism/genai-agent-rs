@@ -285,6 +285,7 @@ impl AssistantAccumulator {
             id: tool_call.call_id,
             name: tool_call.fn_name,
             arguments: streamed_arguments(&tool_call.fn_arguments),
+            namespace: None,
             thought_signatures: tool_call.thought_signatures.unwrap_or_default(),
         };
         if self.thinking_index.is_none()

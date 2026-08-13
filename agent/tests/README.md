@@ -5,12 +5,14 @@ This directory ports the non-harness behavioral contract from
 
 ## Current checkpoint
 
-- `agent_loop.rs`: 21 mapped cases
-- `agent.rs`: 21 mapped cases
-- `e2e_scripted.rs`: 10 mapped cases
-- Mapped parity: **52/52 green**, zero ignored and zero documented divergences
+- `agent_loop.rs`: 23 mapped cases (of 42 registered tests)
+- `agent.rs`: 22 mapped cases (of 31 registered tests)
+- `e2e_scripted.rs`: 10 mapped cases (of 10 registered tests)
+- `proxy.rs`: 1 mapped case (of 23 registered tests; the rest are proxy regressions)
+- Mapped parity: **56/56 green**, zero ignored and zero documented divergences
 - M1-M6 completion checkpoint: **112/112 green**
-- Current all-feature repository suite: **220/220 green**
+- Current agent-crate all-feature suite: **206/206 green**; the workspace's 7 FFI tests bring
+  the agent + FFI gate to **213/213 green**
 
 Focused targets additionally cover the assistant accumulator, malformed stream handling, event
 stream lifetime, runtime configuration (including independent session/retry request fields and
@@ -27,7 +29,9 @@ behavior in tests is scripted or served by local mock HTTP endpoints; the live e
 compiled but never executed by the suite.
 
 ```bash
-# Verify that the aggregate manifest exactly equals its ordered fragments and pinned TS cases.
+# Verify the pi checkout's git HEAD against upstream_commit, then verify that the aggregate
+# manifest exactly equals its ordered fragments and pinned TS cases. PI_ROOT can override the
+# default workspace-local `pi/` checkout.
 python3 scripts/check_test_parity.py
 
 # Compile every library, example, and test target without running providers.
@@ -37,9 +41,10 @@ cargo test --all-features --all-targets --no-run
 cargo test --all-features --all-targets --no-fail-fast
 ```
 
-`parity_manifest.toml` contains checkpoint metadata plus the aggregate case list. The ordered source
-fragments are `parity/agent_loop.toml`, `parity/agent.toml`, and `parity/e2e.toml`. The checker fails
-if `expected_cases` drifts, a mapped source/Rust test is missing or duplicated, or any aggregate
+`parity_manifest.toml` contains checkpoint metadata plus the aggregate case list. The ordered
+source fragments are `parity/agent_loop.toml`, `parity/agent.toml`, `parity/e2e.toml`, and
+`parity/proxy.toml`. The checker fails if the pi checkout is not at `upstream_commit`,
+`expected_cases` drifts, a mapped source/Rust test is missing or duplicated, or any aggregate
 case—including its milestone or status—differs from the ordered fragments.
 
 `status = "green"` means the mapped behavior is implemented and passing. `active` is reserved for an
@@ -47,5 +52,7 @@ enabled case temporarily red during test-first work; `pending` is allowed only b
 Rust body exists; `divergence` requires a documented and reviewed Rust-specific reason.
 
 Historical checkpoints were **10/52** at the T2 skeleton and **30/52** after the stateless loop.
-Those red-baseline phases are complete; M1-M6 reached 112/112, and eight release-hardening
-regressions bring the current suite to 120/120.
+Those red-baseline phases are complete; M1-M6 reached 112/112. Later release-hardening,
+production-parity, execution-seam, and latest pi-sync additions bring the mapped matrix to
+**56/56**, the current agent crate to **206/206**, and the workspace agent + FFI gate to
+**213/213**.
