@@ -4,24 +4,29 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import subprocess
 import sys
 import tomllib
 from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-UPSTREAM_ROOT = ROOT.parent
+WORKSPACE_ROOT = ROOT.parent
+PI_ROOT = Path(os.environ.get("PI_ROOT", WORKSPACE_ROOT / "pi"))
 DEFAULT_MANIFEST = ROOT / "tests" / "parity_manifest.toml"
 FRAGMENT_MANIFESTS = (
     ROOT / "tests" / "parity" / "agent_loop.toml",
     ROOT / "tests" / "parity" / "agent.toml",
     ROOT / "tests" / "parity" / "e2e.toml",
+    ROOT / "tests" / "parity" / "proxy.toml",
 )
 SOURCE_COUNTS = {
     "pi/packages/agent/test/agent-loop.test.ts": 23,
     "pi/packages/agent/test/agent.test.ts": 22,
     "pi/packages/agent/test/e2e.test.ts": 10,
+    "pi/packages/agent/test/proxy.test.ts": 1,
 }
 VALID_STATUSES = {"pending", "active", "green", "divergence"}
 CASE_RE = re.compile(r"\b(?:it|test)\(\s*[\"'`]([^\"'`]+)[\"'`]")
@@ -32,10 +37,40 @@ def fail(message: str) -> None:
     raise SystemExit(1)
 
 
+def upstream_path(source_file: str) -> Path:
+    relative = Path(source_file)
+    if not relative.parts or relative.parts[0] != "pi":
+        fail(f"upstream source must be rooted at pi/: {source_file}")
+    return PI_ROOT.joinpath(*relative.parts[1:])
+
+
+def verified_upstream_head(expected_commit: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_commit):
+        fail("manifest upstream_commit must be a lowercase 40-character git SHA")
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=PI_ROOT,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        fail(f"pi checkout is missing or is not a git repository: {PI_ROOT}")
+    if result.returncode != 0:
+        fail(f"pi checkout is missing or is not a git repository: {PI_ROOT}")
+    head = result.stdout.strip()
+    if head != expected_commit:
+        fail(
+            f"pi checkout HEAD is {head}, but manifest pins {expected_commit}; "
+            "check out the pinned release before updating the parity baseline"
+        )
+    return head
+
+
 def upstream_cases() -> set[tuple[str, str]]:
     result: set[tuple[str, str]] = set()
     for source_file, expected_count in SOURCE_COUNTS.items():
-        path = UPSTREAM_ROOT / source_file
+        path = upstream_path(source_file)
         if not path.is_file():
             fail(f"upstream source is missing: {path}")
         names = CASE_RE.findall(path.read_text(encoding="utf-8"))
@@ -115,6 +150,11 @@ def main() -> None:
     if not isinstance(cases, list) or not all(isinstance(case, dict) for case in cases):
         fail("manifest must contain only repeated [[case]] tables")
 
+    upstream_commit = document.get("upstream_commit")
+    if not isinstance(upstream_commit, str):
+        fail("manifest upstream_commit must be a git SHA string")
+    verified_head = verified_upstream_head(upstream_commit)
+
     expected_cases = document.get("expected_cases")
     source_baseline = sum(SOURCE_COUNTS.values())
     if isinstance(expected_cases, bool) or not isinstance(expected_cases, int):
@@ -184,6 +224,7 @@ def main() -> None:
     green = statuses["green"]
     active = green + statuses["active"]
     print(f"parity manifest OK: {total}/{total} cases mapped")
+    print(f"pi pin verified against git: {verified_head}")
     print(f"green/active: {green}/{active}; green/total: {green}/{total}")
     print("status counts: " + ", ".join(f"{key}={statuses[key]}" for key in sorted(statuses)))
 

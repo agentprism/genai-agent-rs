@@ -24,11 +24,14 @@ advisory, and `AgentUsage` cost/cache-write-1h/reasoning accounting with an inje
 and the 0.2.0 suite was **149/149** green. The core-runtime batch — independent
 `session_id`/`max_retries`/`max_retry_delay_ms` request fields, shared `ThinkingBudgets`
 resolution for next-turn thinking updates, and fallible tool preparation and before/after hook
-channels whose errors become in-band tool results — brings the current suite to **215/215** green.
-The execution-seam batch — request-level `on_payload`/`on_response` overrides honored by
-`GenaiStreamFn` through the fork's new `ExecOptions` execution methods, a saturating retry-delay
-conversion, and the DIST-01 distribution gate — brings the current suite to **220/220**
-green.
+channels whose errors become in-band tool results — grows the suite. The execution-seam batch —
+request-level `on_payload`/`on_response` overrides honored by `GenaiStreamFn` through the fork's
+new `ExecOptions` execution methods, a saturating retry-delay conversion, and the DIST-01
+distribution gate — grows it further. The pi-parity sync batch fast-forwards the parity pin to the latest pi-agent-core
+(pi `581d75a89…`), ports the `toolcall_end` metadata delivery (`ProxyToolCall` on the wire,
+merged onto the open tool-call block) and the pi-ai `ToolCall.namespace` field, and grows the
+mapped matrix to **56/56**; the current all-feature repository suite (agent + FFI) is
+**213/213** green.
 
 ## Installation
 
@@ -47,13 +50,18 @@ genai = { package = "genai-agentprism", version = "=0.7.0-beta.19.1-agentprism" 
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
+That is the latest **published** pair. Current `main` is the unpublished 0.3.0 development line
+and exact-pins `genai-agentprism =0.7.0-beta.19.2-agentprism`; source consumers should use the
+workspace path until that pair is published in lockstep.
+
 > **Note:** this release line builds against the AgentPrism `genai` fork (vendored in the
 > [genai-agent-rs workspace](https://github.com/agentprism/genai-agent-rs); fork lineage from the
 > [agentprism/rust-genai](https://github.com/agentprism/rust-genai) mirror) until upstream
 > [PR #277](https://github.com/jeremychone/rust-genai/pull/277) merges. The crate uses fork APIs
 > (for example `ToolResponse::parts`, the client-level `PayloadInterceptor`/`ResponseObserver`
 > exec hooks plus their request-level `ExecOptions` overrides backing `on_payload`/`on_response`,
-> and the response `headers` carried by streaming-path HTTP errors — `Error::HttpError.headers` —
+> the pi-ai parity field `AgentToolCall::namespace`, and the response `headers` carried by
+> streaming-path HTTP errors — `Error::HttpError.headers` —
 > that the `GenaiStreamFn` retry layer reads to honor `retry-after`/`x-should-retry`), which no
 > crates.io release of upstream `genai` provides; the fork carries them under the
 > `genai-agentprism` name instead.
@@ -216,12 +224,17 @@ continuation. Proxy construction can likewise return a local configuration error
 With `testing`, use `MockStreamFn` and `ScriptedStream` to exercise the real agent loop without API
 keys or network access. The repository's parity manifest is checked by
 `python3 scripts/check_test_parity.py`; its ordered fragments and aggregate must describe exactly the
-same 55 cases.
+same 56 cases. The matrix tracks upstream: it pins the `earendil-works/pi` commit it was synced
+against (`upstream_commit` in `tests/parity_manifest.toml`) and, on each new pi-agent-core
+release, is deliberately re-synced — the pin fast-forwards, added/renamed vitest cases are ported
+one-for-one, and every entry must be `green` before release (see the workspace README's "Staying
+current with pi-agent-core" section and [`docs/parity-roadmap.md`](docs/parity-roadmap.md)).
 
 With `proxy`, `ProxyStreamFn` is a drop-in `StreamFn`. It authenticates to the normalized
 `/api/stream` endpoint with a bearer token and reconstructs compact SSE events into the same
 assistant stream. The SSE event protocol matches the TypeScript proxy's compact events (snake-case
-tags, `contentIndex` fields, the `toolUse` terminal reason), but the request body does not: it is
+tags, `contentIndex` fields, the `toolUse` terminal reason, and the finalized `toolCall` object
+delivered on `toolcall_end`), but the request body does not: it is
 this crate's own `ProxyRequestV1` schema, not the TypeScript `proxy.ts` request contract (a pi-ai
 `Model` object, pi-schema messages, and an eleven-option subset), so a server built for the pi
 proxy request contract cannot serve this client without a translation layer. Whitespace-only SSE
@@ -245,13 +258,13 @@ sandbox for untrusted servers.
 
 | Area | Contract or deliberate difference |
 |---|---|
-| Mapped behavior | The pinned non-harness matrix is 55/55 green with no mapped divergence. The M1-M6 checkpoint contained 112 green tests; release-hardening regressions, upstream/production-parity additions (including the `on_payload`/`on_response` exec hooks and the `GenaiStreamFn` retry layer), the core-runtime batch, and the execution-seam batch bring the current all-feature suite to 220/220. |
+| Mapped behavior | The pinned non-harness matrix is 56/56 green with no mapped divergence (the pin fast-forwards to the latest pi-agent-core; the most recent sync added the `proxy.test.ts` `toolcall_end` metadata case). The M1-M6 checkpoint contained 112 green tests; release-hardening regressions, upstream/production-parity additions (including the `on_payload`/`on_response` exec hooks and the `GenaiStreamFn` retry layer), the core-runtime batch, the execution-seam batch, and the pi-parity sync batch bring the current all-feature suite (agent + FFI) to 213/213. |
 | Hook snapshots and failure contract | Async hook contexts own cloned transcript/context snapshots (the before-tool hook alone borrows its local context mutably so it can replace arguments). Legacy hook return types are intentionally infallible rather than `Result`-shaped. The opt-in fallible tool channels (`try_prepare_arguments`, `TryBeforeToolCallHook`, `TryAfterToolCallHook`) return `Result<_, ToolHookError>`; an `Err` becomes the call's in-band error tool result with the error's verbatim display text (pi's `error.message` semantics), preparation/before failures skip execution, and an after-hook failure replaces the completed result without rolling back side effects. The fallible channel takes precedence over its legacy counterpart when both are installed; they are never both invoked for one call. A panic is a programming fault: `Agent` synthesizes an in-band failure lifecycle, spawned `agent_loop` reports `LoopError::TaskPanicked`, and direct `run_agent_loop` callers retain normal Rust unwind responsibility. |
 | Unbounded observation/update policy | Spawned loop events and internal parallel tool-update handoff are unbounded so observers cannot change execution ordering or deadlock tool tasks. Tool `UpdateSink::emit` is synchronous and returns whether the update was accepted; producers must choose a sensible update rate. Use the awaited loop API when consumer backpressure is required. |
 | Same-sink re-entry | `UpdateSink` serializes `emit` and `close` across clones and runs the callback while holding its gate. That callback must not call `emit`, `close`, or `is_closed` on the same sink or a clone; same-sink re-entry would deadlock. |
 | Proxy wire protocol | The compact SSE event protocol is TypeScript-compatible (snake-case tags, `contentIndex`, `toolUse`), but the request body is this crate's own `ProxyRequestV1` schema, not the pi `proxy.ts` request contract. Servers implementing the TypeScript request contract cannot serve this client without translation. |
 | Proxy trust boundary | Tool-argument parsing is capped, URL userinfo is rejected, and the built-in client does not redirect, but SSE/text buffering is unbounded. Production callers must use HTTPS and trust the endpoint; injected HTTP clients retain their caller-selected redirect policy. Extra request headers/body may carry secrets even though transport and resolved target credentials are excluded from the wire DTO. |
-| `genai` foundation limits | `ModelSpec` identifies a target but `genai` carries no context-window or price catalog. Token accounting is native, but monetary cost is opt-in: `AgentUsage::cost` stays `None` unless an application supplies a `PriceCatalog`. User and tool-result images are supported: user images become content parts, and tool-result images attach as `genai::chat::ToolResponse` binary `parts` (an agentprism-fork API until upstream PR #277 merges; see Installation). |
+| `genai` foundation limits | `ModelSpec` identifies a target but `genai` carries no context-window or price catalog. Token accounting is native, but monetary cost is opt-in: `AgentUsage::cost` stays `None` unless an application supplies a `PriceCatalog`. `AgentToolCall::namespace` is preserved by the pi-compatible proxy close event, but upstream `genai::chat::ToolCall` has no namespace field, so the direct-provider conversion currently maps it to `None` rather than claiming replay fidelity the foundation cannot represent. User and tool-result images are supported: user images become content parts, and tool-result images attach as `genai::chat::ToolResponse` binary `parts` (an agentprism-fork API until upstream PR #277 merges; see Installation). |
 | Cost accounting | `AgentUsage` also carries `cache_write_1h_tokens` and `reasoning_tokens` (both mapped from `genai::chat::Usage` details; genai zero-elides `reasoning_tokens`, so `Some(0)` is unreachable through it). `AgentCost` + the injectable `PriceCatalog` port pi-ai's model-catalog cost step (`models.ts` `calculateCost`): the highest tier whose `input_tokens_above` is strictly below the request's `input + cache_read + cache_write` count prices the whole request. pi-ai's hardcoded Anthropic "1h writes at 2x base input" rule is generalized to an explicit `cache_write_1h` rate (falling back to `cache_write` when unset). Cost is attached at stream finalization by `GenaiStreamFn::with_price_catalog`; `AgentConfig::price_catalog` is a convenience store the application installs on the stream function it builds — the facade constructs no stream functions and applies no catalog itself. |
 | Thinking-budget resolution | The `ThinkingBudgets` map mirrors pi-ai's per-level budgets and `clampReasoning` (`xhigh`/`max` → `high`), but has **no implicit default budget table** (an entry must be configured or the named level falls back) and omits pi-ai's maxTokens-fitting step, which is impossible without the model catalog `genai` does not carry. |
 | Transport advisory | `Transport` is accepted and forwarded on every `StreamRequest`, but the SSE-only `GenaiStreamFn` ignores it. The TypeScript contract states providers that do not support a requested transport ignore it, so ignoring it is compliant; custom `StreamFn` implementations may honor it. |

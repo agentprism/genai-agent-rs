@@ -11,7 +11,9 @@
 //! aborted terminal. These limits do not bound SSE event/text framing or ordinary assistant text, so
 //! the proxy endpoint remains a trusted resource boundary.
 
-use super::{ProxyAssistantMessageEvent, ProxyDoneReason, ProxyErrorReason, ProxyUsage};
+use super::{
+    ProxyAssistantMessageEvent, ProxyDoneReason, ProxyErrorReason, ProxyToolCall, ProxyUsage,
+};
 use crate::{
     AgentToolCall, AgentUsage, AssistantContent, AssistantMessage, AssistantMessageEvent,
     AssistantMessageEventStream, StopReason, parse_streaming_json,
@@ -138,7 +140,8 @@ impl ProxyAccumulator {
             ProxyAssistantMessageEvent::ToolCallEnd {
                 content_index,
                 thought_signatures,
-            } => self.fold_tool_call_end(content_index, thought_signatures),
+                tool_call,
+            } => self.fold_tool_call_end(content_index, thought_signatures, tool_call),
             ProxyAssistantMessageEvent::Done {
                 reason,
                 usage,
@@ -441,6 +444,7 @@ impl ProxyAccumulator {
         &mut self,
         content_index: u32,
         thought_signatures: Vec<String>,
+        wire_tool_call: Option<ProxyToolCall>,
     ) -> Vec<AssistantMessageEvent> {
         let index = content_index as usize;
         if !matches!(
@@ -455,7 +459,27 @@ impl ProxyAccumulator {
         else {
             return self.internal_state_error("toolcall_end", content_index);
         };
+        // pi parity: a server may deliver tool-call metadata only on close; merge it onto the
+        // open block (TS `Object.assign(content, proxyEvent.toolCall)`). The plural
+        // `thought_signatures` wire field is this crate's extension and is applied first; a
+        // singular `thoughtSignature` carried inside the merged tool call is appended after it.
         tool_call.thought_signatures = thought_signatures;
+        if let Some(ProxyToolCall::ToolCall {
+            id,
+            name,
+            arguments,
+            thought_signature,
+            namespace,
+        }) = wire_tool_call
+        {
+            tool_call.id = id;
+            tool_call.name = name;
+            tool_call.arguments = arguments;
+            tool_call.namespace = namespace;
+            if let Some(signature) = thought_signature.filter(|signature| !signature.is_empty()) {
+                tool_call.thought_signatures.push(signature);
+            }
+        }
         let tool_call = tool_call.clone();
         if let Some(BlockState::ToolCall { open, .. }) = self.blocks.get_mut(index) {
             *open = false;
@@ -708,6 +732,7 @@ mod security_tests {
                 .fold(ProxyAssistantMessageEvent::ToolCallEnd {
                     content_index: 0,
                     thought_signatures: Vec::new(),
+                    tool_call: None,
                 })
                 .as_slice(),
             [AssistantMessageEvent::ToolCallEnd { .. }]

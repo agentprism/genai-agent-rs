@@ -425,6 +425,7 @@ pub struct AgentToolCall {
     pub name: String,
     /// JSON text (core `arguments: Value`).
     pub arguments_json: String,
+    pub namespace: Option<String>,
     pub thought_signatures: Vec<String>,
 }
 
@@ -434,6 +435,7 @@ impl From<agent::AgentToolCall> for AgentToolCall {
             id: v.id,
             name: v.name,
             arguments_json: serde_json::to_string(&v.arguments).unwrap_or_default(),
+            namespace: v.namespace,
             thought_signatures: v.thought_signatures,
         }
     }
@@ -914,6 +916,7 @@ impl From<AgentToolCall> for agent::AgentToolCall {
             id: v.id,
             name: v.name,
             arguments: serde_json::from_str(&v.arguments_json).unwrap_or(serde_json::Value::Null),
+            namespace: v.namespace,
             thought_signatures: v.thought_signatures,
         }
     }

@@ -606,6 +606,12 @@ pub enum ProxyAssistantMessageEvent {
         )]
         /// Provider thought signatures serialized as `"thoughtSignatures"`; an empty list is omitted.
         thought_signatures: Vec<String>,
+        #[serde(rename = "toolCall", default, skip_serializing_if = "Option::is_none")]
+        /// Finalized tool-call metadata serialized as `"toolCall"` (pi parity: the server
+        /// attaches the complete tool call — id, name, arguments, and optional
+        /// `thoughtSignature`/`namespace` — on close, and the client merges it onto the open
+        /// block). Optional so events captured from older servers keep decoding.
+        tool_call: Option<ProxyToolCall>,
     },
     /// Successfully terminate the stream (`"type": "done"`).
     ///
@@ -661,6 +667,35 @@ pub enum ProxyAssistantMessageEvent {
         )]
         /// Optional raw provider stop reason serialized as `"providerStopReason"`.
         provider_stop_reason: Option<String>,
+    },
+}
+
+/// The finalized tool-call object a server attaches to `toolcall_end` (pi parity: pi-agent-core
+/// delivers tool-call metadata received only on close through the wire event). Serializes with a
+/// `"type": "toolCall"` discriminator matching pi-ai's `ToolCall` wire shape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ProxyToolCall {
+    /// A complete tool call serialized as `{"type": "toolCall", ...}`.
+    #[serde(rename = "toolCall")]
+    ToolCall {
+        /// Provider tool-call identifier serialized as `"id"`.
+        id: String,
+        /// Tool name serialized as `"name"`.
+        name: String,
+        /// Parsed JSON arguments serialized as `"arguments"`.
+        arguments: Value,
+        #[serde(
+            rename = "thoughtSignature",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        /// Optional provider thought signature serialized as `"thoughtSignature"`.
+        thought_signature: Option<String>,
+        /// Optional provider tool namespace serialized as `"namespace"` (pi-ai
+        /// `ToolCall.namespace`, e.g. OpenAI Responses namespaced tools).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
     },
 }
 

@@ -6,13 +6,34 @@ All notable changes to this crate are documented here. The format is based on
 
 ## [Unreleased]
 
-Core-runtime batch (independent request fields, shared thinking-budget resolution, fallible tool
-channels) plus the execution-seam batch (request-level exec-hook overrides honored by
-`GenaiStreamFn`, a saturating retry-delay conversion, and the crates.io publication switch). The
-all-feature repository suite is **220/220** green.
+Pi-parity sync batch (parity pin fast-forwarded to the latest pi-agent-core, `toolcall_end`
+metadata delivery, `AgentToolCall::namespace`) on top of the core-runtime batch (independent
+request fields, shared thinking-budget resolution, fallible tool channels) and the execution-seam
+batch (request-level exec-hook overrides honored by `GenaiStreamFn`, a saturating retry-delay
+conversion, and the crates.io publication switch). The all-feature repository suite (agent + FFI)
+is **213/213** green.
 
 ### Added
 
+- **Pi parity: `toolcall_end` delivers the finalized tool call.** The proxy wire's `toolcall_end`
+  event gains an optional `toolCall` object (`ProxyToolCall`: id, name, parsed arguments, and
+  optional `thoughtSignature`/`namespace`); when present, the accumulator merges it onto the open
+  tool-call block exactly like pi's `Object.assign(content, proxyEvent.toolCall)` — including
+  metadata a server only knows at close, such as the pi-ai `namespace`. Events captured from
+  older servers (no `toolCall` field) keep decoding. The parity pin fast-forwards to pi
+  `581d75a89` and the mapped matrix grows to **56/56** with the new `proxy.test.ts` case
+  `preserves_tool_call_metadata_received_only_on_toolcall_end` (parity fragment
+  `tests/parity/proxy.toml`).
+- **`AgentToolCall::namespace`.** The core tool-call type gains `namespace: Option<String>`
+  (pi-ai `ToolCall.namespace`, e.g. OpenAI Responses namespaced tools) with a `with_namespace`
+  builder; the FFI `AgentToolCall` record mirrors it. `genai::chat::ToolCall` conversions map it
+  to `None` (upstream genai carries no namespace).
+
+### Changed
+
+- **Version 0.3.0 (unpublished pre-release).** `AgentToolCall` gains a public field, which is a
+  breaking change for struct literals; the crate moves to 0.3.0 and exact-pins `genai-agentprism`
+  `=0.7.0-beta.19.2-agentprism` (the fork version carrying `AgentToolCall::namespace`).
 - **Request-level exec hooks on `GenaiStreamFn`.** Per-request `StreamRequest::on_payload` /
   `on_response` hooks are now honored by the production stream function through the genai fork's
   new request-level `ExecOptions` (`exec_chat_stream_with_exec_options`): a request hook
@@ -24,11 +45,13 @@ all-feature repository suite is **220/220** green.
   an in-flight run keeps its snapshot.
 ### Changed
 
-- **Published to crates.io.** The crate is published as `rust-genai-agent` and depends on the
-  AgentPrism `genai` fork as `genai-agentprism` via Cargo's dual-source form —
-  `genai = { package = "genai-agentprism", version = "=0.7.0-beta.19.1-agentprism", path = "../genai" }` —
-  so packaged consumers resolve the fork from the registry with no `[patch.crates-io]`
-  indirection. The exact pin means the two crates publish in lockstep, `genai-agentprism` first.
+- **Published to crates.io.** The published 0.2.0 pair uses `rust-genai-agent =0.2.0` with
+  `genai-agentprism =0.7.0-beta.19.1-agentprism`. Current `main` is the unpublished 0.3.0 pair and
+  uses Cargo's dual-source form —
+  `genai = { package = "genai-agentprism", version = "=0.7.0-beta.19.2-agentprism", path = "../genai" }` —
+  so local builds use the workspace path and the next packaged release will resolve the fork
+  from crates.io with no `[patch.crates-io]` indirection. The exact pin means the two crates
+  publish in lockstep, `genai-agentprism` first.
   The earlier interim distribution model (locally packaged crate archives plus a consumer-side
   `[patch.crates-io]` entry, gated by the since-retired DIST-01 `scripts/check-distribution.sh`
   while `publish = false` was in effect) is removed; CI (`.github/workflows/ci.yml`) runs the

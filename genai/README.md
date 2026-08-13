@@ -13,6 +13,10 @@
 > genai = { package = "genai-agentprism", version = "0.7.0-beta.19.1-agentprism" }
 > ```
 >
+> That is the latest published fork version. Current `main` is the unpublished
+> `0.7.0-beta.19.2-agentprism` development line (carrying pi-ai `AgentToolCall::namespace`); use
+> the workspace path until the next lockstep publish.
+>
 > Everything below is the upstream README; where it says `genai = "…"`, use the dependency line
 > above.
 

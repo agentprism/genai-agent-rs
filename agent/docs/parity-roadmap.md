@@ -1,14 +1,20 @@
 # Parity roadmap
 
 Production-scoped follow-up work from the faithfulness verification of this crate against
-`@earendil-works/pi-agent-core` (pi commit `6b461b75b39b5a19b378dc42fbfbd1655bc446a6`).
+`@earendil-works/pi-agent-core`. The original 2026-08-06 verification ran against pi commit
+`6b461b75b39b5a19b378dc42fbfbd1655bc446a6`; the parity pin is **fast-forwarded on each upstream
+release**, and the current pin (`upstream_commit` in `tests/parity_manifest.toml`, verified by
+`scripts/check_test_parity.py` against the `pi/` checkout beside the workspace) is the source of
+truth. The most recent sync pinned `581d75a89cea21e50d6a26df840352f94427f633`.
 
 Scope rule: an item qualifies only if the behavior **ships in production** through the pi CLI
 (`pi/packages/coding-agent`), the sole production consumer of the package's non-harness surface.
 Features that are merely exported (declared-only) are listed under "Dropped" with evidence.
 
-Verification summary: the ported core is faithful — all 52 upstream non-harness test cases are
-mapped and green, and every production-critical behavior (awaited-listener run settlement,
+Verification summary: the ported core is faithful — all 56 upstream non-harness test cases at
+the current pin are mapped and green (52 at the original verification; the manifest tracks
+upstream additions, most recently the proxy `toolcall_end` metadata case), and every
+production-critical behavior (awaited-listener run settlement,
 `prepareNextTurnWithContext` refresh, queue drain modes + `continue()` semantics, the tool
 pipeline including `prepareArguments`/per-tool sequential/blocked-`terminate`/`addedToolNames`/
 `tool_execution_update`, `message_update` partials, copy-on-assign state, the `length`-stop
@@ -37,7 +43,8 @@ Target repo: `jeremychone/rust-genai`, via the `agentprism` fork. One PR, one co
 |---|---|---|---|
 | Headers on streaming HTTP errors | `maxRetryDelayMs` passed at construction (`sdk.ts:359`); pi-ai retry policy reads `retry-after-ms`/`retry-after`/`x-should-retry` headers and caps server-requested delays (`provider-retry.ts`) | Streaming-path HTTP failure surfaces response headers (today the streaming error carries only status/body — non-streaming `webc` keeps headers, streaming does not) | ✅ Done. Cancel-aware `RetryPolicy`/`GenaiStreamFn::with_retry` retry layer: peeks past the synthetic SSE `Start` to the first real event, retries the handshake only (never mid-stream), classifies via status + `x-should-retry`, and reproduces pi's exact delay precedence (`retry-after-ms` > `retry-after` seconds/HTTP-date > `min(0.5*2^attempt, 8)s` backoff with `1 - rand*0.25` jitter) and byte-exact cap message `Server requested {ceil}s retry delay (max: {ceil}s). {message}`. A server-requested delay over the cap fails fast; the computed backoff is never capped. Reads the fork's streaming-error `Error::HttpError.headers` (upstream PR #277) whose `WebStream { error, .. }` boxed inner downcasts to `HttpError { status, headers, .. }`. Defaults mirror pi (`max_retries = 0`, `max_retry_delay_ms = 60000`); with retries off, behavior is byte-identical. Jitter uses a tiny built-in xorshift (no `rand` dep). `AgentConfig::max_retries`/`max_retry_delay_ms` are convenience stores the app installs on its `GenaiStreamFn`, like `price_catalog` (`stream_fn.rs`, `agent.rs`) (M) |
 | `ToolResponse` binary parts | Production tool results carry images; `afterToolCall` normalizes them (`agent-session.ts:501-532`) | Optional binary attachments on `ToolResponse`, covering all adapters per the pi-ai reference behavior: native blocks where the wire supports them (Anthropic `tool_result`; Gemini 3+ `functionResponse.parts`), and a follow-up user message ("Attached image(s) from tool result:" + image parts, with a "(see attached image)" placeholder in the tool slot) on string-only wires (OpenAI-compatible, older Gemini) — `openai-completions.ts:1243-1315`, `google-shared.ts:189-210` | ✅ Done. Converter attaches tool-result images as `Binary` attachments via `ToolResponse::with_parts` (fork API, upstream PR #277) instead of the `"[image omitted]"` marker; text-only results leave `parts` unset (`message.rs`) (S) |
-| Exec interceptors (`onPayload`/`onResponse`) | Extension bridge hooks `before_provider_request`/`after_provider_response` wired at the production construction site (`sdk.ts:331-348`) | Per-request payload interceptor (may replace the provider payload before send) + response observer (status + headers, before body consumption). genai today has no interceptor and the streaming HTTP send is lazy — needs threading through the stream setup | ✅ Done. `on_payload`/`on_response` hooks (`OnPayloadHook`/`OnResponseHook` + a body-free `StreamResponseInfo`) on `AgentConfig` + `StreamRequest` with `Busy`-guarded setters; the loop forwards them onto every `StreamRequest` (`hooks.rs`, `config.rs`, `agent.rs`, `agent_loop.rs`). Custom `StreamFn`s and the proxy honor the per-request hooks directly — the proxy replaces the wire body on `on_payload` and observes status/headers before consuming the SSE/error body (`proxy/client.rs`). The fork's interceptors are **client-level** and a built `Client` is immutable, so `GenaiStreamFn` applies **construction-time** hooks via `GenaiStreamFn::with_exec_hooks` (installing the fork's `PayloadInterceptor`/`ResponseObserver` through delegation adapters `payload_interceptor_from_hook`/`response_observer_from_hook`) and documents that it ignores the per-request fields, mirroring pi's single construction-site wiring (`stream_fn.rs`) (M) |
+| Exec interceptors (`onPayload`/`onResponse`) | Extension bridge hooks `before_provider_request`/`after_provider_response` wired at the production construction site (`sdk.ts:331-348`) | Per-request payload interceptor (may replace the provider payload before send) + response observer (status + headers, before body consumption). genai today has no interceptor and the streaming HTTP send is lazy — needs threading through the stream setup | ✅ Done. `on_payload`/`on_response` hooks (`OnPayloadHook`/`OnResponseHook` + a body-free `StreamResponseInfo`) on `AgentConfig` + `StreamRequest` with `Busy`-guarded setters; the loop forwards them onto every `StreamRequest` (`hooks.rs`, `config.rs`, `agent.rs`, `agent_loop.rs`). Custom `StreamFn`s and the proxy honor the per-request hooks directly — the proxy replaces the wire body on `on_payload` and observes status/headers before consuming the SSE/error body (`proxy/client.rs`). `GenaiStreamFn` honors them through the fork's request-level `ExecOptions`: a request hook **replaces** the construction-time hook of its channel for that execution, the two never compose, exactly one fires per physical attempt (including retries and HTTP-error responses), and an absent request hook inherits the construction-time default installed through `GenaiStreamFn::with_exec_hooks` (`genai/src/stream_fn.rs`) (M) |
+| OpenAI Responses tool-call namespaces | pi-ai commit `02bd2d1c6` preserves `ToolCall.namespace` while streaming and replaying same-model/deferred Responses tool calls; pi-agent-core's proxy close event now carries the finalized tool call | Add optional namespace support to `genai::chat::ToolCall` and the OpenAI Responses streamer/replay serializer; the current upstream foundation has no field for it | **Partial.** `AgentToolCall::namespace` and the pi-compatible proxy `toolcall_end.toolCall` merge are landed and mapped green. Direct-provider `genai::chat::ToolCall` conversions deliberately map namespace to `None` until the foundation supports it; README documents the limitation instead of claiming false fidelity. (M) |
 
 ## 2b. Backend gap — production-shipped in pi, unreachable from the Rust stack today
 
@@ -61,7 +68,8 @@ Target repo: `jeremychone/rust-genai`, via the `agentprism` fork. One PR, one co
 
 - Verification + designs: session investigation reports (agent loop, Agent facade, proxy, type
   layer, harness feasibility, production-usage audit), 2026-08-06.
-- Parity manifest: `tests/parity_manifest.toml` (52/52 mapped, pinned upstream commit).
+- Parity manifest: `tests/parity_manifest.toml` (56/56 mapped; the upstream commit pin is
+  git-verified by `scripts/check_test_parity.py`).
 - Harness port feasibility (out of scope, design study only): see
   [`harness-port-design.md`](harness-port-design.md) — separate `rust-genai-agent-harness`
   crate, ~10–14 engineer-weeks, JSONL interop achievable.

@@ -3,8 +3,9 @@
 The TS package's `src/harness/**` and `src/node.ts` were **deliberately excluded** from this crate
 (see README). This document records the design study for how the harness *would* be faithfully
 ported if it were ever brought into scope. It condenses the 2026-08-06 investigation; it is a
-plan, not a commitment. Note: the study predates the 2026-08-06 pi fast-forward (repin to
-`666d8972f`); a fresh survey diff is required before starting.
+plan, not a commitment. Note: the study predates the current pi parity pin
+(`581d75a89`); use the separate `rust-genai-agent-harness` crate for the landed harness
+substrate and perform a fresh upstream survey diff before extending that port.
 
 ## The critical structural finding
 

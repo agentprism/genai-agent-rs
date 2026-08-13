@@ -18,3 +18,4 @@ ffi/swiftpm/.swiftpm/
 # NOTE: ffi/swiftpm/Sources/GenAIAgent/genai_agent_ffi.swift IS committed (regenerated and
 # committed by ffi/release_swift.sh at each release) — the root distribution Package.swift
 # needs the generated bindings present for consumers building from a git tag.
+/pi
