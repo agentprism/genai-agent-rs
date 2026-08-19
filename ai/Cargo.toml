@@ -15,7 +15,17 @@ name = "ai"
 
 [dependencies]
 futures = "0.3"
+# Ruled 2026-08-19: the OpenAI client for the openai-completions/openai-responses API
+# implementations — plays the role pi's `openai` SDK plays (transport + SSE framing).
+openai-oxide = "0.16"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
-tokio = { version = "1", features = ["sync", "time"] }
+tokio = { version = "1", features = ["sync", "time", "rt-multi-thread", "macros"] }
+
+[dev-dependencies]
+# Hermetic HTTP/SSE test server for wire tests (same stack as the fork's yakbak harness).
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "http1"] }
