@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["genai", "agent", "ffi"]
+members = ["genai", "agent", "ffi", "ai"]
 
 # Release profile for the mobile/FFI artifact (see ffi/): small and symbolicated.
 # `debuginfo` strip keeps symbol tables (production crash reports stay symbolicated;
