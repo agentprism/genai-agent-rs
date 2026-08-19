@@ -1,0 +1,294 @@
+# Provider API implementations — the definitive list
+
+The Rust port implements the following subset of pi-ai's API implementations,
+preserving pi-ai's sourcing model: use the provider's native SDK where an
+equivalent exists in native Rust, find an equivalent community crate otherwise,
+and re-implement the underlying wire logic in idiomatic Rust only when neither
+exists. Where pi-ai itself hand-rolls the wire, the Rust port re-implements
+that wire.
+
+Transport facts below are from the verification report further down, run
+against pi commit `496185f6e4267b979e3663c45f7eb70b0c6a97b4` (2026-08-19).
+
+## Ported subset
+
+| Api id | pi module | Library in pi | Verified transport in pi | Rust port requirement |
+|---|---|---|---|---|
+| `anthropic-messages` | `anthropic-messages.ts` | `@anthropic-ai/sdk` 0.91.1 | SDK client issues the streaming request (`messages.create(...).asResponse()`, SDK retries disabled); pi reads the raw `Response` body and **hand-parses the SSE stream itself** | Rust equivalent of the Anthropic client for request construction/auth/errors; the SSE parsing is pi-owned and ports with the adapter |
+| `openai-completions` | `openai-completions.ts` | `openai` 6.40.0 | **SDK end-to-end**: `client.chat.completions.create(params, ...).withResponse()`; SDK-parsed `ChatCompletionChunk` stream; SDK retries disabled; `retryProviderRequest()` wraps the initial call | Ruled: [`openai-oxide`](https://github.com/fortunto2/openai-oxide) (MIT; hand-written client, types auto-synced from OpenAI's spec; Chat Completions + Responses streaming, custom base URL, per-request headers, raw request access; crates.io `openai-oxide` 0.16.0, MIT, current as of 2026-08-19) |
+| `openai-responses` | `openai-responses.ts` | `openai` 6.40.0 | **SDK end-to-end**: `client.responses.create(...).withResponse()`; SDK-parsed `ResponseStreamEvent`s fed to shared `processResponsesStream()` | Same as `openai-completions` |
+| `openai-codex-responses` | `openai-codex-responses.ts` | none at runtime (`openai` types only) | **Fully hand-rolled**: local fetch POST, local SSE parser, WebSocket / `websocket-cached` / `auto` transports with pre-stream SSE fallback and session socket caching, zstd request compression on the SSE path, own retry loop | Re-implement in idiomatic Rust — the wire logic is pi-owned |
+| `google-generative-ai` | `google-generative-ai.ts` | `@google/genai` 1.52.0 | SDK end-to-end: `client.models.generateContentStream(params)`; custom fetch rejected | Rust equivalent of `@google/genai` (Gemini Developer API mode) |
+| `google-vertex` | `google-vertex.ts` | `@google/genai` 1.52.0 | SDK end-to-end in Vertex mode; auth is API key or SDK-owned ADC (`googleAuthOptions`) | Rust equivalent of `@google/genai` (Vertex mode, including ADC auth) |
+| `bedrock-converse-stream` | `bedrock-converse-stream.ts` | `@aws-sdk/client-bedrock-runtime` 3.1048.0 + `@smithy/node-http-handler` 4.7.3 | SDK end-to-end: `client.send(ConverseStreamCommand)`; **AWS event-stream framing, not SSE**; transport customizations: proxy agents via `NodeHttpHandler`, `AWS_BEDROCK_FORCE_HTTP1`, pre-SigV4 custom-header middleware, status/header capture middleware, bearer token via `config.token`/`httpBearerAuth` | Rust equivalent of the AWS Bedrock Runtime client |
+
+## Not ported
+
+- `azure-openai-responses` — excluded from the subset.
+- `mistral-conversations` — excluded from the subset.
+- `pi-messages` — excluded from the subset (pi's own wire protocol, spoken by
+  the Radius gateway and `models.json` custom providers).
+- `openrouter-images` — excluded from the subset.
+
+## Transport verification (authoritative)
+
+Verification run 2026-08-19 by a codex/gpt-5.6-sol (xhigh) agent against
+`/Users/vikashloomba/pi/packages/ai` at commit
+`496185f6e4267b979e3663c45f7eb70b0c6a97b4`, answering the question the original
+survey left open (whether SDK-backed implementations drop down to raw fetch for
+sub-features, and where the hand-rolled implementations actually issue their
+requests). Where this report conflicts with the survey Q/A in the appendix,
+this report wins. Report verbatim:
+
+---
+
+# pi-ai API transport verification
+
+Scope: `/Users/vikashloomba/pi/packages/ai` at commit `496185f6e4267b979e3663c45f7eb70b0c6a97b4`. The repository remained unchanged.
+
+The prior classification is stale for this checkout: `openai-completions`, `openai-responses`, and `openrouter-images` now instantiate and invoke the OpenAI SDK, rather than using it for types only. ([openai-completions.ts:1,311–313](/Users/vikashloomba/pi/packages/ai/src/api/openai-completions.ts:1), [openai-responses.ts:1,151–153](/Users/vikashloomba/pi/packages/ai/src/api/openai-responses.ts:1), [openrouter-images.ts:1,70–74](/Users/vikashloomba/pi/packages/ai/src/api/openrouter-images.ts:1))
+
+## 1. `anthropic-messages.ts`
+
+1. **Transport truth.** `buildParams()` constructs an Anthropic streaming Messages payload, including `stream: true`. The actual HTTP request is issued by `client.messages.create({...params, stream: true}, requestOptions).asResponse()` at line 576. The call is wrapped by `retryProviderRequest()`, but the SDK’s own retries are disabled with `maxRetries: 0`. ([anthropic-messages.ts:565–582](/Users/vikashloomba/pi/packages/ai/src/api/anthropic-messages.ts:565), [anthropic-messages.ts:973–1007](/Users/vikashloomba/pi/packages/ai/src/api/anthropic-messages.ts:973))
+
+   The SDK is asked for a raw `Response`, not its parsed message stream. Pi reads `response.body` itself in `iterateSseMessages()`, splits and decodes SSE fields locally, converts each accepted event with `parseJsonWithRepair()`, and then consumes those events in the main loop. Partial tool arguments use `parseStreamingJson()`. ([anthropic-messages.ts:330–457](/Users/vikashloomba/pi/packages/ai/src/api/anthropic-messages.ts:330), [anthropic-messages.ts:460–498](/Users/vikashloomba/pi/packages/ai/src/api/anthropic-messages.ts:460), [anthropic-messages.ts:589–719](/Users/vikashloomba/pi/packages/ai/src/api/anthropic-messages.ts:589))
+
+2. **SDK drop-downs.** This is not SDK-end-to-end parsing: the SDK performs the request and error handling, but pi hand-parses the SDK-returned raw SSE body. A caller can also replace SDK transport by supplying `options.fetch`, which is passed into every internally constructed `Anthropic` client, or replace the client entirely with `options.client`. There are no separate raw-fetch calls, token-counting calls, model-listing calls, WebSockets, compression paths, or other sub-feature requests in this module. ([anthropic-messages.ts:267–271](/Users/vikashloomba/pi/packages/ai/src/api/anthropic-messages.ts:267), [anthropic-messages.ts:532–564](/Users/vikashloomba/pi/packages/ai/src/api/anthropic-messages.ts:532), [anthropic-messages.ts:877–970](/Users/vikashloomba/pi/packages/ai/src/api/anthropic-messages.ts:877))
+
+3. **SDK role.** `@anthropic-ai/sdk` supplies the runtime `Anthropic` client plus request/event types. Pi configures API-key, bearer/OAuth, or GitHub Copilot authentication through `apiKey`/`authToken`; supplies `baseURL`, default/beta headers, browser permission, and optional fetch; and uses the SDK’s `messages.create()` request construction. Signal and timeout are passed per request. Pi disables SDK retries and reproduces the initial-request retry policy with its abort-aware helper. ([anthropic-messages.ts:1–9](/Users/vikashloomba/pi/packages/ai/src/api/anthropic-messages.ts:1), [anthropic-messages.ts:570–582](/Users/vikashloomba/pi/packages/ai/src/api/anthropic-messages.ts:570), [anthropic-messages.ts:901–968](/Users/vikashloomba/pi/packages/ai/src/api/anthropic-messages.ts:901))
+
+4. **Variants and deferred responses.** The module itself has one HTTP/SSE request path. `splitDeferredTools()` and `defer_loading` concern tool-definition loading inside that same Messages request; they are not background-response APIs. The public lazy wrapper enables neither `fetchDeferred` nor `cancelDeferred`. ([anthropic-messages.ts:983–1007](/Users/vikashloomba/pi/packages/ai/src/api/anthropic-messages.ts:983), [anthropic-messages.ts:1041–1058](/Users/vikashloomba/pi/packages/ai/src/api/anthropic-messages.ts:1041), [anthropic-messages.lazy.ts:4](/Users/vikashloomba/pi/packages/ai/src/api/anthropic-messages.lazy.ts:4))
+
+## 2. `openai-completions.ts`
+
+1. **Transport truth.** This module now uses the OpenAI SDK at runtime. `buildParams()` creates a streaming Chat Completions request, and the HTTP request is issued by `client.chat.completions.create(params, requestOptions).withResponse()` at line 312. The SDK returns both its parsed asynchronous chunk stream and the raw response metadata; pi iterates the already-decoded `ChatCompletionChunk` objects at lines 505–640. Partial tool arguments are assembled with `parseStreamingJson()`. ([openai-completions.ts:265–318](/Users/vikashloomba/pi/packages/ai/src/api/openai-completions.ts:265), [openai-completions.ts:505–640](/Users/vikashloomba/pi/packages/ai/src/api/openai-completions.ts:505), [openai-completions.ts:756–784](/Users/vikashloomba/pi/packages/ai/src/api/openai-completions.ts:756))
+
+2. **SDK drop-downs.** No raw fetch or local SSE framing parser exists in this module. The only transport customization is `options.fetch`, passed into the SDK client. The raw `Response` returned by `.withResponse()` is used only for status/header callbacks; stream-event parsing remains SDK-owned. There are no token-counting, model-listing, WebSocket, compression, or secondary transport calls. ([openai-completions.ts:311–320](/Users/vikashloomba/pi/packages/ai/src/api/openai-completions.ts:311), [openai-completions.ts:711–753](/Users/vikashloomba/pi/packages/ai/src/api/openai-completions.ts:711))
+
+3. **SDK role.** `openai` supplies the runtime client and Chat Completions request/chunk types. Pi configures `apiKey`, `baseURL`, default headers, browser permission, and custom fetch. Per-request signal and timeout are retained; SDK retries are forced to zero and the initial request is wrapped by `retryProviderRequest()`. Because the chunk loop is outside that wrapper, this helper does not replay a stream after mid-stream failure. ([openai-completions.ts:1–13](/Users/vikashloomba/pi/packages/ai/src/api/openai-completions.ts:1), [openai-completions.ts:306–318](/Users/vikashloomba/pi/packages/ai/src/api/openai-completions.ts:306), [openai-completions.ts:747–753](/Users/vikashloomba/pi/packages/ai/src/api/openai-completions.ts:747))
+
+4. **Variants and deferred responses.** Only SDK-backed HTTP/SSE Chat Completions are selected; `StreamOptions.transport` is not examined here. Kimi deferred-tool handling alters which tools are sent/replayed in the same conversation and is not a deferred response. The lazy wrapper enables no `fetchDeferred` or `cancelDeferred`. ([openai-completions.ts:802–813](/Users/vikashloomba/pi/packages/ai/src/api/openai-completions.ts:802), [openai-completions.ts:1351–1428](/Users/vikashloomba/pi/packages/ai/src/api/openai-completions.ts:1351), [openai-completions.lazy.ts:4](/Users/vikashloomba/pi/packages/ai/src/api/openai-completions.lazy.ts:4))
+
+## 3. `openai-responses.ts`
+
+1. **Transport truth.** `buildParams()` constructs a streaming Responses API request with `stream: true` and `store: false`. The request is issued by `client.responses.create(params, requestOptions).withResponse()` at line 152. The SDK parses the wire stream into `ResponseStreamEvent` objects; pi passes that async iterable to the shared, non-I/O `processResponsesStream()` loop. ([openai-responses.ts:103–166](/Users/vikashloomba/pi/packages/ai/src/api/openai-responses.ts:103), [openai-responses.ts:290–298](/Users/vikashloomba/pi/packages/ai/src/api/openai-responses.ts:290), [openai-responses-shared.ts:432–438](/Users/vikashloomba/pi/packages/ai/src/api/openai-responses-shared.ts:432), [openai-responses-shared.ts:597–759](/Users/vikashloomba/pi/packages/ai/src/api/openai-responses-shared.ts:597))
+
+2. **SDK drop-downs.** There is no raw fetch or local SSE parser. `options.fetch` is injected into the OpenAI client; the raw response returned by `.withResponse()` is used for status/headers only. No model listing, token counting, WebSocket, compression, or secondary request path appears. ([openai-responses.ts:140–162](/Users/vikashloomba/pi/packages/ai/src/api/openai-responses.ts:140), [openai-responses.ts:218–260](/Users/vikashloomba/pi/packages/ai/src/api/openai-responses.ts:218))
+
+3. **SDK role.** `openai` provides the runtime client, Responses request types, and decoded event stream. Pi supplies API key, base URL, default/session headers, browser permission, and fetch. Signal/timeout are passed per request, SDK retries are disabled, and `retryProviderRequest()` owns initial-request retry policy. Mid-stream processing happens after that retry wrapper. ([openai-responses.ts:1–2](/Users/vikashloomba/pi/packages/ai/src/api/openai-responses.ts:1), [openai-responses.ts:146–158](/Users/vikashloomba/pi/packages/ai/src/api/openai-responses.ts:146), [openai-responses.ts:253–259](/Users/vikashloomba/pi/packages/ai/src/api/openai-responses.ts:253))
+
+4. **Variants and deferred responses.** The module exposes only SDK HTTP/SSE. Its “additional tools” and “tool search” modes are same-request deferred tool-definition features implemented during input conversion, not background responses. It exports no `fetchDeferred` or `cancelDeferred`. ([openai-responses.ts:272–286](/Users/vikashloomba/pi/packages/ai/src/api/openai-responses.ts:272), [openai-responses-shared.ts:321–340](/Users/vikashloomba/pi/packages/ai/src/api/openai-responses-shared.ts:321), [openai-responses.lazy.ts:4](/Users/vikashloomba/pi/packages/ai/src/api/openai-responses.lazy.ts:4))
+
+## 4. `openai-codex-responses.ts`
+
+1. **Transport truth.** This is hand-rolled. `buildRequestBody()` constructs a Responses-compatible body; URL and auth/session headers are built locally. The SSE path performs the POST directly through `(options.fetch ?? globalThis.fetch)` at lines 392–397. It then reads `Response.body` in local `parseSSE()`, JSON-decodes `data:` records, normalizes Codex events in `mapCodexEvents()`, and hands the resulting `ResponseStreamEvent` iterable to shared `processResponsesStream()`. ([openai-codex-responses.ts:269–286](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:269), [openai-codex-responses.ts:392–467](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:392), [openai-codex-responses.ts:519–591](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:519), [openai-codex-responses.ts:652–665](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:652), [openai-codex-responses.ts:717–753](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:717), [openai-codex-responses.ts:765–822](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:765))
+
+   The SSE retry loop is also local: it retries selected 429/5xx/text-classified responses and network errors, honors `Retry-After`/`Retry-After-Ms`, applies exponential backoff, and defaults to zero retries. Only request/header acquisition is retried; stream consumption begins after the loop. ([openai-codex-responses.ts:47–49](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:47), [openai-codex-responses.ts:116–168](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:116), [openai-codex-responses.ts:377–467](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:377))
+
+2. **SDK drop-downs.** There is no runtime OpenAI client: `openai/resources/responses` is imported for types only. Authentication, URL resolution, HTTP, retry, SSE parsing, WebSocket lifecycle, and error parsing are all local. Shared `openai-responses-shared.ts` supplies message/tool conversion and semantic event processing, but performs no request. ([openai-codex-responses.ts:1–7](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:1), [openai-codex-responses.ts:38–39](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:38), [openai-responses-shared.ts:432–438](/Users/vikashloomba/pi/packages/ai/src/api/openai-responses-shared.ts:432))
+
+3. **SDK role.** The OpenAI package provides compile-time Responses types only. `node:zlib` is likewise type-imported, then loaded dynamically through `process.getBuiltinModule()` when zstd is available. No OpenAI SDK auth, transport, stream parser, timeout, or retry behavior participates. ([openai-codex-responses.ts:1–7](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:1), [openai-codex-responses.ts:197–224](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:197))
+
+4. **Variants and deferred responses.**
+
+   - `transport` accepts `sse`, `websocket`, `websocket-cached`, or `auto`; the module defaults to `auto`. Any value except `sse` tries WebSocket first. `auto` and `websocket-cached` may send an input delta with `previous_response_id`; plain `websocket` sends full context, although session-scoped socket reuse can still occur. ([types.ts:110](/Users/vikashloomba/pi/packages/ai/src/types.ts:110), [openai-codex-responses.ts:286–300](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:286), [openai-codex-responses.ts:1423–1439](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:1423), [openai-codex-responses.ts:1471–1505](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:1471))
+
+   - WebSocket transport derives `ws:`/`wss:` from the Codex Responses URL, constructs a runtime WebSocket, sends one JSON `response.create` frame, parses incoming JSON frames locally, and feeds them through the same Codex normalization and Responses event processor. ([openai-codex-responses.ts:641–645](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:641), [openai-codex-responses.ts:1038–1113](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:1038), [openai-codex-responses.ts:1253–1385](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:1253), [openai-codex-responses.ts:1456–1542](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:1456))
+
+   - Before any stream event, transport failures fall back to SSE; a session remembers that fallback. Missing WebSocket continuation and connection-limit failures each get one immediate retry. Once WebSocket events have started, a transport failure is propagated rather than replayed over SSE. ([openai-codex-responses.ts:293–365](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:293), [openai-codex-responses.ts:930–949](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:930))
+
+   - Session WebSockets are cached for five idle minutes, capped at 55 minutes total age, and registered for session-resource cleanup. Connection timeout uses `websocketConnectTimeoutMs`; `timeoutMs` becomes WebSocket idle timeout. ([openai-codex-responses.ts:828–830](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:828), [openai-codex-responses.ts:912–928](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:912), [openai-codex-responses.ts:1015–1035](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:1015), [openai-codex-responses.ts:1105–1108](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:1105), [openai-codex-responses.ts:1354–1365](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:1354))
+
+   - The SSE request body is zstd-compressed at level 3 when the runtime exposes `zstdCompressSync`; otherwise JSON is sent uncompressed. WebSocket frames are always uncompressed JSON. ([openai-codex-responses.ts:51–53](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:51), [openai-codex-responses.ts:201–224](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:201), [openai-codex-responses.ts:368–375](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:368), [openai-codex-responses.ts:1505](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:1505))
+
+   - Deferred tools remain part of the immediate request protocol. No `fetchDeferred` or `cancelDeferred` is exported or enabled. ([openai-codex-responses.ts:531–560](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:531), [openai-codex-responses.lazy.ts:4](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.lazy.ts:4))
+
+## 5. `azure-openai-responses.ts`
+
+1. **Transport truth.** The module builds a streaming Responses request, including the resolved Azure deployment as `model`, and calls `client.responses.create(params, requestOptions).withResponse()` at line 121. The OpenAI SDK issues the request and decodes its event stream; pi sends the parsed event iterable to shared `processResponsesStream()`. ([azure-openai-responses.ts:70–131](/Users/vikashloomba/pi/packages/ai/src/api/azure-openai-responses.ts:70), [azure-openai-responses.ts:275–295](/Users/vikashloomba/pi/packages/ai/src/api/azure-openai-responses.ts:275), [openai-responses-shared.ts:597–759](/Users/vikashloomba/pi/packages/ai/src/api/openai-responses-shared.ts:597))
+
+2. **SDK drop-downs.** There is no raw fetch, local SSE parser, WebSocket, compression, token counting, or model listing. `options.fetch` is injected into `AzureOpenAI`; raw response metadata is used only for `onResponse`. ([azure-openai-responses.ts:120–131](/Users/vikashloomba/pi/packages/ai/src/api/azure-openai-responses.ts:120), [azure-openai-responses.ts:256–272](/Users/vikashloomba/pi/packages/ai/src/api/azure-openai-responses.ts:256))
+
+3. **SDK role.** `openai` supplies `AzureOpenAI`, request types, HTTP, API-key authentication, Azure URL/version handling, and stream decoding. Pi normalizes the Azure base URL, resolves API version/resource/deployment settings, injects headers/fetch, disables SDK retries, and wraps the initial call in `retryProviderRequest()`. Signal and timeout are passed per request. ([azure-openai-responses.ts:1–2](/Users/vikashloomba/pi/packages/ai/src/api/azure-openai-responses.ts:1), [azure-openai-responses.ts:115–127](/Users/vikashloomba/pi/packages/ai/src/api/azure-openai-responses.ts:115), [azure-openai-responses.ts:186–253](/Users/vikashloomba/pi/packages/ai/src/api/azure-openai-responses.ts:186), [azure-openai-responses.ts:263–272](/Users/vikashloomba/pi/packages/ai/src/api/azure-openai-responses.ts:263))
+
+4. **Variants and deferred responses.** Only SDK HTTP/SSE is selected. No background/deferred response implementation is enabled by its lazy wrapper. ([azure-openai-responses.lazy.ts:4](/Users/vikashloomba/pi/packages/ai/src/api/azure-openai-responses.lazy.ts:4))
+
+## 6. `google-generative-ai.ts`
+
+1. **Transport truth.** `buildParams()` creates `GenerateContentParameters`, including `config.abortSignal` when supplied. The actual request is `client.models.generateContentStream(params)` at line 93. `@google/genai` performs HTTP and returns decoded `GenerateContentResponse` chunks, which pi consumes directly with `for await`. ([google-generative-ai.ts:79–99](/Users/vikashloomba/pi/packages/ai/src/api/google-generative-ai.ts:79), [google-generative-ai.ts:99–244](/Users/vikashloomba/pi/packages/ai/src/api/google-generative-ai.ts:99), [google-generative-ai.ts:359–417](/Users/vikashloomba/pi/packages/ai/src/api/google-generative-ai.ts:359))
+
+2. **SDK drop-downs.** The adapter has no raw fetch, custom transport, hand-parsed raw stream, token-counting request, model listing, WebSocket, or compression path. It expressly rejects a custom fetch different from `globalThis.fetch`; therefore no fetch implementation is injected into `GoogleGenAI`. ([google-generative-ai.ts:80–87](/Users/vikashloomba/pi/packages/ai/src/api/google-generative-ai.ts:80), [google-generative-ai.ts:338–356](/Users/vikashloomba/pi/packages/ai/src/api/google-generative-ai.ts:338))
+
+3. **SDK role.** `@google/genai` supplies the client, request/config types, API-key handling, HTTP request, and parsed stream chunks. Pi supplies API key, optional base URL/API-version override, headers, and abort signal. `retryGoogleRequest()` wraps the initial SDK call, normalizes Google errors so they fit the shared provider retry classifier, and delegates to `retryProviderRequest()`; no SDK-specific retry or `timeoutMs` setting is configured by this adapter. ([google-generative-ai.ts:1–6](/Users/vikashloomba/pi/packages/ai/src/api/google-generative-ai.ts:1), [google-generative-ai.ts:343–356](/Users/vikashloomba/pi/packages/ai/src/api/google-generative-ai.ts:343), [google-shared.ts:422–451](/Users/vikashloomba/pi/packages/ai/src/api/google-shared.ts:422))
+
+4. **Variants and deferred responses.** The adapter selects no transport variant; the underlying streaming framing remains internal to `@google/genai`. It exports no deferred fetch/cancel operations. ([google-generative-ai.lazy.ts:4](/Users/vikashloomba/pi/packages/ai/src/api/google-generative-ai.lazy.ts:4))
+
+## 7. `google-vertex.ts`
+
+1. **Transport truth.** Like the Gemini adapter, this constructs `GenerateContentParameters` and issues the request through `client.models.generateContentStream(params)` at line 111. Pi consumes the SDK-decoded response chunks with `for await`; there is no local wire parser. ([google-vertex.ts:97–117](/Users/vikashloomba/pi/packages/ai/src/api/google-vertex.ts:97), [google-vertex.ts:117–261](/Users/vikashloomba/pi/packages/ai/src/api/google-vertex.ts:117), [google-vertex.ts:458–515](/Users/vikashloomba/pi/packages/ai/src/api/google-vertex.ts:458))
+
+2. **SDK drop-downs.** There is no raw fetch, hand-parsed stream, model listing, token counting, WebSocket, or compression path. Custom fetch is explicitly rejected rather than injected. ([google-vertex.ts:98–105](/Users/vikashloomba/pi/packages/ai/src/api/google-vertex.ts:98))
+
+3. **SDK role.** `@google/genai` supplies HTTP, Vertex URL construction, stream decoding, and authentication integration. With a usable API key, pi creates a Vertex-mode client using that key. Otherwise it supplies project/location and optional `googleAuthOptions.keyFilename`; the SDK then owns ADC credential acquisition and request authentication. Custom base URL, resource scope, API version, headers, and abort signal are configured by pi. Initial-call retry uses the shared Google/provider wrapper; no adapter-level SDK timeout or retry strategy is set. ([google-vertex.ts:1–9](/Users/vikashloomba/pi/packages/ai/src/api/google-vertex.ts:1), [google-vertex.ts:101–111](/Users/vikashloomba/pi/packages/ai/src/api/google-vertex.ts:101), [google-vertex.ts:353–400](/Users/vikashloomba/pi/packages/ai/src/api/google-vertex.ts:353), [google-vertex.ts:420–455](/Users/vikashloomba/pi/packages/ai/src/api/google-vertex.ts:420), [google-vertex.ts:501–506](/Users/vikashloomba/pi/packages/ai/src/api/google-vertex.ts:501))
+
+4. **Variants and deferred responses.** The adapter itself selects no alternate transport. It exports no deferred fetch/cancel operations. ([google-vertex.lazy.ts:4](/Users/vikashloomba/pi/packages/ai/src/api/google-vertex.lazy.ts:4))
+
+## 8. `bedrock-converse-stream.ts`
+
+1. **Transport truth.** Pi builds a `ConverseStreamCommand` from converted messages, system content, tools, inference configuration, and provider-specific fields. The actual request is `client.send(command, {abortSignal})` at line 269. The AWS SDK performs serialization, HTTP, authentication, and AWS event-stream framing; pi receives already-decoded `response.stream` event objects and dispatches them in its `for await` loop. This is AWS event-stream over HTTP, not SSE. ([bedrock-converse-stream.ts:236–279](/Users/vikashloomba/pi/packages/ai/src/api/bedrock-converse-stream.ts:236), [bedrock-converse-stream.ts:279–311](/Users/vikashloomba/pi/packages/ai/src/api/bedrock-converse-stream.ts:279), [bedrock-converse-stream.ts:562–727](/Users/vikashloomba/pi/packages/ai/src/api/bedrock-converse-stream.ts:562))
+
+2. **SDK drop-downs.** The request and stream framing remain SDK-owned, but pi customizes the SDK transport in Node/Bun:
+
+   - Proxy configuration replaces the SDK’s default HTTP/2 handler with Smithy `NodeHttpHandler` plus `HttpProxyAgent` and `HttpsProxyAgent`.
+   - `AWS_BEDROCK_FORCE_HTTP1=1` also selects `NodeHttpHandler`.
+   - A build-step middleware injects non-reserved custom headers before SigV4 signing.
+   - A deserialize middleware captures raw HTTP status/headers for `onResponse`; it does not parse the event-stream body itself.  
+   ([bedrock-converse-stream.ts:178–219](/Users/vikashloomba/pi/packages/ai/src/api/bedrock-converse-stream.ts:178), [bedrock-converse-stream.ts:440–474](/Users/vikashloomba/pi/packages/ai/src/api/bedrock-converse-stream.ts:440), [bedrock-converse-stream.ts:476–509](/Users/vikashloomba/pi/packages/ai/src/api/bedrock-converse-stream.ts:476))
+
+   There is no raw fetch, custom-fetch injection, WebSocket, compression, token-counting, or model-listing sub-path. The module does not wrap `client.send()` in `retryProviderRequest()` or set an AWS retry strategy/max-attempt count, so any initial-request retry is whatever the configured AWS SDK client itself supplies; mid-stream exceptions are surfaced by the local event loop. ([bedrock-converse-stream.ts:150–230](/Users/vikashloomba/pi/packages/ai/src/api/bedrock-converse-stream.ts:150), [bedrock-converse-stream.ts:267–310](/Users/vikashloomba/pi/packages/ai/src/api/bedrock-converse-stream.ts:267))
+
+3. **SDK role.** `@aws-sdk/client-bedrock-runtime` supplies the runtime client, command, modeled types/exceptions, serializers, authentication schemes, and decoded event-stream events. By default it owns AWS credential-chain resolution and SigV4 signing; pi may provide scoped credentials/profile/region. Alternatively, pi sets `config.token` and prefers `httpBearerAuth`, bypassing SigV4 for Bedrock bearer-token authentication. `@smithy/node-http-handler` supplies the explicit HTTP/1 transport variant. ([bedrock-converse-stream.ts:2–28](/Users/vikashloomba/pi/packages/ai/src/api/bedrock-converse-stream.ts:2), [bedrock-converse-stream.ts:144–205](/Users/vikashloomba/pi/packages/ai/src/api/bedrock-converse-stream.ts:144), [bedrock-converse-stream.ts:227–230](/Users/vikashloomba/pi/packages/ai/src/api/bedrock-converse-stream.ts:227), [bedrock-converse-stream.ts:1156–1176](/Users/vikashloomba/pi/packages/ai/src/api/bedrock-converse-stream.ts:1156))
+
+4. **Variants and deferred responses.** The normal SDK path uses the SDK’s default HTTP handler, documented in-module as HTTP/2 for the pinned version; proxy or force-HTTP1 settings select `NodeHttpHandler`. No WebSocket or SSE path exists. Its lazy wrapper enables no deferred fetch/cancel operations. ([bedrock-converse-stream.ts:207–219](/Users/vikashloomba/pi/packages/ai/src/api/bedrock-converse-stream.ts:207), [bedrock-converse-stream.lazy.ts:26–30](/Users/vikashloomba/pi/packages/ai/src/api/bedrock-converse-stream.lazy.ts:26))
+
+## 9. `mistral-conversations.ts`
+
+1. **Transport truth.** This implementation is fully hand-rolled and imports no Mistral SDK. `buildChatPayload()` constructs a streaming chat payload; `toMistralWirePayload()` converts camelCase properties to Mistral wire names. `requestMistralStream()` resolves `<baseUrl>/v1/chat/completions`, creates bearer/SSE headers, combines the caller signal with a default 60-second timeout, and performs the POST through `(options.fetch ?? globalThis.fetch)`. ([mistral-conversations.ts:122–148](/Users/vikashloomba/pi/packages/ai/src/api/mistral-conversations.ts:122), [mistral-conversations.ts:287–317](/Users/vikashloomba/pi/packages/ai/src/api/mistral-conversations.ts:287), [mistral-conversations.ts:331–395](/Users/vikashloomba/pi/packages/ai/src/api/mistral-conversations.ts:331), [mistral-conversations.ts:503–530](/Users/vikashloomba/pi/packages/ai/src/api/mistral-conversations.ts:503))
+
+   `readMistralEvents()` directly reads the body, recognizes several newline boundary forms, gathers `data:` lines, detects `[DONE]`, and calls `JSON.parse()`. `consumeChatStream()` then converts those events to pi blocks; `parseStreamingJson()` is used only to incrementally decode tool arguments. ([mistral-conversations.ts:433–501](/Users/vikashloomba/pi/packages/ai/src/api/mistral-conversations.ts:433), [mistral-conversations.ts:558–751](/Users/vikashloomba/pi/packages/ai/src/api/mistral-conversations.ts:558))
+
+2. **SDK drop-downs.** Not applicable: there is no vendor client to bypass. The module uses native fetch and local SSE/error parsing throughout.
+
+3. **SDK role.** No Mistral package is imported, even for types; all request and event shapes are local TypeScript types. `options.fetch` directly replaces the wire requester. The module does not use `retryProviderRequest()`, and `maxRetries`/`maxRetryDelayMs` are not consumed here. ([mistral-conversations.ts:1–24](/Users/vikashloomba/pi/packages/ai/src/api/mistral-conversations.ts:1), [mistral-conversations.ts:40–117](/Users/vikashloomba/pi/packages/ai/src/api/mistral-conversations.ts:40), [mistral-conversations.ts:297–304](/Users/vikashloomba/pi/packages/ai/src/api/mistral-conversations.ts:297))
+
+4. **Variants and deferred responses.** One HTTP/SSE path exists; no WebSocket or compression is selected. The lazy wrapper enables neither deferred fetch nor cancellation. ([mistral-conversations.lazy.ts:4](/Users/vikashloomba/pi/packages/ai/src/api/mistral-conversations.lazy.ts:4))
+
+## 10. `pi-messages.ts`
+
+1. **Transport truth.** The module constructs `{model, context, options}`, POSTs it to `<baseUrl>/messages` through `(options.fetch ?? globalThis.fetch)`, and sends bearer auth plus JSON/SSE headers. `onPayload` can replace the request object before serialization. ([pi-messages.ts:1–9](/Users/vikashloomba/pi/packages/ai/src/api/pi-messages.ts:1), [pi-messages.ts:345–394](/Users/vikashloomba/pi/packages/ai/src/api/pi-messages.ts:345))
+
+   `readPiMessagesEvents()` reads the response body, normalizes CRLF, splits on blank lines, and calls local `parsePiMessagesEvent()`, which extracts a `data:` line and JSON-decodes it. `createEventConverter()` reconstructs the assistant message; `parseStreamingJson()` handles partial tool arguments. The outer loop terminates only after a protocol `done` or `error`, otherwise it produces an error. ([pi-messages.ts:176–263](/Users/vikashloomba/pi/packages/ai/src/api/pi-messages.ts:176), [pi-messages.ts:266–311](/Users/vikashloomba/pi/packages/ai/src/api/pi-messages.ts:266), [pi-messages.ts:404–415](/Users/vikashloomba/pi/packages/ai/src/api/pi-messages.ts:404))
+
+2. **SDK drop-downs.** Not applicable: no vendor SDK is imported or invoked.
+
+3. **SDK role.** All protocol types and parsing are local. `options.fetch` directly controls the POST. The module passes only `options.signal`; it does not apply `timeoutMs`, `maxRetries`, `maxRetryDelayMs`, or `retryProviderRequest()`. ([pi-messages.ts:12–29](/Users/vikashloomba/pi/packages/ai/src/api/pi-messages.ts:12), [pi-messages.ts:382–392](/Users/vikashloomba/pi/packages/ai/src/api/pi-messages.ts:382))
+
+4. **Variants and deferred responses.** One HTTP/SSE pi-message protocol exists; there is no WebSocket or compression. No deferred-response capabilities are enabled. ([pi-messages.lazy.ts:4](/Users/vikashloomba/pi/packages/ai/src/api/pi-messages.lazy.ts:4))
+
+## 11. `openrouter-images.ts`
+
+1. **Transport truth.** This is SDK-backed, non-streaming HTTP. `buildParams()` creates a Chat Completions request with `stream: false` and `modalities` containing image, optionally text. The request is made through `client.chat.completions.create(...).withResponse()` at lines 72–74—not through the OpenAI Images endpoint. The SDK parses the JSON response; pi extracts text and base64 `data:` image URLs locally. ([openrouter-images.ts:40–83](/Users/vikashloomba/pi/packages/ai/src/api/openrouter-images.ts:40), [openrouter-images.ts:89–107](/Users/vikashloomba/pi/packages/ai/src/api/openrouter-images.ts:89), [openrouter-images.ts:136–162](/Users/vikashloomba/pi/packages/ai/src/api/openrouter-images.ts:136))
+
+2. **SDK drop-downs.** There is no raw fetch, streaming parser, WebSocket, compression, token counting, or model listing. `options.fetch` is injected into the OpenAI client, and the raw response is used for status/header observation. ([openrouter-images.ts:59–81](/Users/vikashloomba/pi/packages/ai/src/api/openrouter-images.ts:59), [openrouter-images.ts:117–129](/Users/vikashloomba/pi/packages/ai/src/api/openrouter-images.ts:117))
+
+3. **SDK role.** `openai` supplies the runtime client, Chat Completions types, API-key request handling, HTTP, and JSON decoding. Pi sets base URL/default headers/custom fetch, disables SDK retries with `maxRetries: 0`, and wraps the complete non-streaming call in `retryProviderRequest()`. Signal and timeout are passed per request. ([openrouter-images.ts:1–8](/Users/vikashloomba/pi/packages/ai/src/api/openrouter-images.ts:1), [openrouter-images.ts:65–80](/Users/vikashloomba/pi/packages/ai/src/api/openrouter-images.ts:65), [openrouter-images.ts:123–129](/Users/vikashloomba/pi/packages/ai/src/api/openrouter-images.ts:123))
+
+4. **Variants and deferred responses.** This is ordinary non-streaming HTTP/JSON only. The image-provider wrapper exposes exactly `generateImages`, so it has no streaming or deferred-response wire. ([openrouter-images.lazy.ts:1–9](/Users/vikashloomba/pi/packages/ai/src/api/openrouter-images.lazy.ts:1))
+
+## Cross-cutting helpers and transport ownership
+
+### Shared utilities
+
+- `utils/event-stream.ts` is not an SSE parser. It is an in-memory async queue/final-result abstraction used to expose pi events; each raw implementation has its own wire parser. ([event-stream.ts:3–67](/Users/vikashloomba/pi/packages/ai/src/utils/event-stream.ts:3), [event-stream.ts:69–88](/Users/vikashloomba/pi/packages/ai/src/utils/event-stream.ts:69))
+
+- `utils/json-parse.ts` repairs malformed JSON strings and uses `partial-json` to recover incomplete tool-argument objects. Anthropic also uses its full-value repair path for SSE event JSON. It performs no I/O or SSE framing. ([json-parse.ts:1–3](/Users/vikashloomba/pi/packages/ai/src/utils/json-parse.ts:1), [json-parse.ts:27–95](/Users/vikashloomba/pi/packages/ai/src/utils/json-parse.ts:27), [json-parse.ts:97–124](/Users/vikashloomba/pi/packages/ai/src/utils/json-parse.ts:97))
+
+- `utils/provider-retry.ts` retries errors carrying SDK-style `status` and `headers`: 408, 409, 429, 5xx, header-directed retries, or transport errors without a status. It honors retry-after headers, caps server-directed delay at 60 seconds by default, uses jittered exponential backoff, and makes sleep abortable. Its default is zero retries. ([provider-retry.ts:14–35](/Users/vikashloomba/pi/packages/ai/src/utils/provider-retry.ts:14), [provider-retry.ts:37–67](/Users/vikashloomba/pi/packages/ai/src/utils/provider-retry.ts:37), [provider-retry.ts:97–124](/Users/vikashloomba/pi/packages/ai/src/utils/provider-retry.ts:97))
+
+- Direct users of that helper are Anthropic, OpenAI Completions, OpenAI Responses, Azure Responses, and OpenRouter Images. Google uses it indirectly through `retryGoogleRequest()`. Codex has its own retry loop; Bedrock, Mistral, and pi-messages do not use it. ([anthropic-messages.ts:575–582](/Users/vikashloomba/pi/packages/ai/src/api/anthropic-messages.ts:575), [openai-completions.ts:311–318](/Users/vikashloomba/pi/packages/ai/src/api/openai-completions.ts:311), [openai-responses.ts:151–158](/Users/vikashloomba/pi/packages/ai/src/api/openai-responses.ts:151), [azure-openai-responses.ts:120–127](/Users/vikashloomba/pi/packages/ai/src/api/azure-openai-responses.ts:120), [openrouter-images.ts:70–80](/Users/vikashloomba/pi/packages/ai/src/api/openrouter-images.ts:70), [google-shared.ts:431–451](/Users/vikashloomba/pi/packages/ai/src/api/google-shared.ts:431))
+
+- `openai-responses-shared.ts` converts messages/tools and consumes already-decoded Responses events. It is shared by OpenAI Responses, Azure Responses, and both Codex transports, but contains no HTTP operation. ([openai-responses-shared.ts:138–180](/Users/vikashloomba/pi/packages/ai/src/api/openai-responses-shared.ts:138), [openai-responses-shared.ts:432–438](/Users/vikashloomba/pi/packages/ai/src/api/openai-responses-shared.ts:432), [openai-responses-shared.ts:597–759](/Users/vikashloomba/pi/packages/ai/src/api/openai-responses-shared.ts:597))
+
+- `utils/deferred-tools.ts` only partitions present tool definitions into immediate and transcript-loaded sets. It is unrelated to provider background-response handles. ([deferred-tools.ts:7–38](/Users/vikashloomba/pi/packages/ai/src/utils/deferred-tools.ts:7))
+
+- `utils/abort-signals.ts` combines the caller abort signal with Codex’s response-header timeout signal and removes its listeners after fetch returns. ([abort-signals.ts:1–40](/Users/vikashloomba/pi/packages/ai/src/utils/abort-signals.ts:1), [openai-codex-responses.ts:387–405](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:387))
+
+### Proxy wiring
+
+- `http-proxy-agent` and `https-proxy-agent` are imported and instantiated only by `bedrock-converse-stream.ts`. They are attached to Smithy `NodeHttpHandler`, so Bedrock explicitly honors HTTP/HTTPS proxy configuration in Node/Bun. ([bedrock-converse-stream.ts:25–28](/Users/vikashloomba/pi/packages/ai/src/api/bedrock-converse-stream.ts:25), [bedrock-converse-stream.ts:207–218](/Users/vikashloomba/pi/packages/ai/src/api/bedrock-converse-stream.ts:207))
+
+- `resolveHttpProxyUrlForTarget()` consults protocol-specific `http_proxy`/`https_proxy`, then `all_proxy`, and applies `no_proxy`; lowercase and uppercase names are accepted, with provider-scoped `options.env` checked before ambient environment values. It permits only HTTP and HTTPS proxy URLs. ([node-http-proxy.ts:13–23](/Users/vikashloomba/pi/packages/ai/src/utils/node-http-proxy.ts:13), [node-http-proxy.ts:37–87](/Users/vikashloomba/pi/packages/ai/src/utils/node-http-proxy.ts:37), [node-http-proxy.ts:89–112](/Users/vikashloomba/pi/packages/ai/src/utils/node-http-proxy.ts:89), [provider-env.ts:41–51](/Users/vikashloomba/pi/packages/ai/src/utils/provider-env.ts:41))
+
+- Codex uses the same resolver only for WebSocket transport under Bun, passing the result through Bun’s WebSocket `proxy` option. Non-Bun WebSockets use `globalThis.WebSocket`, and the Codex SSE fetch path has no source-level proxy-agent injection. ([openai-codex-responses.ts:956–987](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:956), [openai-codex-responses.ts:392–397](/Users/vikashloomba/pi/packages/ai/src/api/openai-codex-responses.ts:392))
+
+- No other reviewed module explicitly wires either proxy-agent package or the shared proxy resolver. Anthropic/OpenAI/Azure/OpenRouter can receive a caller-provided proxy-aware fetch; Mistral, pi-messages, and Codex SSE can use one directly. That behavior belongs to the supplied fetch and is not implemented by these adapters. Google and Vertex reject a non-global custom fetch, while Bedrock does not use `options.fetch`. ([types.ts:123–134](/Users/vikashloomba/pi/packages/ai/src/types.ts:123), [google-generative-ai.ts:80–82](/Users/vikashloomba/pi/packages/ai/src/api/google-generative-ai.ts:80), [google-vertex.ts:98–100](/Users/vikashloomba/pi/packages/ai/src/api/google-vertex.ts:98), [bedrock-converse-stream.ts:150–230](/Users/vikashloomba/pi/packages/ai/src/api/bedrock-converse-stream.ts:150))
+
+### Deferred/background responses
+
+The API contract supports optional `fetchDeferred` and `cancelDeferred`, and `lazyApi()` exposes them only when explicit capability flags are passed. All reviewed chat lazy wrappers call `lazyApi(loader)` without those flags; Bedrock does the equivalent through its node-only loader, while OpenRouter Images exposes only `generateImages`. Therefore none of these eleven modules implements a background/deferred-response wire. ([types.ts:264–280](/Users/vikashloomba/pi/packages/ai/src/types.ts:264), [lazy.ts:68–95](/Users/vikashloomba/pi/packages/ai/src/api/lazy.ts:68), [bedrock-converse-stream.lazy.ts:26–30](/Users/vikashloomba/pi/packages/ai/src/api/bedrock-converse-stream.lazy.ts:26), [openrouter-images.lazy.ts:1–9](/Users/vikashloomba/pi/packages/ai/src/api/openrouter-images.lazy.ts:1))
+
+The pinned vendor versions are `@anthropic-ai/sdk 0.91.1`, `@aws-sdk/client-bedrock-runtime 3.1048.0`, `@google/genai 1.52.0`, `openai 6.40.0`, Smithy HTTP handler `4.7.3`, and proxy-agent versions `7.0.2`/`7.0.6`. ([package.json:62–72](/Users/vikashloomba/pi/packages/ai/package.json:62))
+
+---
+
+## Appendix: source survey Q/A
+
+Note: the transport verification above, run against commit `496185f`,
+supersedes this survey where they conflict — in the current checkout
+`openai-completions.ts`, `openai-responses.ts`, and `openrouter-images.ts`
+invoke the OpenAI SDK client at runtime; only `openai-codex-responses.ts`
+(plus `mistral-conversations.ts` and `pi-messages.ts`) remains hand-rolled.
+The follow-up Q/A at the end of this appendix reached a "types-only"
+conclusion from grep evidence alone; it is retained for the record with the
+incorrect assertions struck through and corrections added in place.
+
+**Q:** What are all the available provider api implementations, and what SDK libraries does pi-ai import for the provider api implementations? i.e. anthropicMessagesApi, anthropicMessagesApi, openAIResponsesApi. Additionally, does pi-ai hand-roll any of their own provider api implementations?
+
+**A:**
+
+## API implementations in `pi-ai`
+
+Under `packages/ai/src/api/`, there are 10 wire-protocol implementations (each with a `.ts` implementation + a `.lazy.ts` wrapper via `lazyApi()`), matching the `ApiOptionsMap`/`Api` union: [1](#6-0)
+
+| API implementation | SDK/library imported | Used by (examples) |
+|---|---|---|
+| `anthropicMessagesApi` (`anthropic-messages.ts`) | `@anthropic-ai/sdk` (official Anthropic TS SDK) [2](#6-1)  | Anthropic, GitHub Copilot (Claude models), Kimi Coding |
+| `openAICompletionsApi` (`openai-completions.ts`) | `openai` npm SDK ~~(types only: `ChatCompletion*` from `openai/resources/chat/completions.js`)~~ **(correction — verified against `496185f`: runtime client too; `new OpenAI(...)` at openai-completions.ts:747, `client.chat.completions.create(...).withResponse()` at :312)** [3](#6-2)  | xAI, Groq, Cerebras, OpenRouter, DeepSeek, Fireworks, Together, Z.ai, OpenCode, Cloudflare Workers AI, GitHub Copilot (subset), many more |
+| `openAIResponsesApi` (`openai-responses.ts`) | `openai` npm SDK ~~(types: `ResponseCreateParamsStreaming`)~~ **(correction — verified against `496185f`: runtime client too; `new OpenAI(...)` at openai-responses.ts:253, `client.responses.create(...).withResponse()` at :152)** [4](#6-3)  | OpenAI, xAI (Responses-only models), GitHub Copilot (Grok/GPT-5/OSWE/MAI-Code) |
+| `openAICodexResponsesApi` (`openai-codex-responses.ts`) | `openai` npm SDK types (`openai/resources/responses/responses.js`) [5](#6-4)  | OpenAI Codex only |
+| `azureOpenAIResponsesApi` (`azure-openai-responses.ts`) | `openai` npm SDK's `AzureOpenAI` client class [6](#6-5)  | Azure OpenAI |
+| `googleGenerativeAiApi` (`google-generative-ai.ts`) | `@google/genai` (Google's unified GenAI SDK) [7](#6-6)  | Google (Gemini direct API) |
+| `googleVertexApi` (`google-vertex.ts`) | `@google/genai`, same SDK configured for Vertex (`ResourceScope`, `HttpOptions`) [8](#6-7)  | Google Vertex AI |
+| `bedrockConverseStreamApi` (`bedrock-converse-stream.ts`) | `@aws-sdk/client-bedrock-runtime` + `@smithy/node-http-handler` [9](#6-8)  | Amazon Bedrock |
+| `mistralConversationsApi` (`mistral-conversations.ts`) | None — no SDK import at all, only internal `../types.ts`/util modules [10](#6-9)  | Mistral |
+| `piMessagesApi` (`pi-messages.ts`) | None — no SDK import, raw `fetch`-based SSE client for pi's own wire protocol [11](#6-10)  | Radius gateway, any custom `models.json` provider declaring `"api": "pi-messages"` |
+
+There's also `openRouterImagesApi` (`openrouter-images.ts`), an images-specific (non-chat-streaming) implementation that uses the `openai` SDK's non-streaming chat completions client. [12](#6-11)  `cloudflare.ts` and `cloudflare-gateway-binding.ts` are not separate wire-protocol implementations — `cloudflare.ts` is just a small module of Cloudflare base-URL constants used to configure the `openai-completions`/`openai-responses` adapters for Cloudflare's endpoints (AI Gateway, Workers AI). [13](#6-12)
+
+This matches the package's declared dependencies: `@anthropic-ai/sdk`, `@aws-sdk/client-bedrock-runtime`, `@google/genai`, `@smithy/node-http-handler`, `openai`, plus `http-proxy-agent`/`https-proxy-agent` for proxy support and `partial-json` for streaming JSON parsing. [14](#6-13)
+
+## Does `pi-ai` hand-roll any provider API implementations?
+
+Yes — two of the ten are fully hand-rolled with no vendor SDK:
+
+- **`mistralConversationsApi`** — implements Mistral's Conversations API directly against `../types.ts` and shared utils (`headersToRecord`, `parseStreamingJson`, `transformMessages`, etc.), with no Mistral SDK dependency at all. [10](#6-9)
+- **`piMessagesApi`** — necessarily hand-rolled since it's pi's *own* wire protocol (used by the Radius gateway and custom providers), implemented as a raw `fetch`-based POST + SSE parser with no external SDK. [11](#6-10)
+
+~~The remaining eight (Anthropic Messages, OpenAI Completions/Responses/Codex-Responses/Azure, Google Generative AI/Vertex, Bedrock Converse) are all built on top of the vendor's official SDK — `pi-ai` supplies the streaming-event normalization, message/tool transformation, cost calculation, and compat-flag handling on top, but delegates actual HTTP/SSE/gRPC transport and request construction to the underlying SDK client (`Anthropic`, `OpenAI`/`AzureOpenAI`, `GoogleGenAI`, `BedrockRuntimeClient`).~~
+
+**Correction (verified against `496185f`): pi-ai does use the vendor SDK clients at runtime — with the exception of Codex.** The SDK-client-backed set is Anthropic Messages, OpenAI Completions, OpenAI Responses, Azure, Google Generative AI, Vertex, Bedrock Converse (and OpenRouter Images); `openai-codex-responses.ts` is types-only and fully hand-rolled, alongside `mistral-conversations.ts` and `pi-messages.ts`. One nuance: Anthropic delegates only the HTTP request to its SDK and hand-parses the returned SSE body itself. See the transport verification section above for the call sites.
+
+One caveat: I inspected only the first ~20-25 lines of each file's imports, which is sufficient to identify the top-level SDK dependency, but I did not fully verify whether any of these SDK-backed implementations *also* drop down to raw `fetch` for specific sub-features (e.g. some streaming edge cases) rather than using the SDK client end-to-end. If that level of detail matters, it would need a deeper read of each file's request-construction code.
+
+## Appendix: follow-up Q/A on the openai-* implementations
+
+> **Correction.** The answer below is wrong for `openai-completions.ts` and
+> `openai-responses.ts`. Verified directly against the reference (`496185f`):
+> both construct the runtime client (`new OpenAI(...)` at
+> openai-completions.ts:747 / openai-responses.ts:253) and issue the request
+> through it (`client.chat.completions.create(params, requestOptions).withResponse()`
+> at openai-completions.ts:312; `client.responses.create(...)` at
+> openai-responses.ts:152). pi-ai uses the vendor SDKs at runtime — with the
+> exception of Codex: `openai-codex-responses.ts` genuinely imports types only
+> and hand-rolls its transport. The struck text is preserved for the record.
+
+**Q:** So is the openai-completions.ts, openai-responses.ts, openai-codex-responses.ts inference/streaming/API logic all hand-rolled? Since they are only using the types from the openai SDK's, not the actual functions?
+
+**A:** ~~Based on what I could verify: none of the three files import or call the OpenAI SDK's client methods (no `new OpenAI(...)`, no `.chat.completions.create()`, no `.responses.create()`) — only type imports from `openai/resources/...js` are used, exactly as you suspected.~~ [1](#7-0) [2](#7-1) [3](#7-2)
+
+~~So yes: **`openai-completions.ts`, `openai-responses.ts`, and `openai-codex-responses.ts` all hand-roll their own HTTP/SSE request and streaming logic** — they use the `openai` npm package purely as a TypeScript type-definitions library (request/response/chunk shapes), not as a runtime SDK client. This is consistent with what I found earlier: these three were listed as SDK-backed in my prior answer only in the loose sense of "depends on the `openai` package," but structurally they belong with `mistral-conversations.ts` and `pi-messages.ts` as hand-rolled wire-protocol implementations — they build request payloads matching the OpenAI wire format, POST them (presumably via `fetch`, given `ProviderRequestOptions.fetch` is the injectable HTTP primitive shared across all API implementations), and parse the SSE/streaming response manually into `pi-ai`'s normalized `AssistantMessageEvent` vocabulary.~~
+
+I want to flag a limitation here: the grep searches I ran for `fetch(`, `new OpenAI(`, `.chat.completions.create(`, etc. inside these three files returned **no matches**, which supports "hand-rolled," but I was not able to positively confirm the actual HTTP call site (e.g. confirm it uses `globalThis.fetch`/`options.fetch` directly, or some other lower-level transport, or the OpenAI SDK's underlying fetch-with-retries helper) because the grep tool didn't surface line-level context for those files and I've exhausted my tool budget. Given the strong signal (type-only imports, zero SDK client instantiation, zero direct `fetch(` calls in the visible matches, which is odd since something must issue the HTTP request), there's a real chance the actual request-sending code lives in a shared helper module (e.g. `provider-retry.ts`, or a common SSE/streaming utility) rather than inline in these three files, which the grep pattern wouldn't have caught if it uses a differently-named wrapper function instead of literal `fetch(`. If you need certainty on the exact transport call site, I'd recommend opening `openai-completions.ts` directly in a full session to trace the request-sending function rather than relying on my grep-based inference.
+
+~~**Bottom line**: Your intuition is correct — my earlier categorization overstated "SDK-backed" for these three. Only `azure-openai-responses.ts` (via `AzureOpenAI` client class), `anthropic-messages.ts` (via `Anthropic` client), `google-generative-ai.ts`/`google-vertex.ts` (via `GoogleGenAI` client), and `bedrock-converse-stream.ts` (via `BedrockRuntimeClient`) instantiate and call an actual SDK client. `openai-completions.ts`, `openai-responses.ts`, and `openai-codex-responses.ts` — along with `mistral-conversations.ts` and `pi-messages.ts` — are all hand-rolled, using vendor SDKs (where applicable) only for their TypeScript types.~~

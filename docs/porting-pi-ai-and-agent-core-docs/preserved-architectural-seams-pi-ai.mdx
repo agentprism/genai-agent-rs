@@ -1,0 +1,1448 @@
+# Preserved architectural seams — pi-ai
+
+Source: Q/A with an agent in the pi repo (latest commit on main).
+
+**Q:** Lets say I was porting pi-ai to Rust, using the equivalent rust SDK's for the underlying inference like how pi-ai uses openai, anthropic messages, google vertex typescript sdks, what are the architectural seams of pi-ai that I should preserve in an idiomatic rust port?
+
+**A:**
+
+Based on the `pi-ai` architecture, here are the seams worth preserving in a Rust port. This is a purely informational architecture question, not an implementation task, so no plan is needed.
+
+## 1. `ProviderStreams` — the wire-protocol trait boundary
+
+Every API implementation (Anthropic Messages, OpenAI Responses/Completions, Google Vertex, Bedrock Converse, etc.) is required to implement exactly one small interface: `stream()` + `streamSimple()`, with optional `fetchDeferred`/`cancelDeferred` for async/polling APIs. [1](#2-0)  This is the seam that isolates "wire protocol" from everything else — a `Provider` doesn't know or care which SDK backs a model; it just holds a `ProviderStreams` value (or a map keyed by `model.api` for mixed-API providers like GitHub Copilot). In Rust, this maps naturally to a trait (e.g. `trait ApiImplementation { fn stream(...) -> Stream; }`) that each provider-specific module implements against its own SDK/HTTP client.
+
+## 2. Provider vs. API — two independent axes
+
+The README is explicit that "provider" (auth + model catalog + base URL) and "API" (wire protocol) are orthogonal: multiple providers share one API implementation (xAI, Groq, Cerebras, OpenRouter all use `openai-completions`), and one provider can dispatch across multiple APIs. [2](#2-1)  `createProvider()` composes `{ id, auth, models, api }` where `api` is either a single `ProviderStreams` or a `Partial<Record<Api, ProviderStreams>>`. [3](#2-2)  Preserving this two-axis design avoids the trap of coupling "provider" and "SDK" 1:1, which real providers don't respect (e.g. Codex uses OpenAI-shaped auth but a bespoke Responses variant).
+
+### Follow-up: clarifying the two halves of this seam
+
+**Q:** Can you clarify seam #2 in pi-ai, specifically "multiple providers share one API implementation (xAI, Groq, Cerebras, OpenRouter all use openai-completions), and one provider can dispatch across multiple APIs. "? An demonstrative example would be helpful.
+
+**A:** This is exactly the two halves of seam #2, and the actual source files make it concrete.
+
+#### Half A: many providers, one shared API implementation
+
+`Provider` is a bundle of `{ id, auth, models, api }` where `api` is a `ProviderStreams` value — the wire-protocol implementation. Multiple providers can hand `createProvider()` the *same* `ProviderStreams` value (`openAICompletionsApi()`) while differing only in `id`, `baseUrl`, and `auth`:
+
+```typescript
+// packages/ai/src/providers/cerebras.ts
+export function cerebrasProvider(): Provider<"openai-completions"> {
+    return createProvider({
+        id: "cerebras",
+        name: "Cerebras",
+        baseUrl: "https://api.cerebras.ai/v1",
+        auth: { apiKey: envApiKeyAuth("Cerebras API key", ["CEREBRAS_API_KEY"]) },
+        models: Object.values(CEREBRAS_MODELS),
+        api: openAICompletionsApi(),
+    });
+}
+``` [1](#5-0)
+
+`groq.ts`, `deepseek.ts`, `fireworks.ts`, `together.ts`, `xiaomi.ts`, `zai.ts`, and many others follow the identical pattern — each imports `openAICompletionsApi` from the same module and only varies id/baseUrl/auth/model catalog/compat flags. [2](#5-1)
+
+The `openai-completions` module itself absorbs the differences between these "OpenAI-compatible" backends through declarative `compat` flags on each `Model` (e.g. `maxTokensField`, `thinkingFormat`, `supportsDeveloperRole`) rather than each provider file reimplementing streaming/parsing logic. You can see this in the generated catalog code, e.g. Z.ai coding-plan models set `api: "openai-completions"` plus a `compat` block with `thinkingFormat: "zai"`: [3](#5-2)  and OpenCode variants similarly select `api = "openai-completions"` with per-model `compat` overrides depending on the underlying SDK npm package they were derived from. [4](#5-3)
+
+So: **one implementation module, N provider identities**, differentiated by config data, not code.
+
+#### Half B: one provider, multiple API implementations
+
+GitHub Copilot is the concrete "mixed-API provider" example. It's a single `Provider` whose `api` field is a *map* keyed by `Api`, not a single `ProviderStreams`:
+
+```typescript
+// packages/ai/src/providers/github-copilot.ts
+export function githubCopilotProvider(): Provider<"anthropic-messages" | "openai-completions" | "openai-responses"> {
+    return createProvider({
+        id: "github-copilot",
+        ...
+        api: {
+            "anthropic-messages": anthropicMessagesApi(),
+            "openai-completions": openAICompletionsApi(),
+            "openai-responses": openAIResponsesApi(),
+        },
+    });
+}
+``` [5](#5-4)
+
+`createProvider()`'s dispatch logic picks the right entry from that map per-model at request time, based on `model.api`: [6](#5-5)
+
+```typescript
+const apiFor = (model: Model<Api>): ProviderStreams | undefined => single ?? byApi?.[model.api];
+```
+
+The model-generation script shows *why* Copilot needs this: within the single "github-copilot" provider id, different underlying models are only reachable through different upstream wire formats — Claude models go through Anthropic Messages, Grok/GPT-5/OSWE/MAI-Code models require the Responses endpoint, and everything else uses Chat Completions:
+
+```typescript
+const isCopilotClaude = /^claude-(haiku|sonnet|opus)-[45]([.\-]|$)/.test(modelId);
+const needsResponsesApi = modelId.startsWith("grok-") || modelId.startsWith("gpt-5") || ...;
+const api: Api = isCopilotClaude ? "anthropic-messages" : needsResponsesApi ? "openai-responses" : "openai-completions";
+``` [7](#5-6)
+
+This is confirmed by type-level tests asserting specific Copilot models resolve to specific APIs: [8](#5-7) , and by request-level tests showing that once dispatched, a Copilot Claude model gets fully Anthropic-shaped auth/headers/payload (Bearer auth via `authToken`, Anthropic Messages payload shape) despite sharing the "github-copilot" provider id with GPT-5/Grok models routed elsewhere: [9](#5-8)
+
+#### Why both halves matter for the Rust port
+
+The takeaway for your Rust port: don't model "provider" and "wire protocol" as a 1:1 enum or a single trait object per provider. You need:
+
+- A `ProviderStreams`/`Api` trait implemented once per wire protocol (`OpenAiCompletionsApi`, `AnthropicMessagesApi`, `OpenAiResponsesApi`, ...), reusable by construction across many `Provider` structs (Half A).
+- A `Provider` type whose API dispatch is either "one API for all models" or "a map from `Api` → API impl, looked up per-model at request time" (Half B) — i.e. `enum ApiDispatch { Single(Box<dyn ApiImpl>), ByApi(HashMap<Api, Box<dyn ApiImpl>>) }`, with the per-model `model.api` field driving the lookup exactly as `apiFor()` does in TS. [10](#5-9)
+
+If you collapse this to "each provider owns exactly one API implementation," you lose the ability to model GitHub Copilot / OpenCode Zen correctly, since their model catalogs genuinely span multiple upstream wire protocols under one auth/account identity.
+
+#### Follow-up citations
+
+**File:** packages/ai/src/providers/cerebras.ts (L1-15)
+```typescript
+import { openAICompletionsApi } from "../api/openai-completions.lazy.ts";
+import { envApiKeyAuth } from "../auth/helpers.ts";
+import { createProvider, type Provider } from "../models.ts";
+import { CEREBRAS_MODELS } from "./cerebras.models.ts";
+
+export function cerebrasProvider(): Provider<"openai-completions"> {
+    return createProvider({
+        id: "cerebras",
+        name: "Cerebras",
+        baseUrl: "https://api.cerebras.ai/v1",
+        auth: { apiKey: envApiKeyAuth("Cerebras API key", ["CEREBRAS_API_KEY"]) },
+        models: Object.values(CEREBRAS_MODELS),
+        api: openAICompletionsApi(),
+    });
+}
+```
+
+**File:** packages/ai/src/providers/openrouter.ts (L1-1)
+```typescript
+import { openAICompletionsApi } from "../api/openai-completions.lazy.ts";
+```
+
+**File:** packages/ai/scripts/generate-models.ts (L1698-1719)
+```typescript
+                models.push({
+                    id: modelId,
+                    name: m.name || modelId,
+                    api: "openai-completions",
+                    provider,
+                    baseUrl,
+                    reasoning: m.reasoning === true,
+                    ...(isGlm52 ? { thinkingLevelMap: ZAI_GLM52_THINKING_LEVEL_MAP } : {}),
+                    input: supportsImage ? ["text", "image"] : ["text"],
+                    cost: {
+                        input: referenceCost?.input || 0,
+                        output: referenceCost?.output || 0,
+                        cacheRead: referenceCost?.cache_read || 0,
+                        cacheWrite: referenceCost?.cache_write || 0,
+                    },
+                    compat: {
+                        supportsDeveloperRole: false,
+                        thinkingFormat: "zai",
+                        ...(isGlm52 ? { supportsReasoningEffort: true } : {}),
+                        ...(!ZAI_TOOL_STREAM_UNSUPPORTED_MODELS.has(modelId) ? { zaiToolStream: true } : {}),
+                    },
+                    contextWindow: m.limit?.context || 4096,
+```
+
+**File:** packages/ai/scripts/generate-models.ts (L1930-1939)
+```typescript
+                if (api === "openai-completions") {
+                    compat = { ...(compat ?? {}), maxTokensField: "max_tokens" };
+                    if (
+                        OPENCODE_OPENAI_COMPLETIONS_LONG_CACHE_RETENTION_UNSUPPORTED_MODELS.has(
+                            `${variant.provider}:${modelId}`,
+                        )
+                    ) {
+                        compat = { ...compat, supportsLongCacheRetention: false };
+                    }
+                }
+```
+
+**File:** packages/ai/scripts/generate-models.ts (L1970-1984)
+```typescript
+                // Claude 4.x and 5.x models route to Anthropic Messages API
+                const isCopilotClaude = /^claude-(haiku|sonnet|opus)-[45]([.\-]|$)/.test(modelId);
+                // Grok, gpt-5, oswe, and MAI-Code models are only served through
+                // the Copilot /responses endpoint.
+                const needsResponsesApi =
+                    modelId.startsWith("grok-") ||
+                    modelId.startsWith("gpt-5") ||
+                    modelId.startsWith("oswe") ||
+                    modelId.startsWith("mai-");
+
+                const api: Api = isCopilotClaude
+                    ? "anthropic-messages"
+                    : needsResponsesApi
+                        ? "openai-responses"
+                        : "openai-completions";
+```
+
+**File:** packages/ai/src/providers/github-copilot.ts (L1-34)
+```typescript
+import { anthropicMessagesApi } from "../api/anthropic-messages.lazy.ts";
+import { openAICompletionsApi } from "../api/openai-completions.lazy.ts";
+import { openAIResponsesApi } from "../api/openai-responses.lazy.ts";
+import { envApiKeyAuth, lazyOAuth } from "../auth/helpers.ts";
+import { loadGitHubCopilotOAuth } from "../auth/oauth/load.ts";
+import { createProvider, type Provider } from "../models.ts";
+import { GITHUB_COPILOT_MODELS } from "./github-copilot.models.ts";
+
+export function githubCopilotProvider(): Provider<"anthropic-messages" | "openai-completions" | "openai-responses"> {
+    return createProvider({
+        id: "github-copilot",
+        name: "GitHub Copilot",
+        baseUrl: "https://api.individual.githubcopilot.com",
+        auth: {
+            apiKey: envApiKeyAuth("GitHub Copilot token", ["COPILOT_GITHUB_TOKEN"]),
+            oauth: lazyOAuth({ name: "GitHub Copilot", isSubscription: true, load: loadGitHubCopilotOAuth }),
+        },
+        models: Object.values(GITHUB_COPILOT_MODELS),
+        filterModels: (models, credential) => {
+            if (credential?.type !== "oauth") return models;
+            const availableModelIds = credential.availableModelIds;
+            if (!Array.isArray(availableModelIds) || !availableModelIds.every((id) => typeof id === "string")) {
+                return models;
+            }
+            const available = new Set(availableModelIds);
+            return models.filter((model) => available.has(model.id));
+        },
+        api: {
+            "anthropic-messages": anthropicMessagesApi(),
+            "openai-completions": openAICompletionsApi(),
+            "openai-responses": openAIResponsesApi(),
+        },
+    });
+}
+```
+
+**File:** packages/ai/src/models.ts (L739-792)
+```typescript
+export interface CreateProviderOptions<TApi extends Api = Api> {
+    id: string;
+    /** Display name. Default: `id`. */
+    name?: string;
+    baseUrl?: string;
+    headers?: ProviderHeaders;
+    /** Required — every provider has auth semantics, even ambient/keyless ones. */
+    auth: ProviderAuth;
+    /** Static baseline model list (empty for purely dynamic providers). */
+    models: readonly Model<TApi>[];
+    /** Fetch a dynamic model overlay. createProvider restores and publishes it transactionally. */
+    fetchModels?: (context: RefreshModelsContext) => Promise<readonly Model<TApi>[]>;
+    filterModels?: (models: readonly Model<TApi>[], credential: Credential | undefined) => readonly Model<TApi>[];
+    /** Single implementation, or map keyed by `model.api` for mixed-API providers. */
+    api: ProviderStreams | Partial<Record<TApi, ProviderStreams>>;
+}
+
+/**
+ * Builds a provider from parts. Built-in provider factories and models.json
+ * custom providers both go through this. A single `api` streams all models;
+ * an `api` map dispatches on `model.api`, and a model whose api has no entry
+ * produces a stream error.
+ */
+export function createProvider<TApi extends Api = Api>(input: CreateProviderOptions<TApi>): Provider<TApi> {
+    const baselineModels = input.models;
+    let dynamicModels: readonly Model<TApi>[] = [];
+    const fetchModels = input.fetchModels;
+    const currentModels = (): readonly Model<TApi>[] => {
+        const merged = [...baselineModels];
+        for (const model of dynamicModels) {
+            const index = merged.findIndex((entry) => entry.id === model.id);
+            if (index >= 0) merged[index] = model;
+            else merged.push(model);
+        }
+        return merged;
+    };
+    const single =
+        typeof (input.api as ProviderStreams).stream === "function" ? (input.api as ProviderStreams) : undefined;
+    const byApi = single ? undefined : (input.api as Partial<Record<string, ProviderStreams>>);
+
+    const apiFor = (model: Model<Api>): ProviderStreams | undefined => single ?? byApi?.[model.api];
+
+    const dispatch = (
+        model: Model<Api>,
+        run: (streams: ProviderStreams) => AssistantMessageEventStream,
+    ): AssistantMessageEventStream => {
+        const streams = apiFor(model);
+        if (!streams) {
+            return lazyStream(model, async () => {
+                throw new ModelsError("stream", `Provider ${input.id} has no API implementation for "${model.api}"`);
+            });
+        }
+        return run(streams);
+    };
+```
+
+**File:** packages/ai/test/model-catalog-types.test.ts (L14-17)
+```typescript
+it("routes GitHub Copilot Grok 4.5 through the Responses API", () => {
+    expectTypeOf(GITHUB_COPILOT_MODELS["grok-4.5"].api).toEqualTypeOf<"openai-responses">();
+    expect(GITHUB_COPILOT_MODELS["grok-4.5"].api).toBe("openai-responses");
+});
+```
+
+**File:** packages/ai/test/github-copilot-anthropic.test.ts (L77-112)
+```typescript
+    it("uses Bearer auth, Copilot headers, and valid Anthropic Messages payload", async () => {
+        const model = getModel("github-copilot", "claude-sonnet-4.6");
+        expect(model.api).toBe("anthropic-messages");
+
+        const s = streamAnthropic(model, context, { apiKey: "tid_copilot_session_test_token" });
+        for await (const event of s) {
+            if (event.type === "error") break;
+        }
+
+        const opts = mockState.constructorOpts!;
+        expect(opts).toBeDefined();
+
+        // Auth: apiKey null, authToken for Bearer
+        expect(opts.apiKey).toBeNull();
+        expect(opts.authToken).toBe("tid_copilot_session_test_token");
+        const headers = opts.defaultHeaders as Record<string, string>;
+
+        // Copilot static headers from model.headers
+        expect(headers["User-Agent"]).toContain("GitHubCopilotChat");
+        expect(headers["Copilot-Integration-Id"]).toBe("vscode-chat");
+
+        // Dynamic headers
+        expect(headers["X-Initiator"]).toBe("user");
+        expect(headers["Openai-Intent"]).toBe("conversation-edits");
+
+        // No fine-grained-tool-streaming (Copilot doesn't support it)
+        const beta = headers["anthropic-beta"] ?? "";
+        expect(beta).not.toContain("fine-grained-tool-streaming");
+
+        // Payload is valid Anthropic Messages format
+        const params = mockState.createParams!;
+        expect(params.model).toBe("claude-sonnet-4.6");
+        expect(params.stream).toBe(true);
+        expect(params.max_tokens).toBe(model.maxTokens);
+        expect(Array.isArray(params.messages)).toBe(true);
+    });
+```
+
+## 3. `Provider` trait — the runtime unit
+
+`Provider<TApi>` bundles identity, `auth: ProviderAuth`, synchronous `getModels()`, optional `refreshModels()`/`filterModels()`, and the stream methods. [4](#2-3)  Note the hard requirement that *every* provider declares auth semantics, even keyless/ambient ones (local servers still return a resolvable no-op `ApiKeyAuth`) — this keeps the auth-resolution code path uniform with no special-casing for "no auth" providers.
+
+## 4. `Models` collection — orchestration is provider-agnostic
+
+`Models` is the router: it holds a set of `Provider`s, does auth resolution and locking, and dispatches every `stream`/`complete`/`streamSimple` call to the provider owning the target model. [5](#2-4)  Auth resolution (`getAuth`), OAuth refresh-under-lock, dynamic model refresh (`refresh()`), and login/logout are all implemented once here rather than per-provider — this is the seam that lets `login()`/`refresh()`/`checkAuth()` be uniform across OAuth and API-key providers. [6](#2-5)
+
+## 5. Streaming event model — a single normalized event enum
+
+Regardless of provider, all API implementations parse their provider-specific SSE/WS payloads into a **standardized event vocabulary** (`text`, `tool_call`, `thinking`, `usage`, `stop`, `done`, `error`), delivered through `AssistantMessageEventStream`, which is both an `AsyncIterable` and exposes a `result(): Promise<AssistantMessage>` for the terminal value. [7](#2-6)  The generic `EventStream<T, R>` base class (push/end/async-iterate, with a `finalResultPromise` resolved on a completion predicate) is a small, deliberately provider-agnostic streaming primitive. [8](#2-7)  In Rust this is your `Stream<Item = AssistantMessageEvent>` + a oneshot/future for the final `AssistantMessage` — keep the event enum unified so agent-loop code (`pi-agent-core`) never branches on provider.
+
+## 6. Auth as a first-class, provider-owned but centrally-orchestrated concept
+
+- `ProviderAuth` = `{ apiKey?: ApiKeyAuth, oauth?: OAuthAuth }`; providers declare which methods they support. [9](#2-8)
+- `OAuthAuth` is a small three-method contract (`login`, `refresh`, `toAuth`) that's identical across Anthropic/Codex/Copilot/OpenRouter/etc., letting `Models` orchestrate login/refresh generically without per-provider special cases. [10](#2-9)
+- `resolveProviderAuth()` centralizes the precedence rules (explicit override → stored credential → OAuth refresh-if-needed → env fallback), independent of which provider is being resolved. [11](#2-10)
+- `CredentialStore` is a pluggable persistence interface (`read`/`list`/`modify`/`delete`), with per-provider write serialization; the default is `InMemoryCredentialStore`, and `pi-coding-agent` swaps in an `auth.json`-backed implementation. [12](#2-11)
+
+This separation (auth *policy* orchestration vs. auth *storage* vs. per-provider OAuth *mechanics*) is worth preserving as three distinct Rust modules/traits.
+
+## 7. Lazy SDK loading as an explicit wrapper, not incidental laziness
+
+`lazyApi()` wraps a `() => Promise<ProviderStreams>` loader so that importing a provider factory does not pull in its SDK until first use — critical for bundle size / tree-shaking in JS. [13](#2-12)  In Rust, the equivalent concern is usually just Cargo feature flags per provider/SDK dependency rather than runtime laziness — worth preserving conceptually (compile-time opt-in per backend) even if the mechanism differs.
+
+### Follow-up
+
+**Q:** For "Lazy SDK loading as an explicit wrapper, not incidental laziness", Rust doesn't need this because its already so small, and there's no web dependency, right?
+
+**A:** *[The answer to this follow-up was truncated in the source transcript and is not yet folded in.]*
+
+## 8. `StreamOptions` / `ApiOptionsMap` — typed per-API options with a shared base
+
+A common `StreamOptions extends ProviderRequestOptions` covers cross-cutting concerns (signal, headers, retries, timeouts, transport, cache retention, sessionId) [14](#2-13) , while `ApiOptionsMap` maps each known API id to its own richer options type (e.g. `AnthropicOptions`, `GoogleVertexOptions`) so callers get full typing per API while `Provider.stream()` stays generic over `TApi`. [15](#2-14)  This "shared base + per-API extension" pattern maps well to a Rust generic/associated-type design (`trait Api { type Options: AsRef<BaseOptions>; }`).
+
+## 9. Compatibility flags instead of provider-specific branching
+
+For OpenAI-compatible third parties (Cerebras, xAI, DeepSeek, Ollama, vLLM, etc.), quirks are captured as declarative `compat` flags (`supportsDeveloperRole`, `thinkingFormat`, `maxTokensField`, etc.) rather than scattered `if provider == X` checks. [16](#2-15)  This keeps the `openai-completions`/`openai-responses` API implementations single, parameterized modules — a pattern worth keeping so N "OpenAI-compatible" providers don't turn into N near-duplicate Rust modules.
+
+## 10. `createProvider()` as the one path for both built-in and custom providers
+
+Built-in providers and user-defined custom providers (local servers, proxies, gateways) go through the exact same `createProvider()` factory and `Provider` interface — there's no special "built-in provider" trait. [17](#2-16)  Preserving this means your Rust `Provider` trait/struct should be equally usable by both compiled-in providers and dynamically configured ones (e.g. from a `models.json`-equivalent).
+
+## 11. Cross-provider context + dynamic model discovery as secondary but real seams
+
+The `Context`/`AssistantMessage` types are provider-neutral so a conversation can hand off between providers mid-session (`Cross-Provider Handoffs` in the README), and `Provider.refreshModels()` + `ModelsStore` support dynamically discovered catalogs independent of a static compiled-in list. [18](#2-17)  These are smaller seams but matter if the Rust port needs to support local inference servers or provider handoff.
+
+### Follow-up: how this seam is accomplished in Rust
+
+**Q:** For "Cross-provider context + dynamic model discovery", how would this seam be accomplished in Rust? Would it be possible?
+
+**A:** ## 1. Cross-provider context + dynamic model discovery in Rust — yes, both are doable
+
+**Cross-provider context** is just a data-format normalization problem, not something that depends on JS dynamism. The seam is:
+
+- `Context` is provider-neutral: `{ systemPrompt?, messages: Message[], tools?: Tool[] }`, and `AssistantMessage` carries `provider`/`api`/`model` tags on itself but stores content in a normalized `(TextContent | ThinkingContent | ToolCall)[]` shape. [1](#4-0) [2](#4-1)
+- When a message produced by provider A is replayed to provider B, each API implementation module is responsible for converting the normalized history into its own wire format on the way in — e.g. converting `ThinkingContent` to [3](#4-2) [4](#4-3) [5](#4-4) [6](#4-5) [7](#4-6) [8](#4-7) [9](#4-8) [10](#4-9) [11](#4-10)
+
+*[The remainder of this answer was truncated in the source transcript.]*
+
+#### Follow-up citations
+
+**File:** packages/ai/src/types.ts (L419-439)
+```typescript
+export interface AssistantMessage {
+    role: "assistant";
+    content: (TextContent | ThinkingContent | ToolCall)[];
+    api: Api;
+    provider: ProviderId;
+    model: string;
+    responseModel?: string; // Concrete `chunk.model` when different from the requested `model` (e.g. OpenRouter `auto` -> `anthropic/...`)
+    responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
+    diagnostics?: AssistantMessageDiagnostic[]; // Redacted provider/runtime diagnostics for failures and recoveries.
+    usage: Usage;
+    stopReason: StopReason;
+    deferred?: DeferredHandle;
+    errorMessage?: string;
+    rawStopReason?: string;
+    /**
+     * Provider indication of whether the model explicitly ended its turn.
+     * Preserved for debugging and does not currently affect agent control flow.
+     */
+    endTurn?: boolean;
+    timestamp: number; // Unix timestamp in milliseconds
+}
+```
+
+**File:** packages/ai/src/types.ts (L513-517)
+```typescript
+export interface Context {
+    systemPrompt?: string;
+    messages: Message[];
+    tools?: Tool[];
+}
+```
+
+**File:** packages/ai/README.md (L1295-1305)
+```markdown
+## Cross-Provider Handoffs
+
+The library supports seamless handoffs between different LLM providers within the same conversation. This allows you to switch models mid-conversation while preserving context, including thinking blocks, tool calls, and tool results.
+
+When messages from one provider are sent to a different provider, the library automatically transforms them for compatibility:
+
+- **User and tool result messages** are passed through unchanged
+- **Assistant messages from the same provider/API** are preserved as-is
+- **Assistant messages from different providers** have their thinking blocks converted to text with `<thinking>` tags
+- **Tool calls and regular text** are preserved unchanged
+
+```
+
+**File:** packages/ai/test/cross-provider-handoff.test.ts (L1-21)
+```typescript
+/**
+ * Cross-Provider Handoff Test
+ *
+ * Tests that contexts generated by one provider/model can be consumed by another.
+ * This catches issues like:
+ * - Tool call ID format incompatibilities (e.g., OpenAI Codex pipe characters)
+ * - Thinking block transformation issues
+ * - Message format incompatibilities
+ *
+ * Strategy:
+ * 1. beforeAll: For each provider/model, generate a "small context" (if not cached):
+ *    - User message asking to use a tool
+ *    - Assistant response with thinking + tool call
+ *    - Tool result
+ *    - Final assistant response
+ *
+ * 2. Test: For each target provider/model:
+ *    - Concatenate ALL other contexts into one
+ *    - Ask the model to "say hi"
+ *    - If it fails, there's a compatibility issue
+ *
+```
+
+**File:** packages/ai/src/models.ts (L46-62)
+```typescript
+export interface RefreshModelsContext {
+    /** Effective configured credential. OAuth credentials are refreshed before network access. */
+    credential?: Credential;
+    /** Immutable provider-scoped catalog snapshot captured before this refresh phase. */
+    stored?: Readonly<ModelsStoreEntry>;
+    /**
+     * Generation-checked publication. Persistence policy remains provider-owned;
+     * the update runs synchronously only after the selected persistence mutation.
+     */
+    publish(publication: ModelsPublication): Promise<boolean>;
+    /** False during offline/cache-only initialization. */
+    allowNetwork: boolean;
+    /** Bypass provider freshness checks and fetch immediately when network access is allowed. */
+    force?: boolean;
+    /** Always present, including when the public refresh caller omits its optional signal. */
+    signal: AbortSignal;
+}
+```
+
+**File:** packages/ai/src/models.ts (L87-98)
+```typescript
+
+/**
+ * A provider is the concrete runtime unit. It owns id/name/base metadata,
+ * auth methods, model listing, and stream behavior.
+ *
+ * `TApi` lets concrete provider factories declare which APIs their models
+ * use (e.g. `openaiProvider(): Provider<"openai-responses" | "openai-completions">`),
+ * giving typed model lists to direct factory users. Inside a `Models`
+ * collection providers are held as `Provider<Api>`.
+ */
+export interface Provider<TApi extends Api = Api> {
+    readonly id: string;
+```
+
+**File:** packages/ai/src/models.ts (L801-826)
+```typescript
+        refreshModels: fetchModels
+            ? async (context) => {
+                    if (context.stored) {
+                        const restored = context.stored.models
+                            .filter((model) => model.provider === input.id)
+                            .map((model) => model as Model<TApi>);
+                        if (
+                            !(await context.publish({
+                                update: () => {
+                                    dynamicModels = restored;
+                                },
+                            }))
+                        ) {
+                            return;
+                        }
+                    }
+                    if (!context.allowNetwork || context.signal.aborted) return;
+                    const refreshed = await fetchModels(context);
+                    if (context.signal.aborted) return;
+                    await context.publish({
+                        persist: { models: refreshed, checkedAt: Date.now() },
+                        update: () => {
+                            dynamicModels = refreshed;
+                        },
+                    });
+                }
+```
+
+**File:** packages/ai/test/models-runtime.test.ts (L570-616)
+```typescript
+    it("rejects late publication from a superseded non-cooperative provider", async () => {
+        const store = new InMemoryModelsStore();
+        let state = "initial";
+        let calls = 0;
+        let markFirstStarted: (() => void) | undefined;
+        let finishFirst: (() => void) | undefined;
+        const firstStarted = new Promise<void>((resolve) => {
+            markFirstStarted = resolve;
+        });
+        const firstBlocked = new Promise<void>((resolve) => {
+            finishFirst = resolve;
+        });
+        const models = createModels({ modelsStore: store });
+        models.setProvider(
+            testProvider({
+                id: "dynamic",
+                refreshModels: async (context) => {
+                    if (!context.allowNetwork) return;
+                    calls++;
+                    const current = calls;
+                    if (current === 1) {
+                        markFirstStarted?.();
+                        await firstBlocked;
+                    }
+                    const value = `generation-${current}`;
+                    await context.publish({
+                        persist: { models: [testModel("dynamic", value)] },
+                        update: () => {
+                            state = value;
+                        },
+                    });
+                },
+            }),
+        );
+
+        const first = models.refresh({ providers: ["dynamic"] });
+        await firstStarted;
+        const second = models.refresh({ providers: ["dynamic"] });
+        await second;
+        await first;
+        finishFirst?.();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(state).toBe("generation-2");
+        expect((await store.read("dynamic"))?.models[0]?.id).toBe("generation-2");
+    });
+
+```
+
+**File:** packages/ai/test/providers.test.ts (L513-558)
+```typescript
+    it("lets a newer dynamic refresh bypass and supersede older network work", async () => {
+        let fetches = 0;
+        let markFirstStarted: (() => void) | undefined;
+        let finishFirst: (() => void) | undefined;
+        const firstStarted = new Promise<void>((resolve) => {
+            markFirstStarted = resolve;
+        });
+        const firstBlocked = new Promise<void>((resolve) => {
+            finishFirst = resolve;
+        });
+        const provider = createProvider({
+            id: "dynamic",
+            auth: { apiKey: { name: "Test", resolve: async () => ({ auth: {} }) } },
+            models: [],
+            fetchModels: async () => {
+                fetches++;
+                const current = fetches;
+                if (current === 1) {
+                    markFirstStarted?.();
+                    await firstBlocked;
+                }
+                return [testModel("api-a", `listed-${current}`)];
+            },
+            api: recordingStreams("a", []),
+        });
+
+        const store = new InMemoryModelsStore();
+        const models = createModels({ modelsStore: store });
+        models.setProvider(provider);
+        expect(provider.getModels()).toEqual([]);
+
+        const first = models.refresh({ providers: ["dynamic"] });
+        await firstStarted;
+        const second = models.refresh({ providers: ["dynamic"] });
+        await expect(second).resolves.toMatchObject({ aborted: false });
+        await expect(first).resolves.toMatchObject({ aborted: false });
+        expect(fetches).toBe(2);
+        expect(provider.getModels().map((model) => model.id)).toEqual(["listed-2"]);
+        expect((await store.read("dynamic"))?.models.map((model) => model.id)).toEqual(["listed-2"]);
+
+        finishFirst?.();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(provider.getModels().map((model) => model.id)).toEqual(["listed-2"]);
+        expect((await store.read("dynamic"))?.models.map((model) => model.id)).toEqual(["listed-2"]);
+    });
+});
+```
+
+**File:** packages/ai/src/api/lazy.ts (L63-98)
+```typescript
+/**
+ * Wraps a dynamically imported API implementation module as `ProviderStreams`.
+ * The module loads on first stream call; the host's import cache deduplicates
+ * loads. Load failures terminate the returned stream with an error event.
+ */
+export interface LazyApiCapabilities {
+    fetchDeferred?: boolean;
+    cancelDeferred?: boolean;
+}
+
+export function lazyApi(load: () => Promise<ProviderStreams>, capabilities?: LazyApiCapabilities): ProviderStreams {
+    const api: ProviderStreams = {
+        stream: (model, context, options) =>
+            lazyStream(model, async () => (await load()).stream(model, context, options)),
+        streamSimple: (model, context, options) =>
+            lazyStream(model, async () => (await load()).streamSimple(model, context, options)),
+    };
+
+    if (capabilities?.fetchDeferred) {
+        api.fetchDeferred = (model, handle, options) =>
+            lazyStream(model, async () => {
+                const implementation = await load();
+                if (!implementation.fetchDeferred) throw new Error("API does not support deferred responses");
+                return implementation.fetchDeferred(model, handle, options);
+            });
+    }
+    if (capabilities?.cancelDeferred) {
+        api.cancelDeferred = async (model, handle, options) => {
+            const implementation = await load();
+            if (!implementation.cancelDeferred) throw new Error("API cannot cancel deferred responses");
+            await implementation.cancelDeferred(model, handle, options);
+        };
+    }
+
+    return api;
+}
+```
+
+**File:** packages/ai/src/bun-oauth.ts (L1-21)
+```typescript
+import { anthropicOAuth } from "./auth/oauth/anthropic.ts";
+import { githubCopilotOAuth } from "./auth/oauth/github-copilot.ts";
+import { kimiCodingOAuth } from "./auth/oauth/kimi-coding.ts";
+import { registerBundledOAuthFlowLoaders } from "./auth/oauth/load.ts";
+import { openaiCodexOAuth } from "./auth/oauth/openai-codex.ts";
+import { openRouterOAuth } from "./auth/oauth/openrouter.ts";
+import { createRadiusOAuth } from "./auth/oauth/radius.ts";
+import { xaiOAuth } from "./auth/oauth/xai.ts";
+
+/** Register OAuth flows statically embedded in the standalone Bun binary. */
+export function registerBunOAuthFlows(): void {
+    registerBundledOAuthFlowLoaders({
+        anthropic: () => anthropicOAuth,
+        openaiCodex: () => openaiCodexOAuth,
+        githubCopilot: () => githubCopilotOAuth,
+        openrouter: () => openRouterOAuth,
+        kimiCoding: () => kimiCodingOAuth,
+        xai: () => xaiOAuth,
+        radius: createRadiusOAuth,
+    });
+}
+```
+
+**Summary of layering to replicate in Rust:**
+```mermaid
+graph TD
+    A["Agent / caller"] --> B["Models (routing, auth orchestration, locking)"]
+    B --> C["Provider (id, auth, catalog, stream dispatch)"]
+    C --> D["ProviderStreams / Api trait (wire protocol: anthropic-messages, openai-responses, google-vertex, ...)"]
+    D --> E["Underlying SDK/HTTP client per API"]
+    B --> F["CredentialStore (pluggable persistence)"]
+    B --> G["OAuthAuth / ApiKeyAuth (per-provider login/refresh mechanics)"]
+    D --> H["AssistantMessageEventStream (normalized event enum)"]
+``` [19](#2-18)
+
+### Citations
+
+**File:** packages/ai/src/types.ts (L119-219)
+```typescript
+/** Authentication, HTTP transport, and lifecycle callbacks shared by provider requests. */
+export interface ProviderRequestOptions<TModel = Model<Api>> {
+    signal?: AbortSignal;
+    /** Explicit parent context for telemetry produced by this logical request. */
+    telemetryContext?: TelemetryContext;
+    apiKey?: string;
+    /**
+     * Optional fetch implementation for provider HTTP requests.
+     * Defaults to `globalThis.fetch`. Provider adapters that cannot inject a custom implementation may reject it.
+     * This does not affect WebSocket transports.
+     */
+    fetch?: FetchFunction;
+    /**
+     * Provider-scoped environment values. These take precedence over process.env for
+     * provider configuration such as regional settings, endpoint placeholders, and
+     * proxy variables.
+     */
+    env?: ProviderEnv;
+    /**
+     * Optional callback for inspecting or replacing provider payloads before sending.
+     * Return undefined to keep the payload unchanged.
+     */
+    onPayload?: (payload: unknown, model: TModel) => unknown | undefined | Promise<unknown | undefined>;
+    /**
+     * Optional callback invoked after an HTTP response is received.
+     */
+    onResponse?: (response: ProviderResponse, model: TModel) => void | Promise<void>;
+    /**
+     * Optional custom HTTP headers to include in API requests.
+     * Merged with provider defaults; caller values override default headers.
+     * On AWS Bedrock these are injected via a Smithy `build`-step middleware so
+     * they are covered by SigV4 signing; reserved headers (`x-amz-*`,
+     * `authorization`, `host`) are silently ignored to preserve SigV4 / bearer auth.
+     * A null value suppresses a provider/API default header with the same name.
+     */
+    headers?: ProviderHeaders;
+    /**
+     * HTTP request timeout in milliseconds for providers/SDKs that support it.
+     * For example, OpenAI and Anthropic SDK clients default to 10 minutes.
+     */
+    timeoutMs?: number;
+    /**
+     * Maximum retry attempts for providers/SDKs that support client-side retries.
+     * For example, OpenAI and Anthropic SDK clients default to 2.
+     */
+    maxRetries?: number;
+    /**
+     * Maximum delay in milliseconds to wait for a retry when the server requests a long wait.
+     * If the server's requested delay exceeds this value, the request fails immediately
+     * with an error containing the requested delay, allowing higher-level retry logic
+     * to handle it with user visibility.
+     * Default: 60000 (60 seconds). Set to 0 to disable the cap.
+     */
+    maxRetryDelayMs?: number;
+}
+
+export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
+    /**
+     * Optional callback invoked after an HTTP response is received and before
+     * its body stream is consumed.
+     */
+    onResponse?: (response: ProviderResponse, model: Model<Api>) => void | Promise<void>;
+    temperature?: number;
+    /**
+     * Arbitrary sampling parameters merged into the request body as-is, after the named request
+     * fields, so keys here override them. Lets custom OpenAI-compatible servers (llama.cpp, vLLM,
+     * SGLang, ...) receive parameters pi does not model, e.g. `top_p`, `top_k`, `min_p`,
+     * `repetition_penalty`. Merged over `Model.samplingParams` per key. Only applied by
+     * OpenAI-compatible adapters (completions, responses, Azure responses); other APIs ignore it.
+     */
+    samplingParams?: Record<string, unknown>;
+    maxTokens?: number;
+    /**
+     * Preferred transport for providers that support multiple transports.
+     * Providers that do not support this option ignore it.
+     */
+    transport?: Transport;
+    /**
+     * Prompt cache retention preference. Providers map this to their supported values.
+     * Default: "short".
+     */
+    cacheRetention?: CacheRetention;
+    /**
+     * Optional session identifier for providers that support session-based caching.
+     * Providers can use this to enable prompt caching, request routing, or other
+     * session-aware features. Ignored by providers that don't support it.
+     */
+    sessionId?: string;
+    /**
+     * WebSocket connect timeout in milliseconds for providers that support
+     * WebSocket transports. This covers the connection/open handshake only;
+     * stream idleness after connection uses timeoutMs.
+     */
+    websocketConnectTimeoutMs?: number;
+    /**
+     * Optional metadata to include in API requests.
+     * Providers extract the fields they understand and ignore the rest.
+     * For example, Anthropic uses `user_id` for abuse tracking and rate limiting.
+     */
+    metadata?: Record<string, unknown>;
+}
+```
+
+**File:** packages/ai/src/types.ts (L239-258)
+```typescript
+export interface ApiOptionsMap {
+    "anthropic-messages": AnthropicOptions;
+    "openai-completions": OpenAICompletionsOptions;
+    "openai-responses": OpenAIResponsesOptions;
+    "openai-codex-responses": OpenAICodexResponsesOptions;
+    "azure-openai-responses": AzureOpenAIResponsesOptions;
+    "google-generative-ai": GoogleOptions;
+    "google-vertex": GoogleVertexOptions;
+    "mistral-conversations": MistralOptions;
+    "bedrock-converse-stream": BedrockOptions;
+    "pi-messages": PiMessagesOptions;
+}
+
+/**
+ * Full stream options for an API. Known APIs resolve to their concrete option
+ * type; custom API strings fall back to the generic shape.
+ */
+export type ApiStreamOptions<TApi extends Api> = TApi extends keyof ApiOptionsMap
+    ? ApiOptionsMap[TApi]
+    : StreamOptions & Record<string, unknown>;
+```
+
+**File:** packages/ai/src/types.ts (L260-277)
+```typescript
+/**
+ * The uniform stream contract of an API implementation module: every module
+ * under `src/api/` exports `stream` and `streamSimple`; capable modules may also
+ * export deferred-response methods. Lazy wrappers (`lazyApi()`) and provider
+ * factories pass these around as values. This is the untyped dispatch shape;
+ * per-API option typing lives on the implementation modules themselves and on
+ * `Provider.stream()` via `ApiStreamOptions`.
+ */
+export interface ProviderStreams {
+    stream(model: Model<Api>, context: Context, options?: StreamOptions): AssistantMessageEventStream;
+    streamSimple(model: Model<Api>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream;
+    fetchDeferred?(
+        model: Model<Api>,
+        handle: DeferredHandle,
+        options?: DeferredFetchOptions,
+    ): AssistantMessageEventStream;
+    cancelDeferred?(model: Model<Api>, handle: DeferredHandle, options?: DeferredCancelOptions): Promise<void>;
+}
+```
+
+**File:** packages/ai/README.md (L230-234)
+```markdown
+## Providers and Models
+
+A **provider** is the runtime unit: it owns its model catalog, its auth (API key resolution, OAuth flows), and its stream behavior. A `Models` collection holds providers and routes every request to the provider that owns the model.
+
+Providers internally share **API implementations** (the wire protocols): Anthropic models use `anthropic-messages`, OpenAI uses `openai-responses`, while xAI, Groq, Cerebras, OpenRouter, and most others share `openai-completions`. Mixed-API providers (GitHub Copilot, OpenCode Zen) dispatch per model.
+```
+
+**File:** packages/ai/README.md (L994-1042)
+```markdown
+## Custom Providers
+
+### createProvider()
+
+`createProvider()` builds a provider from parts: identity, auth, a model list, and an API implementation. Use it for local inference servers, proxies, or any OpenAI/Anthropic-compatible endpoint:
+
+```typescript
+import { createModels, createProvider, envApiKeyAuth, type Model } from '@earendil-works/pi-ai';
+import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
+
+const ollamaModel: Model<'openai-completions'> = {
+  id: 'llama-3.1-8b',
+  name: 'Llama 3.1 8B (Ollama)',
+  api: 'openai-completions',
+  provider: 'ollama',
+  baseUrl: 'http://localhost:11434/v1',
+  reasoning: false,
+  input: ['text'],
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  contextWindow: 128000,
+  maxTokens: 32000
+};
+
+const ollama = createProvider({
+  id: 'ollama',
+  name: 'Ollama',
+  baseUrl: 'http://localhost:11434/v1',
+  // Every provider declares auth; keyless local servers resolve as configured with no key.
+  auth: { apiKey: { name: 'Ollama', resolve: async () => ({ auth: {} }) } },
+  models: [ollamaModel],
+  api: openAICompletionsApi(),
+});
+
+const models = createModels();
+models.setProvider(ollama);
+
+await models.complete(models.getModel('ollama', 'llama-3.1-8b')!, context);
+```
+
+For providers with real keys, `envApiKeyAuth(displayName, envVars)` gives the standard behavior (stored credential wins, then the first set env var):
+
+```typescript
+const proxy = createProvider({
+  id: 'my-proxy',
+  auth: { apiKey: envApiKeyAuth('My proxy API key', ['MY_PROXY_API_KEY']) },
+  models: [/* ... */],
+  api: openAICompletionsApi(),
+});
+```
+```
+
+**File:** packages/ai/README.md (L1166-1191)
+```markdown
+### OpenAI Compatibility Settings
+
+The `openai-completions` API is implemented by many providers with minor differences. By default, the library auto-detects compatibility settings based on `baseUrl` for a small set of known OpenAI-compatible providers (Cerebras, xAI, Chutes, DeepSeek, NVIDIA NIM, Together AI, zAi, OpenCode, Cloudflare Workers AI, etc.). For custom proxies or unknown endpoints, you can override these settings via the `compat` field. For `openai-responses` models, the compat field supports Responses-specific flags.
+
+```typescript
+interface OpenAICompletionsCompat {
+  supportsStore?: boolean;           // Whether provider supports the `store` field (default: true)
+  supportsDeveloperRole?: boolean;   // Whether provider supports `developer` role vs `system` (default: true)
+  supportsReasoningEffort?: boolean; // Whether provider supports `reasoning_effort` (default: true)
+  supportsUsageInStreaming?: boolean; // Whether provider supports `stream_options: { include_usage: true }` (default: true)
+  supportsStrictMode?: boolean;      // Whether provider supports `strict` in tool definitions (default: true)
+  supportsOpenAIGrammarTools?: boolean; // Whether to emit OpenAI custom Lark/regex grammar tools; false falls back to normal function tools (default: false; the generated catalog enables it for capable models)
+  sendSessionAffinityHeaders?: boolean; // Send session-affinity data from `sessionId` (default: false)
+  sessionAffinityFormat?: 'openai' | 'openai-nosession' | 'openrouter'; // Format for session affinity: 'openai' uses `prompt_cache_key`, `session_id`, `x-client-request-id`, and `x-session-affinity`; 'openai-nosession' uses `prompt_cache_key`, `x-client-request-id`, and `x-session-affinity`; 'openrouter' uses `x-session-id` (default: auto-detected)
+  maxTokensField?: 'max_completion_tokens' | 'max_tokens';  // Which field name to use (default: max_completion_tokens)
+  requiresToolResultName?: boolean;  // Whether tool results require the `name` field (default: false)
+  requiresAssistantAfterToolResult?: boolean; // Whether tool results must be followed by an assistant message (default: false)
+  requiresThinkingAsText?: boolean;  // Whether thinking blocks must be converted to text (default: false)
+  requiresReasoningContentOnAssistantMessages?: boolean; // Whether all replayed assistant messages must include empty reasoning_content when reasoning is enabled (default: auto-detected for DeepSeek)
+  thinkingFormat?: 'openai' | 'openrouter' | 'deepseek' | 'together' | 'baseten' | 'zai' | 'qwen' | 'chat-template' | 'qwen-chat-template' | 'string-thinking' | 'ant-ling'; // Format for reasoning param: 'openai' uses reasoning_effort, 'openrouter' uses reasoning: { effort }, 'deepseek' uses thinking: { type } plus reasoning_effort when supported, 'together' uses reasoning: { enabled } plus reasoning_effort when supported, 'baseten' uses configurable chat_template_args plus reasoning_effort when supported, 'zai' uses thinking: { type }, 'qwen' uses enable_thinking, 'chat-template' uses configurable chat_template_kwargs, 'qwen-chat-template' uses chat_template_kwargs.enable_thinking and preserve_thinking, 'string-thinking' uses top-level thinking, 'ant-ling' uses reasoning: { effort } only  ... (truncated)
+  chatTemplateKwargs?: Record<string, string | number | boolean | null | { '$var': 'thinking.enabled' | 'thinking.effort'; omitWhenOff?: boolean }>; // chat_template_kwargs values; use $var for pi-controlled thinking values
+  chatTemplateArgs?: Record<string, string | number | boolean | null | { '$var': 'thinking.enabled' | 'thinking.effort'; omitWhenOff?: boolean }>; // chat_template_args values for thinkingFormat: 'baseten'; use $var for pi-controlled thinking values
+  cacheControlFormat?: 'anthropic';  // Anthropic-style cache_control on system prompt, last tool, and last user/assistant text content
+  openRouterRouting?: OpenRouterRouting; // OpenRouter routing preferences (default: {})
+  vercelGatewayRouting?: VercelGatewayRouting; // Vercel AI Gateway routing preferences (default: {})
+}
+```
+
+**File:** packages/ai/src/models.ts (L97-149)
+```typescript
+export interface Provider<TApi extends Api = Api> {
+    readonly id: string;
+    readonly name: string;
+
+    readonly baseUrl?: string;
+    readonly headers?: ProviderHeaders;
+
+    /**
+     * Required: at least one of `apiKey`/`oauth`. Every provider has auth
+     * semantics — even providers with only ambient credentials (env vars, AWS
+     * profiles, ADC files) and keyless local servers provide `apiKey` auth
+     * whose `resolve()` reports whether the provider is configured.
+     * `Models.getAuth()` returns undefined when the provider is unconfigured.
+     */
+    readonly auth: ProviderAuth;
+
+    /**
+     * Current known models, sync. Static providers return their catalog;
+     * dynamic providers return the list as of the last `refreshModels()`
+     * (empty before the first). Must not throw; `Models` treats a throwing
+     * implementation as having no models.
+     */
+    getModels(): readonly Model<TApi>[];
+
+    /**
+     * Dynamic providers only: restore `context.stored` and optionally fetch a newer list using
+     * the effective credential. Implementations retain their previous list on failure, publish
+     * persistence and synchronous state changes through `context.publish()`, and honor the
+     * shared abort signal for blocking work.
+     */
+    refreshModels?(context: RefreshModelsContext): Promise<void>;
+
+    /**
+     * Optional provider policy for credential-specific model availability.
+     * `getModels()` remains the complete synchronous catalog; `Models.getAvailable()`
+     * applies this filter after confirming that provider auth is configured.
+     */
+    filterModels?(models: readonly Model<TApi>[], credential: Credential | undefined): readonly Model<TApi>[];
+
+    stream<T extends TApi>(
+        model: Model<T>,
+        context: Context,
+        options?: ApiStreamOptions<T>,
+    ): AssistantMessageEventStream;
+
+    streamSimple(model: Model<TApi>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream;
+    fetchDeferred?(
+        model: Model<TApi>,
+        handle: DeferredHandle,
+        options?: DeferredFetchOptions,
+    ): AssistantMessageEventStream;
+    cancelDeferred?(model: Model<TApi>, handle: DeferredHandle, options?: DeferredCancelOptions): Promise<void>;
+}
+```
+
+**File:** packages/ai/src/models.ts (L156-223)
+```typescript
+export interface Models {
+    getProviders(): readonly Provider[];
+    getProvider(id: string): Provider | undefined;
+
+    /**
+     * Sync read of last-known models from one provider or all providers.
+     * Best-effort: a provider whose `getModels()` throws yields no models.
+     */
+    getModels(provider?: string): readonly Model<Api>[];
+
+    /**
+     * Sync runtime model lookup against last-known lists. Dynamic model lists
+     * are typed as `Model<Api>`; narrow with the `hasApi()` type guard.
+     */
+    getModel(provider: string, id: string): Model<Api> | undefined;
+
+    /**
+     * Refresh selected configured dynamic providers concurrently (all when `providers` is omitted).
+     * Provider errors and cancellation are returned without rejecting; static, unknown, and
+     * unconfigured providers are skipped.
+     */
+    refresh(options?: ModelsRefreshOptions): Promise<ModelsRefreshResult>;
+
+    /** Check whether a provider has complete auth configuration without refreshing OAuth. */
+    checkAuth(providerId: string, options?: AuthOperationOptions): Promise<AuthCheck | undefined>;
+
+    /** Return models whose providers have complete auth configuration. */
+    getAvailable(providerId?: string, options?: AuthOperationOptions): Promise<readonly Model<Api>[]>;
+
+    /**
+     * Resolve provider-scoped auth by provider id, or provider auth plus static
+     * model headers when passed a model. Includes a source label for status UI.
+     * Resolves `undefined` when the provider is unknown or unconfigured.
+     * Rejects with `ModelsError`: code "oauth" when a token refresh fails (the
+     * stored credential is preserved for retry; re-login fixes it), code "auth"
+     * when api-key resolution or the credential store fails. Request paths
+     * surface rejections as stream errors.
+     */
+    getAuth(providerId: string, overrides?: AuthResolutionOverrides): Promise<AuthResult | undefined>;
+    getAuth(model: Model<Api>, overrides?: AuthResolutionOverrides): Promise<AuthResult | undefined>;
+
+    /** Run a provider-owned login flow and persist its returned credential. */
+    login(providerId: string, type: AuthType, interaction: AuthInteraction): Promise<Credential>;
+
+    /** Remove the stored credential for a provider. */
+    logout(providerId: string, options?: AuthOperationOptions): Promise<void>;
+
+    stream<TApi extends Api>(
+        model: Model<TApi>,
+        context: Context,
+        options?: ModelsApiStreamOptions<TApi>,
+    ): AssistantMessageEventStream;
+
+    complete<TApi extends Api>(
+        model: Model<TApi>,
+        context: Context,
+        options?: ModelsApiStreamOptions<TApi>,
+    ): Promise<AssistantMessage>;
+
+    streamSimple(model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions): AssistantMessageEventStream;
+    completeSimple(model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions): Promise<AssistantMessage>;
+    fetchDeferred(
+        model: Model<Api>,
+        handle: DeferredHandle,
+        options?: ModelsDeferredFetchOptions,
+    ): Promise<AssistantMessage>;
+    cancelDeferred(model: Model<Api>, handle: DeferredHandle, options?: ModelsDeferredCancelOptions): Promise<void>;
+}
+```
+
+**File:** packages/ai/src/models.ts (L565-615)
+```typescript
+    async login(providerId: string, type: AuthType, interaction: AuthInteraction): Promise<Credential> {
+        const signal = operationSignal(interaction.signal);
+        signal.throwIfAborted();
+        const provider = this.providers.get(providerId);
+        if (!provider) throw new ModelsError("provider", `Unknown provider: ${providerId}`);
+        const method = type === "oauth" ? provider.auth.oauth : provider.auth.apiKey;
+        if (!method?.login) {
+            throw new ModelsError("auth", `${provider.name} does not support ${type} login`);
+        }
+        const loginOperation: Promise<Credential> = method.login({ ...interaction, signal });
+        const credential = await raceWithAbortSignal(loginOperation, signal);
+        let mutationStarted = false;
+        let markMutationStarted: (() => void) | undefined;
+        const started = new Promise<void>((resolve) => {
+            markMutationStarted = resolve;
+        });
+        const mutation = this.credentials.modify(
+            providerId,
+            async () => {
+                mutationStarted = true;
+                markMutationStarted?.();
+                return credential;
+            },
+            { signal },
+        );
+        void mutation.catch(() => {});
+        try {
+            await new Promise<void>((resolve, reject) => {
+                const onAbort = () => {
+                    if (!mutationStarted) reject(signal.reason);
+                };
+                signal.addEventListener("abort", onAbort, { once: true });
+                void Promise.race([started, mutation]).then(
+                    () => {
+                        signal.removeEventListener("abort", onAbort);
+                        resolve();
+                    },
+                    (error: unknown) => {
+                        signal.removeEventListener("abort", onAbort);
+                        reject(error);
+                    },
+                );
+                if (signal.aborted) onAbort();
+            });
+            await mutation;
+        } catch (error) {
+            signal.throwIfAborted();
+            throw new ModelsError("auth", `Credential store modify failed for ${providerId}`, { cause: error });
+        }
+        return credential;
+    }
+```
+
+**File:** packages/ai/src/models.ts (L736-737)
+```typescript
+    return new ModelsImpl(options);
+}
+```
+
+**File:** packages/ai/src/models.ts (L739-792)
+```typescript
+export interface CreateProviderOptions<TApi extends Api = Api> {
+    id: string;
+    /** Display name. Default: `id`. */
+    name?: string;
+    baseUrl?: string;
+    headers?: ProviderHeaders;
+    /** Required — every provider has auth semantics, even ambient/keyless ones. */
+    auth: ProviderAuth;
+    /** Static baseline model list (empty for purely dynamic providers). */
+    models: readonly Model<TApi>[];
+    /** Fetch a dynamic model overlay. createProvider restores and publishes it transactionally. */
+    fetchModels?: (context: RefreshModelsContext) => Promise<readonly Model<TApi>[]>;
+    filterModels?: (models: readonly Model<TApi>[], credential: Credential | undefined) => readonly Model<TApi>[];
+    /** Single implementation, or map keyed by `model.api` for mixed-API providers. */
+    api: ProviderStreams | Partial<Record<TApi, ProviderStreams>>;
+}
+
+/**
+ * Builds a provider from parts. Built-in provider factories and models.json
+ * custom providers both go through this. A single `api` streams all models;
+ * an `api` map dispatches on `model.api`, and a model whose api has no entry
+ * produces a stream error.
+ */
+export function createProvider<TApi extends Api = Api>(input: CreateProviderOptions<TApi>): Provider<TApi> {
+    const baselineModels = input.models;
+    let dynamicModels: readonly Model<TApi>[] = [];
+    const fetchModels = input.fetchModels;
+    const currentModels = (): readonly Model<TApi>[] => {
+        const merged = [...baselineModels];
+        for (const model of dynamicModels) {
+            const index = merged.findIndex((entry) => entry.id === model.id);
+            if (index >= 0) merged[index] = model;
+            else merged.push(model);
+        }
+        return merged;
+    };
+    const single =
+        typeof (input.api as ProviderStreams).stream === "function" ? (input.api as ProviderStreams) : undefined;
+    const byApi = single ? undefined : (input.api as Partial<Record<string, ProviderStreams>>);
+
+    const apiFor = (model: Model<Api>): ProviderStreams | undefined => single ?? byApi?.[model.api];
+
+    const dispatch = (
+        model: Model<Api>,
+        run: (streams: ProviderStreams) => AssistantMessageEventStream,
+    ): AssistantMessageEventStream => {
+        const streams = apiFor(model);
+        if (!streams) {
+            return lazyStream(model, async () => {
+                throw new ModelsError("stream", `Provider ${input.id} has no API implementation for "${model.api}"`);
+            });
+        }
+        return run(streams);
+    };
+```
+
+**File:** packages/ai/src/utils/event-stream.ts (L4-67)
+```typescript
+export class EventStream<T, R = T> implements AsyncIterable<T> {
+    private queue: T[] = [];
+    private waiting: ((value: IteratorResult<T>) => void)[] = [];
+    private done = false;
+    private finalResultPromise: Promise<R>;
+    private resolveFinalResult!: (result: R) => void;
+    private isComplete: (event: T) => boolean;
+    private extractResult: (event: T) => R;
+
+    constructor(isComplete: (event: T) => boolean, extractResult: (event: T) => R) {
+        this.isComplete = isComplete;
+        this.extractResult = extractResult;
+        this.finalResultPromise = new Promise((resolve) => {
+            this.resolveFinalResult = resolve;
+        });
+    }
+
+    push(event: T): void {
+        if (this.done) return;
+
+        if (this.isComplete(event)) {
+            this.done = true;
+            this.resolveFinalResult(this.extractResult(event));
+        }
+
+        // Deliver to waiting consumer or queue it
+        const waiter = this.waiting.shift();
+        if (waiter) {
+            waiter({ value: event, done: false });
+        } else {
+            this.queue.push(event);
+        }
+    }
+
+    end(result?: R): void {
+        this.done = true;
+        if (result !== undefined) {
+            this.resolveFinalResult(result);
+        }
+        // Notify all waiting consumers that we're done
+        while (this.waiting.length > 0) {
+            const waiter = this.waiting.shift()!;
+            waiter({ value: undefined as any, done: true });
+        }
+    }
+
+    async *[Symbol.asyncIterator](): AsyncIterator<T> {
+        while (true) {
+            if (this.queue.length > 0) {
+                yield this.queue.shift()!;
+            } else if (this.done) {
+                return;
+            } else {
+                const result = await new Promise<IteratorResult<T>>((resolve) => this.waiting.push(resolve));
+                if (result.done) return;
+                yield result.value;
+            }
+        }
+    }
+
+    result(): Promise<R> {
+        return this.finalResultPromise;
+    }
+}
+```
+
+**File:** packages/ai/src/utils/event-stream.ts (L69-80)
+```typescript
+export class AssistantMessageEventStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
+    constructor() {
+        super(
+            (event) => event.type === "done" || event.type === "error",
+            (event) => {
+                if (event.type === "done") {
+                    return event.message;
+                } else if (event.type === "error") {
+                    return event.error;
+                }
+                throw new Error("Unexpected event type for final result");
+            },
+```
+
+**File:** packages/ai/src/auth/resolve.ts (L4-14)
+```typescript
+import type {
+    ApiKeyAuth,
+    ApiKeyCredential,
+    AuthContext,
+    AuthResult,
+    Credential,
+    CredentialStore,
+    OAuthAuth,
+    OAuthCredential,
+    ProviderAuth,
+} from "./types.ts";
+```
+
+**File:** packages/ai/src/auth/resolve.ts (L50-100)
+```typescript
+export function resolveProviderAuth(
+    provider: { id: string; auth: ProviderAuth },
+    credentials: CredentialStore,
+    authContext: AuthContext,
+    overrides?: AuthResolutionOverrides,
+): Promise<AuthResult | undefined> {
+    const signal = operationSignal(overrides?.signal);
+    return raceWithAbortSignal(
+        resolveProviderAuthWithSignal(provider, credentials, authContext, overrides, signal),
+        signal,
+    );
+}
+
+async function resolveProviderAuthWithSignal(
+    provider: { id: string; auth: ProviderAuth },
+    credentials: CredentialStore,
+    authContext: AuthContext,
+    overrides: AuthResolutionOverrides | undefined,
+    signal: AbortSignal,
+): Promise<AuthResult | undefined> {
+    signal.throwIfAborted();
+    const requestAuthContext = overrides?.env ? overlayEnvAuthContext(authContext, overrides.env) : authContext;
+
+    if (overrides?.apiKey !== undefined && provider.auth.apiKey) {
+        return resolveApiKey(
+            requestAuthContext,
+            provider.auth.apiKey,
+            provider.id,
+            {
+                type: "api_key",
+                key: overrides.apiKey,
+                env: overrides.env,
+            },
+            signal,
+        );
+    }
+
+    const stored = await readCredential(credentials, provider.id, signal);
+    if (stored) {
+        if (stored.type === "oauth" && provider.auth.oauth) {
+            return resolveStoredOAuth(
+                credentials,
+                provider.id,
+                provider.auth.oauth,
+                stored,
+                signal,
+                overrides?.minOAuthValidityMs,
+            );
+        }
+        if (stored.type === "api_key" && provider.auth.apiKey) {
+            const credential = overrides?.env ? { ...stored, env: { ...stored.env, ...overrides.env } } : stored;
+```
+
+**File:** packages/ai/src/auth/types.ts (L206-230)
+```typescript
+export interface OAuthAuth {
+    /** Display name, e.g. "Anthropic (Claude Pro/Max)". */
+    name: string;
+
+    /** Whether access through this auth method is backed by a provider subscription. */
+    isSubscription?: boolean;
+
+    /** Selector label for the OAuth login option, e.g. "Sign in with SuperGrok or X Premium". */
+    loginLabel?: string;
+
+    login(interaction: ProviderAuthInteraction): Promise<OAuthCredential>;
+
+    /**
+     * Exchange the refresh token. Network call; throws on failure
+     * (invalid_grant etc.). `Models` runs this under the store lock.
+     */
+    refresh(credential: OAuthCredential, signal: AbortSignal): Promise<OAuthCredential>;
+
+    /**
+     * Side-effect-free derivation of request auth from a valid credential.
+     * Covers per-credential baseUrl (GitHub Copilot). Async so lazy wrappers
+     * can load the implementation on first use.
+     */
+    toAuth(credential: OAuthCredential): Promise<ModelAuth>;
+}
+```
+
+**File:** packages/ai/src/auth/credential-store.ts (L1-27)
+```typescript
+import { operationSignal, raceWithAbortSignal } from "../utils/abort.ts";
+import type { AuthOperationOptions, Credential, CredentialInfo, CredentialStore } from "./types.ts";
+
+/**
+ * Default in-memory credential store. Apps inject persistent stores.
+ * Keyed by `Provider.id`, one credential per provider; see `CredentialStore`.
+ * Writes are serialized per provider through a promise chain.
+ */
+export class InMemoryCredentialStore implements CredentialStore {
+    private credentials = new Map<string, Credential>();
+    private chains = new Map<string, Promise<unknown>>();
+
+    /** Serialize tasks per provider id without releasing the chain before active work settles. */
+    private enqueue<T>(providerId: string, task: () => Promise<T>, options?: AuthOperationOptions): Promise<T> {
+        const signal = operationSignal(options?.signal);
+        const previous = this.chains.get(providerId) ?? Promise.resolve();
+        const queued = (async () => {
+            await previous.catch(() => {});
+            signal.throwIfAborted();
+            return task();
+        })();
+        const tail = queued.catch(() => {});
+        this.chains.set(providerId, tail);
+        void tail.then(() => {
+            if (this.chains.get(providerId) === tail) this.chains.delete(providerId);
+        });
+        return raceWithAbortSignal(queued, signal);
+```
+
+**File:** packages/ai/src/api/lazy.ts (L63-98)
+```typescript
+/**
+ * Wraps a dynamically imported API implementation module as `ProviderStreams`.
+ * The module loads on first stream call; the host's import cache deduplicates
+ * loads. Load failures terminate the returned stream with an error event.
+ */
+export interface LazyApiCapabilities {
+    fetchDeferred?: boolean;
+    cancelDeferred?: boolean;
+}
+
+export function lazyApi(load: () => Promise<ProviderStreams>, capabilities?: LazyApiCapabilities): ProviderStreams {
+    const api: ProviderStreams = {
+        stream: (model, context, options) =>
+            lazyStream(model, async () => (await load()).stream(model, context, options)),
+        streamSimple: (model, context, options) =>
+            lazyStream(model, async () => (await load()).streamSimple(model, context, options)),
+    };
+
+    if (capabilities?.fetchDeferred) {
+        api.fetchDeferred = (model, handle, options) =>
+            lazyStream(model, async () => {
+                const implementation = await load();
+                if (!implementation.fetchDeferred) throw new Error("API does not support deferred responses");
+                return implementation.fetchDeferred(model, handle, options);
+            });
+    }
+    if (capabilities?.cancelDeferred) {
+        api.cancelDeferred = async (model, handle, options) => {
+            const implementation = await load();
+            if (!implementation.cancelDeferred) throw new Error("API cannot cancel deferred responses");
+            await implementation.cancelDeferred(model, handle, options);
+        };
+    }
+
+    return api;
+}
+```
