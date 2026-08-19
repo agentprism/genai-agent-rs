@@ -14,8 +14,9 @@
 > ```
 >
 > That is the latest published fork version. Current `main` is the unpublished
-> `0.7.0-beta.19.2-agentprism` development line (carrying pi-ai `AgentToolCall::namespace`); use
-> the workspace path until the next lockstep publish.
+> `0.7.0-beta.20-WIP.1-agentprism` development line (carrying pi-ai `AgentToolCall::namespace`
+> and the merged upstream `0.7.0-beta.20-WIP` line); use the workspace path until the next
+> lockstep publish.
 >
 > Everything below is the upstream README; where it says `genai = "…"`, use the dependency line
 > above.

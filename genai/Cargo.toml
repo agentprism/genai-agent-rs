@@ -3,13 +3,12 @@
 # name (the pi-ai equivalent). Code still refers to it as `genai` via `package = "genai-agentprism"`
 # in dependents. Kept in sync with upstream jeremychone/rust-genai via `git subtree pull`.
 name = "genai-agentprism"
-# Fork-lineage version: upstream's 0.7.0-beta.19 WIP line plus the agentprism fork's APIs
-# (request-level exec-hook overrides, ToolResponse parts, streaming HTTP error headers, ...) and
-# the folded pi-ai layer (assistant/stream contract, GenaiStreamFn, and the feature-gated `auth`
-# and `codex` modules). The numeric `.N` + `-agentprism` pre-release suffix keeps the artifact
-# distinct from — and predictably ordered against — anything upstream may publish
-# (beta.19 < this < beta.20). Published to crates.io as `genai-agentprism`.
-version = "0.7.0-beta.19.2-agentprism"
+# Fork-lineage version: upstream's 0.7.0-beta.20 WIP line plus the agentprism fork's APIs
+# (request-level exec-hook overrides, ToolResponse parts, ...) and the folded pi-ai layer
+# (assistant/stream contract, GenaiStreamFn, and the feature-gated `auth` and `codex` modules).
+# The numeric `.N` + `-agentprism` pre-release suffix keeps the artifact distinct from — and
+# ordered after — upstream's own `0.7.0-beta.20-WIP`. Published to crates.io as `genai-agentprism`.
+version = "0.7.0-beta.20-WIP.1-agentprism"
 repository = "https://github.com/agentprism/genai-agent-rs"
 edition = "2024"
 rust-version = "1.88"
