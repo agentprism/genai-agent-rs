@@ -28,8 +28,9 @@ pub mod openai_responses_shared;
 
 use crate::event_stream::AssistantMessageEventStream;
 use crate::types::{
-    Context, DeferredCancelOptions, DeferredFetchOptions, DeferredHandle, Model,
-    SimpleStreamOptions, StreamOptions,
+    AssistantImages, Context, DeferredCancelOptions, DeferredFetchOptions, DeferredHandle,
+    ImagesContext, ImagesError, ImagesModel, ImagesOptions, Model, SimpleStreamOptions,
+    StreamOptions,
 };
 use futures::future::BoxFuture;
 
@@ -94,4 +95,14 @@ pub trait DeferredStreams: Send + Sync {
         handle: &'a DeferredHandle,
         options: DeferredCancelOptions,
     ) -> BoxFuture<'a, Result<(), crate::types::AssistantMessage>>;
+}
+
+/// pi `ProviderImages` — the uniform contract of an image-generation API module.
+pub trait ProviderImages: Send + Sync {
+    fn generate_images<'a>(
+        &'a self,
+        model: &'a ImagesModel,
+        context: &'a ImagesContext,
+        options: ImagesOptions,
+    ) -> BoxFuture<'a, Result<AssistantImages, ImagesError>>;
 }
