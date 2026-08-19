@@ -3,7 +3,7 @@
 The Go `ai` and `agent` packages are the reference: everything must be
 faithfully ported to Rust. These ports are greenfield — no prior art is retained
 from the existing Rust `genai-agent` and `ai` crates, which are not the intended
-designs and are explicitly discarded. The forked `genai-agent` will be deleted,
+designs and are explicitly discarded. The forked `rust-genai` crate will be deleted,
 as it is no longer needed.
 
 The Rust `ai` crate is a complete and faithful port of the Go `ai` package: it
