@@ -13,6 +13,9 @@ port is complete, it becomes the foundation for the next stage — completely
 rebuilding the `agent` crate as a complete, faithful port of the Go `agent`
 package.
 
+Swift bindings are generated with UniFFI, mirroring the API surface the Go Swift
+bindings cover.
+
 This document records the crate and sourcing decisions for that port's provider
 adapters. Faithfulness is the governing principle: crates are adopted where they
 cover the surface we use faithfully, and owned (lifted and maintained) where
