@@ -1,5 +1,11 @@
 # Provider adapter crate stack and sourcing plan
 
+The Go `ai` and `agent` packages are the reference: everything must be
+faithfully ported to Rust. These ports are greenfield — no prior art is retained
+from the existing Rust `genai-agent` and `ai` crates, which are not the intended
+designs and are explicitly discarded. The forked `genai-agent` will be deleted,
+as it is no longer needed.
+
 The Rust `ai` crate is a complete and faithful port of the Go `ai` package: it
 reproduces that package's behavior and provider wire semantics exactly. Once the
 port is complete, it becomes the foundation for the next stage — completely
