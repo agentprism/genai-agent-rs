@@ -1451,7 +1451,7 @@ dependencies = [
 
 [[package]]
 name = "genai-agentprism"
-version = "0.7.0-beta.19.2-agentprism"
+version = "0.7.0-beta.20-WIP.1-agentprism"
 dependencies = [
  "async-stream",
  "async-trait",
