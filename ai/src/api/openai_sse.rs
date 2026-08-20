@@ -4,6 +4,7 @@ use crate::types::{
 };
 use crate::utils::error_body::{
     ProviderErrorBody, ProviderErrorData, format_provider_error, normalize_provider_error,
+    safe_json_stringify,
 };
 use crate::utils::provider_retry::{ProviderErrorMetadata, ProviderRetryClassify};
 use futures::future::pending;
@@ -125,6 +126,7 @@ impl ProviderRetryClassify for OpenAiHttpError {
 #[derive(Debug, Clone)]
 pub(crate) struct OpenAiSseError {
     message: String,
+    raw_metadata: Option<Value>,
     aborted: bool,
 }
 
@@ -132,6 +134,21 @@ impl OpenAiSseError {
     pub(crate) fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            raw_metadata: None,
+            aborted: false,
+        }
+    }
+
+    fn api(error: Value) -> Self {
+        let message = sdk_stream_error_message(&error);
+        let raw_metadata = error
+            .get("metadata")
+            .and_then(|value| value.get("raw"))
+            .filter(|value| js_truthy(value))
+            .cloned();
+        Self {
+            message,
+            raw_metadata,
             aborted: false,
         }
     }
@@ -139,12 +156,25 @@ impl OpenAiSseError {
     fn aborted() -> Self {
         Self {
             message: "Request was aborted".to_owned(),
+            raw_metadata: None,
             aborted: true,
         }
     }
 
     pub fn aborted_flag(&self) -> bool {
         self.aborted
+    }
+
+    pub fn formatted(&self, append_raw_metadata: bool) -> String {
+        let mut message = self.message.clone();
+        if append_raw_metadata && let Some(raw) = self.raw_metadata.as_ref() {
+            let raw = js_string(raw);
+            if !message.contains(&raw) {
+                message.push('\n');
+                message.push_str(&raw);
+            }
+        }
+        message
     }
 }
 
@@ -324,8 +354,19 @@ fn sse_json_stream(
                     if data.starts_with("[DONE]") {
                         return None;
                     }
-                    let item = serde_json::from_str(&data)
-                        .map_err(|error| OpenAiSseError::new(error.to_string()));
+                    let item = if data.is_empty() {
+                        Err(OpenAiSseError::new("Unexpected end of JSON input"))
+                    } else {
+                        serde_json::from_str(&data)
+                            .map_err(|error| OpenAiSseError::new(error.to_string()))
+                            .and_then(|value: Value| {
+                                value
+                                    .get("error")
+                                    .filter(|error| js_truthy(error))
+                                    .cloned()
+                                    .map_or(Ok(value), |error| Err(OpenAiSseError::api(error)))
+                            })
+                    };
                     if item.is_err() {
                         state.ended = true;
                     }
@@ -360,6 +401,7 @@ fn sse_json_stream(
 #[derive(Default)]
 struct SseDecoder {
     buffer: Vec<u8>,
+    event: Option<Vec<u8>>,
     data_lines: Vec<Vec<u8>>,
 }
 
@@ -385,6 +427,8 @@ impl SseDecoder {
             }
             if field == b"data" {
                 self.data_lines.push(value.to_vec());
+            } else if field == b"event" {
+                self.event = Some(value.to_vec());
             }
         }
         events
@@ -413,7 +457,9 @@ impl SseDecoder {
     }
 
     fn dispatch(&mut self, events: &mut Vec<String>) {
-        if self.data_lines.is_empty() {
+        let has_event = self.event.as_ref().is_some_and(|event| !event.is_empty());
+        self.event = None;
+        if self.data_lines.is_empty() && !has_event {
             return;
         }
         let length = self.data_lines.iter().map(Vec::len).sum::<usize>()
@@ -436,12 +482,9 @@ fn sdk_error_message(status: u16, error: Option<&Value>, text: Option<&String>) 
             .filter(|message| js_truthy(message))
             .map(|message| match message {
                 Value::String(message) => message.clone(),
-                _ => serde_json::to_string(message).unwrap_or_else(|_| message.to_string()),
+                _ => safe_json_stringify(message),
             })
-            .or_else(|| {
-                js_truthy(error)
-                    .then(|| serde_json::to_string(error).unwrap_or_else(|_| error.to_string()))
-            })
+            .or_else(|| js_truthy(error).then(|| safe_json_stringify(error)))
     });
     detail
         .or_else(|| {
@@ -452,6 +495,17 @@ fn sdk_error_message(status: u16, error: Option<&Value>, text: Option<&String>) 
             || format!("{status} status code (no body)"),
             |detail| format!("{status} {detail}"),
         )
+}
+
+fn sdk_stream_error_message(error: &Value) -> String {
+    error
+        .get("message")
+        .filter(|message| js_truthy(message))
+        .map(|message| match message {
+            Value::String(message) => message.clone(),
+            _ => safe_json_stringify(message),
+        })
+        .unwrap_or_else(|| safe_json_stringify(error))
 }
 
 fn js_truthy(value: &Value) -> bool {
@@ -470,7 +524,7 @@ fn js_string(value: &Value) -> String {
     match value {
         Value::Null => "null".to_owned(),
         Value::Bool(value) => value.to_string(),
-        Value::Number(value) => value.to_string(),
+        Value::Number(_) => safe_json_stringify(value),
         Value::String(value) => value.clone(),
         Value::Array(values) => values
             .iter()
@@ -487,6 +541,7 @@ fn js_string(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     /// Pins pi OpenAI SDK framing at `src/api/openai-completions.ts:505-506`
     /// and the SSE behavior audited against `openai`'s streaming decoder.
@@ -504,6 +559,39 @@ mod tests {
             decoder.push(&wire[split..], false),
             vec!["{\"text\":\"café\",\n\"done\":true}".to_owned()]
         );
+    }
+
+    /// Pins pi OpenAI SDK `core/streaming.js:255-267`: a truthy `event:` field
+    /// dispatches even without `data:`, so JSON.parse receives an empty string.
+    #[tokio::test]
+    async fn event_only_message_surfaces_the_json_parse_error() {
+        let body =
+            futures::stream::iter(vec![Ok::<_, String>(b"event: future\n\n".to_vec())]).boxed();
+        let mut stream = sse_json_stream(body, None);
+        let error = stream.next().await.expect("dispatched event").unwrap_err();
+        assert_eq!(error.to_string(), "Unexpected end of JSON input");
+        assert!(stream.next().await.is_none());
+    }
+
+    /// Pins pi OpenAI SDK `core/error.js:21-37`,
+    /// `src/utils/error-body.ts:142-145`, and
+    /// `src/api/openai-completions.ts:678-680` number stringification.
+    #[tokio::test]
+    async fn streamed_api_error_matches_sdk_stringification() {
+        let error = OpenAiSseError::api(json!({
+            "message": 1.0,
+            "metadata": {"raw": 2.0}
+        }));
+        assert_eq!(error.to_string(), "1");
+        assert_eq!(error.formatted(true), "1\n2");
+
+        let body = futures::stream::iter(vec![Ok::<_, String>(
+            b"data: {\"error\":\"scalar failure\"}\n\n".to_vec(),
+        )])
+        .boxed();
+        let mut stream = sse_json_stream(body, None);
+        let error = stream.next().await.expect("dispatched event").unwrap_err();
+        assert_eq!(error.to_string(), r#""scalar failure""#);
     }
 
     /// Pins pi `src/api/openai-completions.ts:672-681`,

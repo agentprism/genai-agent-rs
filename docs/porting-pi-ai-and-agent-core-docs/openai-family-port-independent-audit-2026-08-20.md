@@ -53,3 +53,26 @@ Initial framing called these "unfixable / needs owner ruling / needs upstream is
 ## Verified clean (evidence base, abbreviated)
 
 Seams #1 (no `Result::Err` escapes anywhere; setup/auth/header failures in-band), #3/#8 two-tier options, #4 header null-suppression end-to-end, #5 partial-free protocol + contentIndex addressing, #9 compat families + both-direction api invariant, #10 open unions; `ProviderImages`/`DeferredStreams`/`session_resources` grounded in pi (types.ts:289,473,479,853; session-resources.ts), not invented. P1 final wire shapes complete and round-trip faithful. P2 helpers otherwise line-faithful (hash vectors, retry math, error-body precedence, estimate/clamp, prompt-cache code-point clamp correctly *not* UTF-16). P3/P4 request construction byte-identical incl. off-spec dialect writes and null-presence semantics; all SSE event handling, usage/cost (incl. flex 0.5 / priority 2 / gpt-5.5 2.5), stop-reason mapping. P5: transport auto/fallback memory, the two single-retry WS cases, no-SSE-replay-after-WS-start, body field order incl. `store:false` / empty `prompt_cache_key`, reasoning/service-tier resolution, SSE retry loop with the non-retryable-status-retried-via-catch quirk, zstd + fallback, 5min/55min eviction, JWT extraction, openai-beta bug-for-bug, number-vs-string diagnostic codes.
+
+---
+
+## D. Post-repair re-audit (2026-08-20, after 6d5eb71 / f423bd7 / 25067f1)
+
+Three fresh independent Opus re-auditors, one per repair commit, verified every A/B/C item above against pi source lines (not the audit's paraphrase) and hunted regressions in the repair diffs. **Verdict: every item RESOLVED with a regression pin; no regression away from pi in any repair diff.** Notable: R2 replaced the oxide client with `ai/src/api/openai_sse.rs` (own reqwest + byte-buffered SSE decoder; oxide retained for types only); A9 reads hyper's real wire reason phrase on HTTP/1.x and yields empty on HTTP/2.
+
+Residue found by the re-audit, fixed in R4 (all to pi behavior, no ruling):
+
+| # | Finding | pi | rust |
+|---|---------|----|------|
+| D1 | Streamed chunk with truthy top-level `error` silently dropped (completions; responses analog). pi's SDK throws APIError for any such chunk; pi surfaces `error.message` (+ OpenRouter `metadata.raw`) with stopReason=error. Rust ended with "Stream ended without finish_reason" or a spurious success when `supportsFinishReason=false`. Reachable via OpenRouter. | openai SDK core/streaming.js:49-50; openai-completions.ts:664-683 | openai_sse.rs:298-358; openai_completions.rs:781-838 |
+| D2 | Known-api compat structs drop unknown keys; pi's schema-free load preserves all compat keys (the new `Custom(Value)` path already does). | types.ts:822-850 | types.rs:1273-1379,1486-1504 |
+| D3 | Whole-number floats inside stringified error bodies emit `1.0` vs JSON.stringify `1`. | error-body.ts | error_body.rs:127-129; openai_sse.rs:432-455 |
+| D4 | Unknown message `phase` collapsed to None and dropped from `textSignature`; pi includes any truthy phase. The test `unknown_message_content_and_phase_are_tolerated` pinned the divergent branch. | openai-responses-shared.ts:49-53,700 | openai_responses_shared.rs:1170-1179 |
+| D5 | Event-only SSE message (no `data:`) silently ignored; pi's SDK dispatches `data:""` → JSON.parse throws → stream error. | openai SDK core/streaming.js | openai_sse.rs:415-418 |
+| D6 | A7 (qwen explicit-null → `reasoning_effort:"<level>"`) correct in code but not pinned; a nullish→defined mutation would pass. | openai-completions.ts:842 | openai_completions.rs:1678-1685 |
+
+Documented ε (not ported — runtime identity / language semantics, per the faithfulness litmus):
+- `X-Stainless-Lang: js`, `X-Stainless-Runtime: node`, `X-Stainless-Package-Version` etc. — the OpenAI JS SDK's runtime-identity telemetry headers. Inert, and reporting a JS runtime from Rust would be false; pi's own hand-rolled codex module does not send them either.
+- Off-spec usage token values that are strings/floats: pi's `x || 0` keeps a truthy string (JS concatenation in later arithmetic) or a float; Rust's `u64` usage fields coerce these to 0. Unreachable with conforming providers.
+- The compat-variant type guard in completions/responses (a model whose `compat` enum variant mismatches) — a Rust type-system necessity with no pi analog; unreachable given correct api→compat routing.
+- A4 normalizes `content: null` at deserialize rather than at transform; API wire identical, differs only on a raw deserialize→reserialize of a legacy session without transform.

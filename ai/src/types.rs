@@ -1322,6 +1322,8 @@ pub struct OpenAICompletionsCompat {
     pub session_affinity_format: Option<SessionAffinityFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_long_cache_retention: Option<bool>,
+    #[serde(default, flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1344,6 +1346,8 @@ pub struct OpenAIResponsesCompat {
     pub supports_tool_search: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_explicit_prompt_cache_mode: Option<bool>,
+    #[serde(default, flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1369,6 +1373,8 @@ pub struct AnthropicMessagesCompat {
     pub allowed_fallback_models: Option<Vec<AnthropicAllowedFallbackModel>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_tool_references: Option<bool>,
+    #[serde(default, flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1376,6 +1382,8 @@ pub struct AnthropicMessagesCompat {
 pub struct BedrockCompat {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_strict_mode: Option<bool>,
+    #[serde(default, flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -2026,6 +2034,58 @@ mod tests {
                 "wrong compat family for {api}"
             );
             assert_eq!(serde_json::to_value(model).unwrap(), wire);
+        }
+    }
+
+    /// Pins pi `types.ts:822-850`: known compat families remain schema-free
+    /// runtime objects, including unknown keys and their JSON values.
+    #[test]
+    fn known_api_compat_preserves_unknown_keys_as_inert_data() {
+        let cases = [
+            (
+                "openai-completions",
+                json!({
+                    "supportsStore": false,
+                    "futureCompletionsFlag": {"mode":"new","value":1}
+                }),
+            ),
+            (
+                "openai-responses",
+                json!({
+                    "supportsDeveloperRole": true,
+                    "futureResponsesFlag": [1, null, "x"]
+                }),
+            ),
+            (
+                "anthropic-messages",
+                json!({
+                    "supportsTemperature": false,
+                    "futureAnthropicFlag": 0
+                }),
+            ),
+            (
+                "bedrock-converse-stream",
+                json!({
+                    "supportsStrictMode": true,
+                    "futureBedrockFlag": null
+                }),
+            ),
+        ];
+
+        for (api, compat) in cases {
+            let wire = json!({
+                "id":"m","name":"M","api":api,"provider":"custom",
+                "baseUrl":"https://example.test","reasoning":false,"input":["text"],
+                "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},
+                "contextWindow":100,"maxTokens":10,"compat":compat
+            });
+            let model: Model = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(
+                serde_json::to_string(&model).unwrap(),
+                serde_json::to_string(&wire).unwrap(),
+                "{api} bytes"
+            );
+            assert_eq!(serde_json::to_value(model).unwrap(), wire, "{api}");
         }
     }
 

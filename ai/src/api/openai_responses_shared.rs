@@ -13,8 +13,8 @@ use crate::event_stream::{AssistantMessageEvent, AssistantStreamSender};
 use crate::models::calculate_cost;
 use crate::types::{
     AssistantContent, AssistantMessage, ImageContent, Message, Model, ModelInput, TextContent,
-    TextSignaturePhase, TextSignatureV1, ThinkingContent, Tool, ToolCall, ToolResultContent, Usage,
-    UserContent, UserContentBlock,
+    TextSignaturePhase, ThinkingContent, Tool, ToolCall, ToolResultContent, Usage, UserContent,
+    UserContentBlock,
 };
 use crate::utils::hash::short_hash;
 use crate::utils::json_parse::parse_streaming_json;
@@ -491,9 +491,16 @@ pub struct OpenAIResponsesStreamOptions<'a> {
     pub capture_end_turn: bool,
 }
 
-fn encode_text_signature_v1(id: String, phase: Option<TextSignaturePhase>) -> String {
-    serde_json::to_string(&TextSignatureV1 { v: 1, id, phase })
-        .expect("text signatures are serializable")
+fn encode_text_signature_v1(id: String, phase: Option<String>) -> String {
+    #[derive(Serialize)]
+    struct Signature {
+        v: u8,
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        phase: Option<String>,
+    }
+
+    serde_json::to_string(&Signature { v: 1, id, phase }).expect("text signatures are serializable")
 }
 
 fn parse_text_signature(signature: Option<&str>) -> Option<(String, Option<TextSignaturePhase>)> {
@@ -1146,8 +1153,8 @@ struct ReasoningText {
 #[derive(Debug, Deserialize)]
 struct MessageItem {
     id: String,
-    #[serde(default, deserialize_with = "deserialize_known_phase")]
-    phase: Option<TextSignaturePhase>,
+    #[serde(default, deserialize_with = "deserialize_truthy_phase_string")]
+    phase: Option<String>,
     #[serde(default)]
     content: Vec<OutputMessageContent>,
 }
@@ -1167,15 +1174,14 @@ enum OutputMessageContent {
     Unknown,
 }
 
-fn deserialize_known_phase<'de, D>(deserializer: D) -> Result<Option<TextSignaturePhase>, D::Error>
+fn deserialize_truthy_phase_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    Ok(match Value::deserialize(deserializer)?.as_str() {
-        Some("commentary") => Some(TextSignaturePhase::Commentary),
-        Some("final_answer") => Some(TextSignaturePhase::FinalAnswer),
-        _ => None,
-    })
+    Ok(Value::deserialize(deserializer)?
+        .as_str()
+        .filter(|phase| !phase.is_empty())
+        .map(str::to_owned))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1249,13 +1255,8 @@ enum OutputSlot {
 }
 
 fn apply_message_phase_stop_reason(item: &OutputItem, output: &mut AssistantMessage) {
-    if matches!(
-        item,
-        OutputItem::Message(MessageItem {
-            phase: Some(TextSignaturePhase::FinalAnswer),
-            ..
-        })
-    ) {
+    if matches!(item, OutputItem::Message(MessageItem { phase: Some(phase), .. }) if phase == "final_answer")
+    {
         output.stop_reason = crate::types::StopReason::Stop;
     }
 }
@@ -2882,8 +2883,8 @@ mod tests {
         assert_eq!(message.raw_stop_reason.as_deref(), Some("failed"));
     }
 
-    /// Pins pi `src/api/openai-responses-shared.ts:699,748`: unknown message
-    /// content-part types contribute empty text and unknown phases are ignored.
+    /// Pins pi `src/api/openai-responses-shared.ts:49-53,699-700`: unknown
+    /// content parts contribute empty text and any truthy phase is signed.
     #[tokio::test]
     async fn unknown_message_content_and_phase_are_tolerated() {
         let target = model("openai-responses", "openai", "gpt-5-mini");
@@ -2918,7 +2919,7 @@ mod tests {
         assert_eq!(text.text, "kept");
         let signature: Value =
             serde_json::from_str(text.text_signature.as_deref().expect("text signature")).unwrap();
-        assert!(signature.get("phase").is_none());
+        assert_eq!(signature["phase"], "future_phase");
     }
 
     /// Pins pi `src/api/openai-responses-shared.ts:748-753`: an empty

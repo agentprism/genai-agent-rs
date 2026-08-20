@@ -870,9 +870,10 @@ fn response_stream(
 mod tests {
     use super::*;
     use crate::types::{
-        ConstrainedSamplingConfig, ImageContent, Message, ModelCost, ModelCostRates,
-        ProviderResponse, StrictPreference, TextContent, ThinkingLevelMap, ToolConstrainedSampling,
-        ToolResultMessage, ToolResultRole, UserContent, UserContentBlock, UserMessage, UserRole,
+        ConstrainedSamplingConfig, FetchFunction, ImageContent, Message, ModelCost, ModelCostRates,
+        ProviderHttpRequest, ProviderHttpResponse, ProviderResponse, StrictPreference, TextContent,
+        ThinkingLevelMap, ToolConstrainedSampling, ToolResultMessage, ToolResultRole, UserContent,
+        UserContentBlock, UserMessage, UserRole,
     };
     use bytes::Bytes;
     use futures::StreamExt;
@@ -925,6 +926,25 @@ mod tests {
                 headers: BTreeMap::new(),
                 body: vec![body.into()],
             }
+        }
+    }
+
+    struct StaticFetch(Vec<u8>);
+
+    impl FetchFunction for StaticFetch {
+        fn fetch(
+            &self,
+            _request: ProviderHttpRequest,
+        ) -> futures::future::BoxFuture<'_, Result<ProviderHttpResponse, String>> {
+            let body = self.0.clone();
+            Box::pin(async move {
+                Ok(ProviderHttpResponse {
+                    status: 200,
+                    status_text: "OK".to_owned(),
+                    headers: BTreeMap::new(),
+                    body: Some(futures::stream::iter(vec![Ok(body)]).boxed()),
+                })
+            })
         }
     }
 
@@ -1630,6 +1650,39 @@ mod tests {
         assert_eq!(
             result.error_message.as_deref(),
             Some("OpenAI Responses stream ended before a terminal response event")
+        );
+    }
+
+    /// Pins pi OpenAI SDK `core/streaming.js:49-50` and
+    /// `src/api/openai-responses.ts:181-191`: a truthy top-level error object is
+    /// terminal through the SDK path, distinct from a `type:"error"` event.
+    #[tokio::test]
+    async fn truthy_top_level_error_chunk_is_terminal() {
+        let chunk = json!({
+            "error": {
+                "message": "responses stream failure",
+                "metadata": {"raw": "not appended by the Responses catch"}
+            }
+        });
+        let model = base_model("https://example.invalid/v1".to_owned(), "gpt-5-mini");
+        let mut request_options = options();
+        request_options.stream.request.fetch = Some(Arc::new(StaticFetch(
+            format!("data: {chunk}\n\ndata: [DONE]\n\n").into_bytes(),
+        )));
+        let mut event_stream = stream(&model, &context(), request_options);
+        let mut events = Vec::new();
+        while let Some(event) = event_stream.next().await {
+            events.push(event);
+        }
+        let message = event_stream.result().await.unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], AssistantMessageEvent::Start));
+        assert!(matches!(events[1], AssistantMessageEvent::Error { .. }));
+        assert_eq!(message.stop_reason, StopReason::Error);
+        assert_eq!(
+            message.error_message.as_deref(),
+            Some("responses stream failure")
         );
     }
 

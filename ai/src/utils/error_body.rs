@@ -125,7 +125,34 @@ pub fn truncate_error_text(text: &str, max_chars: usize) -> String {
 }
 
 pub fn safe_json_stringify(value: &Value) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
+    serde_json::to_string(&normalize_json_numbers(value)).unwrap_or_else(|_| value.to_string())
+}
+
+fn normalize_json_numbers(value: &Value) -> Value {
+    match value {
+        Value::Number(number) if number.is_f64() => {
+            let value = number.as_f64().expect("f64 JSON number");
+            if value == 0.0 {
+                Value::from(0)
+            } else if value.is_finite()
+                && value.fract() == 0.0
+                && value >= i64::MIN as f64
+                && value <= i64::MAX as f64
+            {
+                Value::from(value as i64)
+            } else {
+                Value::Number(number.clone())
+            }
+        }
+        Value::Array(values) => Value::Array(values.iter().map(normalize_json_numbers).collect()),
+        Value::Object(values) => Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), normalize_json_numbers(value)))
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -274,6 +301,19 @@ mod tests {
                 None
             ),
             r#"{"reason":"boom"}"#
+        );
+    }
+
+    /// Pins pi `src/utils/error-body.ts:142-145`: JSON.stringify emits integral
+    /// finite numbers without a decimal suffix throughout nested error bodies.
+    #[test]
+    fn safe_json_stringify_uses_json_stringify_number_spelling() {
+        assert_eq!(
+            safe_json_stringify(&json!({
+                "whole": 1.0,
+                "nested": [-0.0, 2.5, {"alsoWhole": 3.0}]
+            })),
+            r#"{"whole":1,"nested":[0,2.5,{"alsoWhole":3}]}"#
         );
     }
 }

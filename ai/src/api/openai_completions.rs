@@ -804,7 +804,7 @@ async fn next_chunk(
         if error.aborted_flag() {
             CompletionError::aborted(error.to_string())
         } else {
-            CompletionError::new(error.to_string())
+            CompletionError::new(error.formatted(true))
         }
     })
 }
@@ -2650,8 +2650,8 @@ fn apply_compat(resolved: &mut ResolvedCompat, compat: &OpenAICompletionsCompat)
 mod tests {
     use super::*;
     use crate::types::{
-        ModelCost, ModelCostRates, ProviderResponse, ThinkingLevelMap, ToolResultRole, UserContent,
-        UserMessage, UserRole,
+        FetchFunction, ModelCost, ModelCostRates, ProviderHttpRequest, ProviderHttpResponse,
+        ProviderResponse, ThinkingLevelMap, ToolResultRole, UserContent, UserMessage, UserRole,
     };
     use bytes::Bytes;
     use futures::StreamExt;
@@ -2712,6 +2712,25 @@ mod tests {
                 headers: BTreeMap::new(),
                 body: vec![body.into()],
             }
+        }
+    }
+
+    struct StaticFetch(Vec<u8>);
+
+    impl FetchFunction for StaticFetch {
+        fn fetch(
+            &self,
+            _request: ProviderHttpRequest,
+        ) -> futures::future::BoxFuture<'_, Result<ProviderHttpResponse, String>> {
+            let body = self.0.clone();
+            Box::pin(async move {
+                Ok(ProviderHttpResponse {
+                    status: 200,
+                    status_text: "OK".to_owned(),
+                    headers: BTreeMap::new(),
+                    body: Some(futures::stream::iter(vec![Ok(body)]).boxed()),
+                })
+            })
         }
     }
 
@@ -4130,6 +4149,75 @@ mod tests {
         );
     }
 
+    /// Pins pi OpenAI SDK `core/streaming.js:49-50` and
+    /// `src/api/openai-completions.ts:664-683`: any truthy top-level stream
+    /// error is terminal, including the OpenRouter metadata.raw appendix.
+    #[tokio::test]
+    async fn truthy_top_level_error_chunk_is_terminal_with_raw_metadata() {
+        let chunk = json!({
+            "error": {
+                "message": "upstream stream failure",
+                "metadata": {"raw": "OpenRouter upstream detail"}
+            }
+        });
+        let mut test_model = model("https://example.invalid/v1".to_owned());
+        test_model.provider = "openrouter".into();
+        test_model.compat = completions_compat(OpenAICompletionsCompat {
+            supports_finish_reason: Some(false),
+            ..OpenAICompletionsCompat::default()
+        });
+        let mut request_options = options();
+        request_options.stream.request.fetch = Some(Arc::new(StaticFetch(
+            format!("data: {chunk}\n\ndata: [DONE]\n\n").into_bytes(),
+        )));
+
+        let mut event_stream = stream(&test_model, &context(), request_options);
+        let mut events = Vec::new();
+        while let Some(event) = event_stream.next().await {
+            events.push(event);
+        }
+        let message = event_stream.result().await.unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], AssistantMessageEvent::Start));
+        assert!(matches!(events[1], AssistantMessageEvent::Error { .. }));
+        assert_eq!(message.stop_reason, StopReason::Error);
+        assert_eq!(
+            message.error_message.as_deref(),
+            Some("upstream stream failure\nOpenRouter upstream detail")
+        );
+    }
+
+    /// Pins pi OpenAI SDK `core/streaming.js:41-50,255-267` and
+    /// `src/api/openai-completions.ts:664-683`: an event-only SSE message
+    /// reaches JSON.parse as empty data and becomes an in-band terminal error.
+    #[tokio::test]
+    async fn event_only_sse_message_is_a_terminal_json_parse_error() {
+        let mut request_options = options();
+        request_options.stream.request.fetch = Some(Arc::new(StaticFetch(
+            b"event: future\n\ndata: [DONE]\n\n".to_vec(),
+        )));
+        let mut event_stream = stream(
+            &model("https://example.invalid/v1".to_owned()),
+            &context(),
+            request_options,
+        );
+        let mut events = Vec::new();
+        while let Some(event) = event_stream.next().await {
+            events.push(event);
+        }
+        let message = event_stream.result().await.unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], AssistantMessageEvent::Start));
+        assert!(matches!(events[1], AssistantMessageEvent::Error { .. }));
+        assert_eq!(message.stop_reason, StopReason::Error);
+        assert_eq!(
+            message.error_message.as_deref(),
+            Some("Unexpected end of JSON input")
+        );
+    }
+
     /// Ports response-model empty/echo cases and null-chunk/finish-reason behavior
     /// from response-model and tool-choice tests.
     #[tokio::test]
@@ -4843,7 +4931,7 @@ mod tests {
         assert!(messages[0]["tool_calls"].is_array());
     }
 
-    /// Pins pi `src/api/openai-completions.ts:826-846`: qwen uses nullish
+    /// Pins pi `src/api/openai-completions.ts:839-845`: qwen uses nullish
     /// fallback for an explicit-null map entry while zai uses defined semantics.
     #[test]
     fn qwen_explicit_null_effort_falls_back_to_the_level_name() {
