@@ -20,6 +20,7 @@ httpdate = "1"
 # Ruled 2026-08-19: the OpenAI client for the openai-completions/openai-responses API
 # implementations — plays the role pi's `openai` SDK plays (transport + SSE framing).
 openai-oxide = "0.16"
+reqwest = { version = "0.13", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"

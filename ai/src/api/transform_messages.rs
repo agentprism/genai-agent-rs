@@ -13,7 +13,8 @@ const NON_VISION_TOOL_IMAGE_PLACEHOLDER: &str =
     "(tool image omitted: model does not support images)";
 const MISTRAL_TOOL_CALL_ID_LENGTH: usize = 9;
 
-pub type ToolCallIdNormalizer = dyn Fn(&str, &Model, &AssistantMessage) -> String + Send + Sync;
+pub type ToolCallIdNormalizer<'a> =
+    dyn Fn(&str, &Model, &AssistantMessage) -> String + Send + Sync + 'a;
 
 fn replace_images_with_placeholder(
     content: &[UserContentBlock],
@@ -68,7 +69,7 @@ fn downgrade_unsupported_images(message: &Message, model: &Model) -> Message {
 pub fn transform_messages(
     messages: &[Message],
     model: &Model,
-    normalize_tool_call_id: Option<&ToolCallIdNormalizer>,
+    normalize_tool_call_id: Option<&ToolCallIdNormalizer<'_>>,
 ) -> Vec<Message> {
     let mut tool_call_id_map: BTreeMap<String, String> = BTreeMap::new();
     let mut transformed = Vec::with_capacity(messages.len());

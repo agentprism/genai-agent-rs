@@ -48,8 +48,7 @@ use futures::future::BoxFuture;
 pub enum ApiStreamOptions {
     Base(StreamOptions),
     OpenAICompletions(openai_completions::OpenAICompletionsOptions),
-    /// PORT TARGET: `OpenAIResponsesOptions`.
-    OpenAIResponses(StreamOptions),
+    OpenAIResponses(openai_responses::OpenAIResponsesOptions),
     /// PORT TARGET: `OpenAICodexResponsesOptions`.
     OpenAICodexResponses(StreamOptions),
     Custom {

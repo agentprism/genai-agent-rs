@@ -20,6 +20,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "openai-oxide",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror",
