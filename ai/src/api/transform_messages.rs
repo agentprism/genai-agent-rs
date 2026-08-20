@@ -304,12 +304,14 @@ fn normalize_responses_id_part(part: &str) -> String {
 }
 
 fn sanitize_id_part(id: &str, allow_underscore_hyphen: bool) -> String {
-    id.chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric()
-                || (allow_underscore_hyphen && matches!(character, '_' | '-'))
-            {
-                character
+    id.encode_utf16()
+        .map(|unit| {
+            let byte = u8::try_from(unit).ok();
+            if byte.is_some_and(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || (allow_underscore_hyphen && matches!(byte, b'_' | b'-'))
+            }) {
+                char::from(byte.expect("checked above"))
             } else {
                 '_'
             }
@@ -427,6 +429,28 @@ mod tests {
         message.provider = "source-provider".into();
         message.model = "source".to_owned();
         message
+    }
+
+    /// Pins pi `src/api/transform-messages.ts:71-74` nullish content coercion.
+    #[test]
+    fn null_and_missing_message_content_deserialize_and_lower_to_empty_arrays() {
+        let messages: Vec<Message> = serde_json::from_value(json!([
+            {"role":"user","timestamp":1},
+            {
+                "role":"assistant","content":null,"api":"test-api","provider":"test-provider",
+                "model":"test-model","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,
+                "totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},
+                "stopReason":"stop","timestamp":2
+            },
+            {"role":"toolResult","toolCallId":"call","toolName":"run","isError":false,"timestamp":3}
+        ]))
+        .expect("pi accepts nullish content");
+
+        let transformed = transform_messages(&messages, &model(vec![ModelInput::Text]), None);
+        let wire = serde_json::to_value(transformed).unwrap();
+        assert_eq!(wire[0]["content"], json!([]));
+        assert_eq!(wire[1]["content"], json!([]));
+        assert_eq!(wire[2]["content"], json!([]));
     }
 
     fn tool_result(id: &str) -> Message {
@@ -687,8 +711,9 @@ mod tests {
         );
     }
 
-    /// Pins target constraints from pi Anthropic :1115-1118, Mistral :227-256,
-    /// OpenAI Completions :1146-1169, and Responses shared :147-170.
+    /// Pins pi `src/api/anthropic-messages.ts:1115-1118`,
+    /// `src/api/openai-completions.ts:1146-1169`, and
+    /// `src/api/openai-responses-shared.ts:147-170` UTF-16 ID constraints.
     #[test]
     fn target_id_normalizers_match_pi_constraints() {
         let anthropic = normalize_anthropic_tool_call_id(&format!("bad|{}", "x".repeat(80)));
@@ -697,6 +722,11 @@ mod tests {
             anthropic.chars().all(
                 |character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
             )
+        );
+        assert_eq!(normalize_anthropic_tool_call_id("a💥b"), "a__b");
+        assert_eq!(
+            normalize_anthropic_tool_call_id(&format!("{}💥z", "a".repeat(63))),
+            format!("{}_", "a".repeat(63))
         );
 
         let mut mistral = MistralToolCallIdNormalizer::default();
@@ -726,6 +756,17 @@ mod tests {
         assert_eq!(two, "call_shared_v3nhpp1d");
         assert_ne!(one, two);
         assert_eq!(
+            normalize_open_ai_completions_tool_call_id("a💥|b", &completions),
+            "a___b"
+        );
+        assert_eq!(
+            normalize_open_ai_completions_tool_call_id(
+                &format!("{}💥z", "a".repeat(38)),
+                &completions
+            ),
+            format!("{}💥", "a".repeat(38))
+        );
+        assert_eq!(
             normalize_open_ai_completions_tool_call_id(&"x".repeat(50), &completions).len(),
             40
         );
@@ -749,6 +790,10 @@ mod tests {
         );
         assert_eq!(normalized, "call_1|fc_81dvun1sxj9to");
         assert!(normalized.contains('|'));
+        assert_eq!(
+            normalize_responses_tool_call_id("a💥b|fc_x", &responses, &same_source, &allowed),
+            "a__b|fc_x"
+        );
     }
 
     /// Same-model callbacks are intentionally bypassed by pi `src/api/transform-messages.ts:136`.

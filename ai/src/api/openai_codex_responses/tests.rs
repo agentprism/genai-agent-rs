@@ -620,7 +620,7 @@ async fn sse_session_affinity_presence_and_clamping_match_pi() {
 }
 
 /// Ports pi `openai-codex-stream.test.ts:747-861,932-1030`; explicit-null and
-/// zero presence pin pi `openai-codex-responses.ts:548-576`.
+/// whole-number formatting pin pi `openai-codex-responses.ts:283,548-576`.
 #[test]
 fn reasoning_and_tool_choice_request_lowering_matches_pi() {
     let mut gpt55 = model("gpt-5.5");
@@ -675,7 +675,7 @@ fn reasoning_and_tool_choice_request_lowering_matches_pi() {
         &context("hello"),
         &OpenAICodexResponsesOptions {
             stream: StreamOptions {
-                temperature: Some(0.0),
+                temperature: Some(1.0),
                 ..Default::default()
             },
             reasoning_effort: Some(CodexReasoningEffort::Low),
@@ -687,7 +687,10 @@ fn reasoning_and_tool_choice_request_lowering_matches_pi() {
         &grammar,
     )
     .expect("presence body");
-    assert_eq!(body["temperature"], 0.0);
+    assert_eq!(body["temperature"], 1);
+    let wire = serde_json::to_string(&body).unwrap();
+    assert!(wire.contains(r#""temperature":1"#));
+    assert!(!wire.contains(r#""temperature":1.0"#));
     assert_eq!(body["service_tier"], Value::Null);
     assert_eq!(body["reasoning"]["summary"], "auto");
 }

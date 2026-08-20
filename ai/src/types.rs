@@ -98,6 +98,44 @@ where
     Value::deserialize(deserializer).map(Some)
 }
 
+fn deserialize_null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
+pub(crate) fn serialize_js_f64<S>(value: &f64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if *value == 0.0 {
+        serializer.serialize_i64(0)
+    } else if value.is_finite()
+        && value.fract() == 0.0
+        && *value >= i64::MIN as f64
+        && *value <= i64::MAX as f64
+    {
+        serializer.serialize_i64(*value as i64)
+    } else {
+        serializer.serialize_f64(*value)
+    }
+}
+
+pub(crate) fn serialize_optional_js_f64<S>(
+    value: &Option<f64>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(value) => serialize_js_f64(value, serializer),
+        None => serializer.serialize_none(),
+    }
+}
+
 fn serialize_text_signature_version<S>(version: &u8, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -370,7 +408,11 @@ impl<TModel> fmt::Debug for ProviderRequestOptions<TModel> {
 pub struct StreamOptions {
     #[serde(flatten)]
     pub request: ProviderRequestOptions<Model>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_js_f64"
+    )]
     pub temperature: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sampling_params: Option<Map<String, Value>>,
@@ -560,7 +602,7 @@ pub struct ToolCall {
     pub kind: ToolCallType,
     pub id: String,
     pub name: String,
-    pub arguments: Map<String, Value>,
+    pub arguments: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thought_signature: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -571,13 +613,13 @@ impl ToolCall {
     pub fn new(
         id: impl Into<String>,
         name: impl Into<String>,
-        arguments: Map<String, Value>,
+        arguments: impl Into<Value>,
     ) -> Self {
         Self {
             kind: ToolCallType::ToolCall,
             id: id.into(),
             name: name.into(),
-            arguments,
+            arguments: arguments.into(),
             thought_signature: None,
             namespace: None,
         }
@@ -610,6 +652,12 @@ pub enum UserContent {
     Blocks(Vec<UserContentBlock>),
 }
 
+impl Default for UserContent {
+    fn default() -> Self {
+        Self::Blocks(Vec::new())
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UserRole {
     #[default]
@@ -620,6 +668,7 @@ pub enum UserRole {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserMessage {
     pub role: UserRole,
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub content: UserContent,
     pub timestamp: i64,
 }
@@ -700,10 +749,15 @@ impl From<ErrorStopReason> for StopReason {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageCost {
+    #[serde(serialize_with = "serialize_js_f64")]
     pub input: f64,
+    #[serde(serialize_with = "serialize_js_f64")]
     pub output: f64,
+    #[serde(serialize_with = "serialize_js_f64")]
     pub cache_read: f64,
+    #[serde(serialize_with = "serialize_js_f64")]
     pub cache_write: f64,
+    #[serde(serialize_with = "serialize_js_f64")]
     pub total: f64,
 }
 
@@ -774,6 +828,7 @@ pub struct DeferredHandle {
 #[serde(rename_all = "camelCase")]
 pub struct AssistantMessage {
     pub role: AssistantRole,
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub content: Vec<AssistantContent>,
     pub api: Api,
     pub provider: ProviderId,
@@ -833,6 +888,7 @@ pub struct ToolResultMessage {
     pub role: ToolResultRole,
     pub tool_call_id: String,
     pub tool_name: String,
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub content: Vec<ToolResultContent>,
     #[serde(
         default,
@@ -987,9 +1043,13 @@ pub type ImagesOutput = ModelInput;
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelCostRates {
+    #[serde(serialize_with = "serialize_js_f64")]
     pub input: f64,
+    #[serde(serialize_with = "serialize_js_f64")]
     pub output: f64,
+    #[serde(serialize_with = "serialize_js_f64")]
     pub cache_read: f64,
+    #[serde(serialize_with = "serialize_js_f64")]
     pub cache_write: f64,
 }
 
@@ -1064,11 +1124,23 @@ pub enum DeferredToolsMode {
     Kimi,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(untagged)]
 pub enum NumberOrString {
     Number(f64),
     String(String),
+}
+
+impl Serialize for NumberOrString {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Number(value) => serialize_js_f64(value, serializer),
+            Self::String(value) => serializer.serialize_str(value),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1106,21 +1178,49 @@ pub struct OpenRouterMaxPrice {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PercentileThresholds {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_js_f64"
+    )]
     pub p50: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_js_f64"
+    )]
     pub p75: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_js_f64"
+    )]
     pub p90: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_js_f64"
+    )]
     pub p99: Option<f64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(untagged)]
 pub enum RoutingThreshold {
     Number(f64),
     Percentiles(PercentileThresholds),
+}
+
+impl Serialize for RoutingThreshold {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Number(value) => serialize_js_f64(value, serializer),
+            Self::Percentiles(value) => value.serialize(serializer),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1285,20 +1385,7 @@ pub enum ModelCompat {
     OpenAIResponses(OpenAIResponsesCompat),
     AnthropicMessages(AnthropicMessagesCompat),
     Bedrock(BedrockCompat),
-}
-
-impl ModelCompat {
-    fn matches_api(&self, api: &str) -> bool {
-        match self {
-            Self::OpenAICompletions(_) => api == "openai-completions",
-            Self::OpenAIResponses(_) => matches!(
-                api,
-                "openai-responses" | "azure-openai-responses" | "openai-codex-responses"
-            ),
-            Self::AnthropicMessages(_) => api == "anthropic-messages",
-            Self::Bedrock(_) => api == "bedrock-converse-stream",
-        }
-    }
+    Custom(Value),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1370,16 +1457,6 @@ impl Serialize for Model {
     where
         S: Serializer,
     {
-        if self
-            .compat
-            .as_ref()
-            .is_some_and(|compat| !compat.matches_api(self.api.as_str()))
-        {
-            return Err(S::Error::custom(format!(
-                "compat variant does not match model api {}",
-                self.api
-            )));
-        }
         ModelWireRef {
             id: &self.id,
             name: &self.name,
@@ -1423,11 +1500,7 @@ impl<'de> Deserialize<'de> for Model {
             ("bedrock-converse-stream", Some(value)) => Some(ModelCompat::Bedrock(
                 serde_json::from_value(value).map_err(D::Error::custom)?,
             )),
-            (api, Some(_)) => {
-                return Err(D::Error::custom(format!(
-                    "model api {api} has no compatible compat family"
-                )));
-            }
+            (_, Some(value)) => Some(ModelCompat::Custom(value)),
         };
         Ok(Self {
             id: wire.id,
@@ -1626,7 +1699,7 @@ mod tests {
             serde_json::to_value(Usage::default()).unwrap(),
             json!({
                 "input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,
-                "cost":{"input":0.0,"output":0.0,"cacheRead":0.0,"cacheWrite":0.0,"total":0.0}
+                "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}
             })
         );
     }
@@ -1749,7 +1822,7 @@ mod tests {
             json!({
                 "role":"assistant","content":[],"api":"custom-api","provider":"custom-provider",
                 "model":"model","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,
-                "totalTokens":0,"cost":{"input":0.0,"output":0.0,"cacheRead":0.0,"cacheWrite":0.0,"total":0.0}},
+                "totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},
                 "stopReason":"pending","timestamp":0
             })
         );
@@ -1880,7 +1953,7 @@ mod tests {
     #[test]
     fn provider_option_records_round_trip_extension_keys() {
         let stream_json = json!({
-            "temperature":0.0,
+            "temperature":0,
             "headers":{"x-default":null},
             "vendorOption":{"enabled":true},
             "vendorNull":null
@@ -1907,7 +1980,7 @@ mod tests {
         let anthropic_json = json!({
             "id":"m","name":"M","api":"anthropic-messages","provider":"anthropic",
             "baseUrl":"https://example.test","reasoning":true,"input":["text"],
-            "cost":{"input":1.0,"output":2.0,"cacheRead":0.1,"cacheWrite":0.2},
+            "cost":{"input":1,"output":2,"cacheRead":0.1,"cacheWrite":0.2},
             "contextWindow":100,"maxTokens":10,
             "compat":{"supportsTemperature":false,"allowEmptySignature":true}
         });
@@ -1939,7 +2012,7 @@ mod tests {
             let wire = json!({
                 "id":"m","name":"M","api":api,"provider":"custom",
                 "baseUrl":"https://example.test","reasoning":false,"input":["text"],
-                "cost":{"input":0.0,"output":0.0,"cacheRead":0.0,"cacheWrite":0.0},
+                "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},
                 "contextWindow":100,"maxTokens":10,"compat":compat
             });
             let model: Model = serde_json::from_value(wire.clone()).unwrap();
@@ -1954,15 +2027,29 @@ mod tests {
             );
             assert_eq!(serde_json::to_value(model).unwrap(), wire);
         }
+    }
 
-        let invalid = json!({
+    /// Pins pi `types.ts:822-850`: the compat family constraint is compile-time-only.
+    #[test]
+    fn custom_api_compat_loads_and_round_trips_as_inert_data() {
+        let wire = json!({
             "id":"m","name":"M","api":"custom-api","provider":"custom",
             "baseUrl":"http://localhost","reasoning":false,"input":["text"],
             "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},
-            "contextWindow":1,"maxTokens":1,"compat":{}
+            "contextWindow":1,"maxTokens":1,
+            "compat":{"family":"opaque","supportsSomething":true,"nested":{"value":1}}
         });
-        assert!(serde_json::from_value::<Model>(invalid).is_err());
+        let model: Model = serde_json::from_value(wire.clone()).expect("pi accepts inert compat");
+        assert!(matches!(
+            &model.compat,
+            Some(ModelCompat::Custom(value)) if value == &wire["compat"]
+        ));
+        assert_eq!(serde_json::to_value(model).unwrap(), wire);
+    }
 
+    /// Pins pi `types.ts:822-850`: runtime serialization does not enforce the TS conditional type.
+    #[test]
+    fn model_serialization_does_not_runtime_reject_a_compat_shape() {
         let mismatched = Model {
             id: "m".into(),
             name: "M".into(),
@@ -1981,6 +2068,48 @@ mod tests {
                 OpenAIResponsesCompat::default(),
             )),
         };
-        assert!(serde_json::to_value(mismatched).is_err());
+        assert_eq!(
+            serde_json::to_value(mismatched).unwrap()["compat"],
+            json!({})
+        );
+    }
+
+    /// Pins pi `src/api/openai-completions.ts:798-800`, `src/api/openai-responses.ts:304-306`,
+    /// and `src/api/openai-codex-responses.ts:283,562-564` JSON number formatting.
+    #[test]
+    fn whole_f64_fields_serialize_like_json_stringify() {
+        let options = StreamOptions {
+            temperature: Some(1.0),
+            ..StreamOptions::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&options).unwrap(),
+            r#"{"temperature":1}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&UsageCost {
+                input: 1.0,
+                output: -0.0,
+                cache_read: 0.5,
+                cache_write: 2.0,
+                total: 3.5,
+            })
+            .unwrap(),
+            r#"{"input":1,"output":0,"cacheRead":0.5,"cacheWrite":2,"total":3.5}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&NumberOrString::Number(4.0)).unwrap(),
+            "4"
+        );
+        assert_eq!(
+            serde_json::to_string(&RoutingThreshold::Percentiles(PercentileThresholds {
+                p50: Some(1.0),
+                p75: None,
+                p90: Some(2.5),
+                p99: None,
+            }))
+            .unwrap(),
+            r#"{"p50":1,"p90":2.5}"#
+        );
     }
 }

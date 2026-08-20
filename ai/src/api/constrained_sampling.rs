@@ -1,7 +1,7 @@
 //! Constrained tool sampling ⇐ pi `src/api/constrained-sampling.ts`.
 
 use crate::types::{ConstrainedSamplingConfig, StrictPreference, Tool, ToolConstrainedSampling};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -260,7 +260,7 @@ pub struct GrammarToolInputJsonBuffer {
 
 pub fn get_grammar_tool_input(
     tool_name: &str,
-    arguments: &Map<String, Value>,
+    arguments: &Value,
     input_property: &str,
 ) -> Result<String, ConstrainedSamplingError> {
     arguments
@@ -661,16 +661,12 @@ mod tests {
             Some("payload")
         );
         assert_eq!(
-            get_grammar_tool_input(
-                "sample_tool",
-                &Map::from_iter([("payload".to_owned(), json!("abc"))]),
-                "payload"
-            )
-            .expect("input"),
+            get_grammar_tool_input("sample_tool", &json!({"payload":"abc"}), "payload")
+                .expect("input"),
             "abc"
         );
         assert!(
-            get_grammar_tool_input("sample_tool", &Map::new(), "payload")
+            get_grammar_tool_input("sample_tool", &json!({}), "payload")
                 .expect_err("missing")
                 .to_string()
                 .contains("requires argument \"payload\" to be a string")

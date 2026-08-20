@@ -27,7 +27,7 @@ use crate::types::{
     Context, DiagnosticCode, DiagnosticErrorInfo, ErrorStopReason, Message, Model, ModelCompat,
     ModelThinkingLevel, ProviderHttpRequest, ProviderHttpResponse, ProviderResponse,
     SimpleStreamOptions, StopReason, StreamOptions, SuccessfulStopReason, ThinkingLevel, Tool,
-    ToolChoice, Transport, Usage,
+    ToolChoice, Transport, Usage, serialize_optional_js_f64,
 };
 use crate::utils::headers::headers_to_record;
 use crate::utils::pi_user_agent::get_pi_user_agent;
@@ -907,7 +907,10 @@ struct CodexRequestBody {
     prompt_cache_key: Option<String>,
     tool_choice: ResponseToolChoiceMode,
     parallel_tool_calls: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_js_f64"
+    )]
     temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     service_tier: Option<Option<ResponseServiceTier>>,

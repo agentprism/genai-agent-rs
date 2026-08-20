@@ -14,7 +14,9 @@ use crate::api::openai_prompt_cache::clamp_open_ai_prompt_cache_key;
 use crate::api::simple_options::{
     build_base_options, clamp_thinking_budget_to_answer_room, thinking_budget_for_level,
 };
-use crate::api::transform_messages::transform_messages;
+use crate::api::transform_messages::{
+    normalize_open_ai_completions_tool_call_id, transform_messages,
+};
 use crate::api::{ApiStreamOptions, ProviderStreams};
 use crate::event_stream::{
     AssistantMessageEvent, AssistantMessageEventStream, AssistantStreamSender,
@@ -27,12 +29,11 @@ use crate::types::{
     ProviderEnv, ProviderHeaders, ProviderResponse, SessionAffinityFormat, SimpleStreamOptions,
     StopReason, StreamOptions, SuccessfulStopReason, TextContent, ThinkingBudgets, ThinkingContent,
     ThinkingFormat, ThinkingLevel, ThinkingTokenBudgetField, ThinkingVariable, Tool, ToolCall,
-    ToolChoice, ToolResultMessage, Usage, VercelGatewayRouting,
+    ToolChoice, ToolResultMessage, Usage, VercelGatewayRouting, serialize_optional_js_f64,
 };
 use crate::utils::error_body::{
     ProviderErrorData, format_provider_error, normalize_provider_error,
 };
-use crate::utils::hash::short_hash;
 use crate::utils::json_parse::parse_streaming_json;
 use crate::utils::pi_user_agent::get_pi_user_agent;
 use crate::utils::provider_env::get_provider_env_value;
@@ -353,7 +354,11 @@ struct WireRequest {
     max_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_completion_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_js_f64"
+    )]
     temperature: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<WireTool>>,
@@ -1125,6 +1130,7 @@ fn process_chunk(
             .send(AssistantMessageEvent::ThinkingDelta {
                 content_index: index,
                 delta: reasoning,
+                thinking_signature_delta: None,
             })
             .map_err(CompletionError::display)?;
     }
@@ -1198,6 +1204,9 @@ fn ensure_thinking_block(
     sender
         .send(AssistantMessageEvent::ThinkingStart {
             content_index: index,
+            thinking: None,
+            thinking_signature: Some(signature.to_owned()),
+            redacted: None,
         })
         .map_err(CompletionError::display)?;
     Ok(index)
@@ -1271,6 +1280,7 @@ fn process_tool_delta(
                 content_index: index,
                 id: delta.id.clone().unwrap_or_default(),
                 tool_name: name.to_owned(),
+                namespace: None,
             })
             .map_err(CompletionError::display)?;
         index
@@ -1306,7 +1316,10 @@ fn process_tool_delta(
             .get(&call.name)
             .cloned()
             .unwrap_or_else(|| "input".to_owned());
-        call.arguments = Map::from_iter([(property.clone(), Value::String(String::new()))]);
+        call.arguments = Value::Object(Map::from_iter([(
+            property.clone(),
+            Value::String(String::new()),
+        )]));
         scratch.custom_input = Some(CustomInputScratch {
             property,
             json_buffer: GrammarToolInputJsonBuffer::default(),
@@ -1319,10 +1332,7 @@ fn process_tool_delta(
         .filter(|arguments| !arguments.is_empty())
     {
         scratch.partial_args.push_str(&arguments);
-        call.arguments = parse_streaming_json(Some(&scratch.partial_args))
-            .as_object()
-            .cloned()
-            .unwrap_or_default();
+        call.arguments = parse_streaming_json(Some(&scratch.partial_args));
         arguments
     } else if let Some(input) = delta
         .custom
@@ -1346,8 +1356,10 @@ fn process_tool_delta(
         )
         .map_err(CompletionError::display)?
         .unwrap_or_default();
-        call.arguments
-            .insert(custom.property.clone(), Value::String(next));
+        call.arguments = Value::Object(Map::from_iter([(
+            custom.property.clone(),
+            Value::String(next),
+        )]));
         emitted
     } else {
         String::new()
@@ -1407,10 +1419,7 @@ fn finish_blocks(
                                 .map_err(CompletionError::display)?;
                         }
                     } else {
-                        call.arguments = parse_streaming_json(Some(&scratch.partial_args))
-                            .as_object()
-                            .cloned()
-                            .unwrap_or_default();
+                        call.arguments = parse_streaming_json(Some(&scratch.partial_args));
                     }
                 }
                 sender
@@ -1994,38 +2003,7 @@ fn get_tools_by_name<'a>(tools: Option<&'a [Tool]>, names: &[String]) -> Vec<&'a
 }
 
 fn normalize_tool_call_id(id: &str, model: &Model) -> String {
-    if let Some((call_id, item_id)) = id.split_once('|') {
-        let call_id = sanitize_tool_call_id(call_id);
-        let item_id = sanitize_tool_call_id(item_id);
-        let combined = if item_id.is_empty() {
-            call_id.clone()
-        } else {
-            format!("{call_id}_{item_id}")
-        };
-        if combined.chars().count() <= 40 {
-            return combined;
-        }
-        let hash = short_hash(id).chars().take(8).collect::<String>();
-        let prefix_len = 40_usize.saturating_sub(hash.chars().count() + 1).max(1);
-        let prefix = call_id.chars().take(prefix_len).collect::<String>();
-        return format!("{prefix}_{hash}");
-    }
-    if model.provider.as_str() == "openai" {
-        return id.chars().take(40).collect();
-    }
-    id.to_owned()
-}
-
-fn sanitize_tool_call_id(id: &str) -> String {
-    id.chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect()
+    normalize_open_ai_completions_tool_call_id(id, model)
 }
 
 pub fn convert_messages(
@@ -3189,6 +3167,18 @@ mod tests {
         assert!(body.get("tool_stream").is_none());
     }
 
+    /// Pins pi `src/api/openai-completions.ts:798-800` request-number behavior.
+    #[test]
+    fn whole_temperature_serializes_as_a_json_integer() {
+        let test_model = model("https://example.invalid/v1".to_owned());
+        let mut request_options = options();
+        request_options.stream.temperature = Some(1.0);
+        let wire =
+            serde_json::to_string(&payload(&test_model, &context(), &request_options)).unwrap();
+        assert!(wire.contains(r#""temperature":1"#));
+        assert!(!wire.contains(r#""temperature":1.0"#));
+    }
+
     /// Pins Kimi deferred-tool ordering and same-request injection from
     /// openai-completions.ts:76-97, 782-788 and 1377-1392.
     #[test]
@@ -4250,10 +4240,7 @@ mod tests {
             call.thought_signature.as_deref(),
             Some(serde_json::to_string(&encrypted).unwrap().as_str())
         );
-        assert_eq!(
-            call.arguments,
-            Map::from_iter([("path".to_owned(), Value::String("README.md".to_owned()))])
-        );
+        assert_eq!(call.arguments, json!({"path":"README.md"}));
     }
 
     /// Ports thinking-as-text.test.ts conversion and real SSE endpoint cases.
@@ -4588,6 +4575,7 @@ mod tests {
                 content_index: 0,
                 id,
                 tool_name,
+                ..
             } if id == "call_1" && tool_name == "read"
         ));
         assert!(matches!(
@@ -4602,10 +4590,7 @@ mod tests {
             AssistantMessageEvent::ToolCallEnd {
                 content_index: 0,
                 tool_call,
-            } if tool_call.arguments == Map::from_iter([(
-                "path".to_owned(),
-                Value::String("README.md".to_owned()),
-            )])
+            } if tool_call.arguments == json!({"path":"README.md"})
         ));
         assert!(matches!(
             events[4],
@@ -4660,10 +4645,23 @@ mod tests {
         let AssistantContent::ToolCall(call) = &message.content[0] else {
             panic!("tool call");
         };
-        assert_eq!(
-            call.arguments,
-            Map::from_iter([("input".to_owned(), Value::String("abc".to_owned()),)])
-        );
+        assert_eq!(call.arguments, json!({"input":"abc"}));
+    }
+
+    /// Pins pi `src/api/openai-completions.ts:423-431` start-time thinking signature state.
+    #[tokio::test]
+    async fn thinking_start_carries_the_signature_already_present_in_pi_partial() {
+        let (sender, mut events) = AssistantMessageEventStream::channel();
+        let mut output = AssistantMessage::pending("openai-completions", "openai", "model", 1);
+        let mut state = StreamingState::default();
+        ensure_thinking_block(&sender, &mut output, &mut state, "reasoning_content").unwrap();
+        assert!(matches!(
+            events.next().await,
+            Some(AssistantMessageEvent::ThinkingStart {
+                thinking_signature: Some(signature),
+                ..
+            }) if signature == "reasoning_content"
+        ));
     }
 
     /// Ports the mixed text/reasoning/parallel-tool accumulation and mutable-id
@@ -4709,14 +4707,8 @@ mod tests {
         assert_eq!(thinking.thinking, "think more");
         assert_eq!(text.text, "answer done");
         assert_eq!(first.id, "old-id");
-        assert_eq!(
-            first.arguments,
-            Map::from_iter([("a".to_owned(), Value::from(1))])
-        );
-        assert_eq!(
-            second.arguments,
-            Map::from_iter([("b".to_owned(), Value::from(2))])
-        );
+        assert_eq!(first.arguments, json!({"a":1}));
+        assert_eq!(second.arguments, json!({"b":2}));
     }
 
     /// Ports retry.test.ts default no-retry behavior with real socket time.

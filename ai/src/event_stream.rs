@@ -4,10 +4,11 @@ use crate::types::{
     AssistantContent, AssistantMessage, ErrorStopReason, SuccessfulStopReason, TextContent,
     ThinkingContent, ToolCall,
 };
+use crate::utils::json_parse::parse_streaming_json;
 use futures::Stream;
 use futures::stream::FusedStream;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Number, Value};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -39,10 +40,18 @@ pub enum AssistantMessageEvent {
     },
     ThinkingStart {
         content_index: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking_signature: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        redacted: Option<bool>,
     },
     ThinkingDelta {
         content_index: usize,
         delta: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking_signature_delta: Option<String>,
     },
     ThinkingEnd {
         content_index: usize,
@@ -57,6 +66,8 @@ pub enum AssistantMessageEvent {
         content_index: usize,
         id: String,
         tool_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
     },
     #[serde(rename = "toolcall_delta")]
     ToolCallDelta {
@@ -163,17 +174,31 @@ impl MessageBuilder {
                     return Err(Self::type_mismatch("text_end", "text", *content_index));
                 }
             },
-            AssistantMessageEvent::ThinkingStart { content_index } => {
-                self.set_content(
-                    *content_index,
-                    AssistantContent::Thinking(ThinkingContent::new("")),
-                )?;
+            AssistantMessageEvent::ThinkingStart {
+                content_index,
+                thinking,
+                thinking_signature,
+                redacted,
+            } => {
+                let mut block = ThinkingContent::new(thinking.as_deref().unwrap_or_default());
+                block.thinking_signature.clone_from(thinking_signature);
+                block.redacted = *redacted;
+                self.set_content(*content_index, AssistantContent::Thinking(block))?;
             }
             AssistantMessageEvent::ThinkingDelta {
                 content_index,
                 delta,
+                thinking_signature_delta,
             } => match self.message.content.get_mut(*content_index) {
-                Some(AssistantContent::Thinking(content)) => content.thinking.push_str(delta),
+                Some(AssistantContent::Thinking(content)) => {
+                    content.thinking.push_str(delta);
+                    if let Some(signature_delta) = thinking_signature_delta {
+                        content
+                            .thinking_signature
+                            .get_or_insert_with(String::new)
+                            .push_str(signature_delta);
+                    }
+                }
                 _ => {
                     return Err(Self::type_mismatch(
                         "thinking_delta",
@@ -190,8 +215,12 @@ impl MessageBuilder {
             } => match self.message.content.get_mut(*content_index) {
                 Some(AssistantContent::Thinking(block)) => {
                     block.thinking.clone_from(content);
-                    block.thinking_signature.clone_from(content_signature);
-                    block.redacted = *redacted;
+                    if let Some(content_signature) = content_signature {
+                        block.thinking_signature = Some(content_signature.clone());
+                    }
+                    if redacted.is_some() {
+                        block.redacted = *redacted;
+                    }
                 }
                 _ => {
                     return Err(Self::type_mismatch(
@@ -205,11 +234,11 @@ impl MessageBuilder {
                 content_index,
                 id,
                 tool_name,
+                namespace,
             } => {
-                self.set_content(
-                    *content_index,
-                    AssistantContent::ToolCall(ToolCall::new(id, tool_name, Map::new())),
-                )?;
+                let mut tool_call = ToolCall::new(id, tool_name, Value::Object(Default::default()));
+                tool_call.namespace.clone_from(namespace);
+                self.set_content(*content_index, AssistantContent::ToolCall(tool_call))?;
                 self.raw_tool_arguments
                     .insert(*content_index, String::new());
             }
@@ -220,7 +249,7 @@ impl MessageBuilder {
                 Some(AssistantContent::ToolCall(call)) => {
                     let raw = self.raw_tool_arguments.entry(*content_index).or_default();
                     raw.push_str(delta);
-                    call.arguments = parse_streaming_arguments(raw);
+                    call.arguments = parse_proxy_streaming_arguments(raw);
                 }
                 _ => {
                     return Err(Self::type_mismatch(
@@ -284,6 +313,15 @@ impl MessageBuilder {
             expected,
             index,
         }
+    }
+}
+
+fn parse_proxy_streaming_arguments(raw: &str) -> Value {
+    match parse_streaming_json(Some(raw)) {
+        Value::Null | Value::Bool(false) => Value::Object(Default::default()),
+        Value::Number(number) if number.as_f64() == Some(0.0) => Value::Object(Default::default()),
+        Value::String(value) if value.is_empty() => Value::Object(Default::default()),
+        value => value,
     }
 }
 
@@ -539,295 +577,6 @@ impl Drop for AssistantStreamSender {
     }
 }
 
-const MAX_STREAMING_JSON_DEPTH: usize = 128;
-
-fn parse_streaming_arguments(raw: &str) -> Map<String, Value> {
-    let raw = raw.trim();
-    if raw.is_empty() || exceeds_streaming_json_depth(raw) {
-        return Map::new();
-    }
-    if let Ok(Value::Object(value)) = serde_json::from_str(raw) {
-        return value;
-    }
-    match PartialJsonParser::new(raw).parse_value() {
-        Some(Value::Object(value)) => value,
-        _ => Map::new(),
-    }
-}
-
-fn exceeds_streaming_json_depth(input: &str) -> bool {
-    let mut containers = [0_u8; MAX_STREAMING_JSON_DEPTH];
-    let mut depth = 0_usize;
-    let mut in_string = false;
-    let mut escaped = false;
-
-    for byte in input.bytes() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else {
-                match byte {
-                    b'\\' => escaped = true,
-                    b'"' => in_string = false,
-                    _ => {}
-                }
-            }
-            continue;
-        }
-
-        match byte {
-            b'"' => in_string = true,
-            b'{' | b'[' => {
-                let Some(next_depth) = depth.checked_add(1) else {
-                    return true;
-                };
-                if next_depth > MAX_STREAMING_JSON_DEPTH {
-                    return true;
-                }
-                containers[depth] = byte;
-                depth = next_depth;
-            }
-            b'}' if depth > 0 && containers[depth - 1] == b'{' => depth -= 1,
-            b']' if depth > 0 && containers[depth - 1] == b'[' => depth -= 1,
-            _ => {}
-        }
-    }
-
-    false
-}
-
-struct PartialJsonParser {
-    chars: Vec<char>,
-    cursor: usize,
-}
-
-impl PartialJsonParser {
-    fn new(input: &str) -> Self {
-        Self {
-            chars: input.chars().collect(),
-            cursor: 0,
-        }
-    }
-
-    fn parse_value(&mut self) -> Option<Value> {
-        self.skip_whitespace();
-        match self.peek()? {
-            '{' => Some(Value::Object(self.parse_object())),
-            '[' => Some(Value::Array(self.parse_array())),
-            '"' => Some(Value::String(self.parse_string().0)),
-            't' => self.parse_literal("true", Value::Bool(true)),
-            'f' => self.parse_literal("false", Value::Bool(false)),
-            'n' => self.parse_literal("null", Value::Null),
-            '-' | '0'..='9' => self.parse_number(),
-            _ => None,
-        }
-    }
-
-    fn parse_object(&mut self) -> Map<String, Value> {
-        self.bump();
-        let mut object = Map::new();
-        loop {
-            self.skip_whitespace();
-            match self.peek() {
-                None | Some('}') => {
-                    self.bump_if('}');
-                    break;
-                }
-                Some(',') => {
-                    self.bump();
-                    continue;
-                }
-                Some('"') => {}
-                Some(_) => {
-                    self.skip_to_member_boundary();
-                    continue;
-                }
-            }
-
-            let (key, key_closed) = self.parse_string();
-            self.skip_whitespace();
-            if !key_closed || !self.bump_if(':') {
-                break;
-            }
-            self.skip_whitespace();
-            let Some(value) = self.parse_value() else {
-                break;
-            };
-            object.insert(key, value);
-
-            self.skip_whitespace();
-            match self.peek() {
-                Some(',') => {
-                    self.bump();
-                }
-                Some('}') => {
-                    self.bump();
-                    break;
-                }
-                None => break,
-                Some(_) => self.skip_to_member_boundary(),
-            }
-        }
-        object
-    }
-
-    fn parse_array(&mut self) -> Vec<Value> {
-        self.bump();
-        let mut array = Vec::new();
-        loop {
-            self.skip_whitespace();
-            match self.peek() {
-                None | Some(']') => {
-                    self.bump_if(']');
-                    break;
-                }
-                Some(',') => {
-                    self.bump();
-                    continue;
-                }
-                Some(_) => {}
-            }
-            let Some(value) = self.parse_value() else {
-                break;
-            };
-            array.push(value);
-            self.skip_whitespace();
-            match self.peek() {
-                Some(',') => {
-                    self.bump();
-                }
-                Some(']') => {
-                    self.bump();
-                    break;
-                }
-                None => break,
-                Some(_) => self.skip_to_member_boundary(),
-            }
-        }
-        array
-    }
-
-    fn parse_string(&mut self) -> (String, bool) {
-        if !self.bump_if('"') {
-            return (String::new(), false);
-        }
-        let mut output = String::new();
-        while let Some(character) = self.bump() {
-            match character {
-                '"' => return (output, true),
-                '\\' => match self.bump() {
-                    Some('"') => output.push('"'),
-                    Some('\\') => output.push('\\'),
-                    Some('/') => output.push('/'),
-                    Some('b') => output.push('\u{0008}'),
-                    Some('f') => output.push('\u{000c}'),
-                    Some('n') => output.push('\n'),
-                    Some('r') => output.push('\r'),
-                    Some('t') => output.push('\t'),
-                    Some('u') => self.parse_unicode_escape(&mut output),
-                    Some(other) => {
-                        output.push('\\');
-                        output.push(other);
-                    }
-                    None => output.push('\\'),
-                },
-                other => output.push(other),
-            }
-        }
-        (output, false)
-    }
-
-    fn parse_unicode_escape(&mut self, output: &mut String) {
-        let start = self.cursor;
-        let mut digits = String::new();
-        for _ in 0..4 {
-            match self.peek() {
-                Some(character) if character.is_ascii_hexdigit() => {
-                    digits.push(character);
-                    self.bump();
-                }
-                _ => break,
-            }
-        }
-        if digits.len() == 4
-            && let Ok(codepoint) = u32::from_str_radix(&digits, 16)
-            && let Some(character) = char::from_u32(codepoint)
-        {
-            output.push(character);
-        } else {
-            self.cursor = start;
-            output.push_str("\\u");
-        }
-    }
-
-    fn parse_literal(&mut self, expected: &str, value: Value) -> Option<Value> {
-        let remaining = self.chars[self.cursor..].iter().collect::<String>();
-        let token = remaining
-            .chars()
-            .take_while(|character| character.is_ascii_alphabetic())
-            .collect::<String>();
-        if expected.starts_with(&token) && !token.is_empty() {
-            self.cursor += token.chars().count();
-            Some(value)
-        } else {
-            None
-        }
-    }
-
-    fn parse_number(&mut self) -> Option<Value> {
-        let start = self.cursor;
-        while matches!(self.peek(), Some('-' | '+' | '.' | 'e' | 'E' | '0'..='9')) {
-            self.bump();
-        }
-        let mut token = self.chars[start..self.cursor].iter().collect::<String>();
-        while !token.is_empty() {
-            if let Ok(number) = token.parse::<Number>() {
-                return Some(Value::Number(number));
-            }
-            token.pop();
-        }
-        None
-    }
-
-    fn skip_whitespace(&mut self) {
-        while self.peek().is_some_and(char::is_whitespace) {
-            self.bump();
-        }
-    }
-
-    fn skip_to_member_boundary(&mut self) {
-        while let Some(character) = self.peek() {
-            if character == ',' {
-                break;
-            }
-            if matches!(character, '}' | ']') {
-                self.bump();
-                break;
-            }
-            self.bump();
-        }
-    }
-
-    fn peek(&self) -> Option<char> {
-        self.chars.get(self.cursor).copied()
-    }
-
-    fn bump(&mut self) -> Option<char> {
-        let value = self.peek()?;
-        self.cursor += 1;
-        Some(value)
-    }
-
-    fn bump_if(&mut self, expected: char) -> bool {
-        if self.peek() == Some(expected) {
-            self.cursor += 1;
-            true
-        } else {
-            false
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -978,16 +727,20 @@ mod tests {
     fn message_builder_reconstructs_interleaved_content_and_partial_arguments() {
         let base = AssistantMessage::pending("api", "provider", "model", 7);
         let mut builder = MessageBuilder::new(base);
-        let mut first_arguments = Map::new();
-        first_arguments.insert("city".into(), json!("Paris"));
-        let mut second_arguments = Map::new();
-        second_arguments.insert("days".into(), json!(2));
+        let first_arguments = json!({"city":"Paris"});
+        let second_arguments = json!({"days":2});
         let events = vec![
             AssistantMessageEvent::Start,
-            AssistantMessageEvent::ThinkingStart { content_index: 0 },
+            AssistantMessageEvent::ThinkingStart {
+                content_index: 0,
+                thinking: None,
+                thinking_signature: None,
+                redacted: None,
+            },
             AssistantMessageEvent::ThinkingDelta {
                 content_index: 0,
                 delta: "plan".into(),
+                thinking_signature_delta: None,
             },
             AssistantMessageEvent::TextStart { content_index: 1 },
             AssistantMessageEvent::TextDelta {
@@ -998,11 +751,13 @@ mod tests {
                 content_index: 2,
                 id: "a".into(),
                 tool_name: "weather".into(),
+                namespace: None,
             },
             AssistantMessageEvent::ToolCallStart {
                 content_index: 3,
                 id: "b".into(),
                 tool_name: "calendar".into(),
+                namespace: None,
             },
             AssistantMessageEvent::ToolCallDelta {
                 content_index: 2,
@@ -1068,6 +823,168 @@ mod tests {
             &builder.snapshot().content[3],
             AssistantContent::ToolCall(call) if call.arguments == second_arguments
         ));
+    }
+
+    /// Pins pi `src/utils/json-parse.ts:104-123` and `packages/agent/src/proxy.ts:322-327`.
+    #[test]
+    fn message_builder_uses_pi_streaming_json_values_without_a_depth_cap() {
+        fn arguments(builder: &MessageBuilder) -> &Value {
+            let AssistantContent::ToolCall(call) = &builder.snapshot().content[0] else {
+                panic!("tool call")
+            };
+            &call.arguments
+        }
+
+        let mut builder =
+            MessageBuilder::new(AssistantMessage::pending("api", "provider", "model", 1));
+        builder
+            .apply(&AssistantMessageEvent::ToolCallStart {
+                content_index: 0,
+                id: "call".into(),
+                tool_name: "run".into(),
+                namespace: None,
+            })
+            .unwrap();
+        builder
+            .apply(&AssistantMessageEvent::ToolCallDelta {
+                content_index: 0,
+                delta: "{\"path\":\"A\\".into(),
+            })
+            .unwrap();
+        assert_eq!(arguments(&builder), &json!({"path":"A"}));
+        builder
+            .apply(&AssistantMessageEvent::ToolCallDelta {
+                content_index: 0,
+                delta: "H\"}".into(),
+            })
+            .unwrap();
+        assert_eq!(arguments(&builder), &json!({"path":"A\\H"}));
+
+        for (raw, expected) in [
+            ("[1,2", json!([1, 2])),
+            ("true", json!(true)),
+            ("false", json!({})),
+            ("12", json!(12)),
+        ] {
+            let mut builder =
+                MessageBuilder::new(AssistantMessage::pending("api", "provider", "model", 1));
+            builder
+                .apply(&AssistantMessageEvent::ToolCallStart {
+                    content_index: 0,
+                    id: "call".into(),
+                    tool_name: "run".into(),
+                    namespace: None,
+                })
+                .unwrap();
+            builder
+                .apply(&AssistantMessageEvent::ToolCallDelta {
+                    content_index: 0,
+                    delta: raw.into(),
+                })
+                .unwrap();
+            assert_eq!(arguments(&builder), &expected, "{raw}");
+        }
+
+        let mut builder =
+            MessageBuilder::new(AssistantMessage::pending("api", "provider", "model", 1));
+        builder
+            .apply(&AssistantMessageEvent::ToolCallStart {
+                content_index: 0,
+                id: "call".into(),
+                tool_name: "run".into(),
+                namespace: None,
+            })
+            .unwrap();
+        builder
+            .apply(&AssistantMessageEvent::ToolCallDelta {
+                content_index: 0,
+                delta: format!("{}0", "[".repeat(129)),
+            })
+            .unwrap();
+        let mut nested = arguments(&builder);
+        for _ in 0..129 {
+            nested = &nested.as_array().expect("nested array")[0];
+        }
+        assert_eq!(nested, &json!(0));
+    }
+
+    /// Pins pi `src/api/anthropic-messages.ts:620-638,691-697` and
+    /// `src/api/openai-responses-shared.ts:485-527` snapshot state.
+    #[test]
+    fn message_builder_carries_early_thinking_and_tool_namespace_state() {
+        let mut builder =
+            MessageBuilder::new(AssistantMessage::pending("api", "provider", "model", 1));
+        builder
+            .apply(&AssistantMessageEvent::ThinkingStart {
+                content_index: 0,
+                thinking: Some("[Reasoning redacted]".into()),
+                thinking_signature: Some("sig-".into()),
+                redacted: Some(true),
+            })
+            .unwrap();
+        builder
+            .apply(&AssistantMessageEvent::ThinkingDelta {
+                content_index: 0,
+                delta: String::new(),
+                thinking_signature_delta: Some("tail".into()),
+            })
+            .unwrap();
+        builder
+            .apply(&AssistantMessageEvent::ThinkingEnd {
+                content_index: 0,
+                content: "[Reasoning redacted]".into(),
+                content_signature: None,
+                redacted: None,
+            })
+            .unwrap();
+        builder
+            .apply(&AssistantMessageEvent::ToolCallStart {
+                content_index: 1,
+                id: "call|fc".into(),
+                tool_name: "search".into(),
+                namespace: Some("dynamic_tools".into()),
+            })
+            .unwrap();
+
+        assert!(matches!(
+            &builder.snapshot().content[0],
+            AssistantContent::Thinking(block)
+                if block.thinking == "[Reasoning redacted]"
+                    && block.thinking_signature.as_deref() == Some("sig-tail")
+                    && block.redacted == Some(true)
+        ));
+        assert!(matches!(
+            &builder.snapshot().content[1],
+            AssistantContent::ToolCall(call)
+                if call.namespace.as_deref() == Some("dynamic_tools")
+        ));
+        assert_eq!(
+            serde_json::to_value([
+                AssistantMessageEvent::ThinkingStart {
+                    content_index: 0,
+                    thinking: Some("[Reasoning redacted]".into()),
+                    thinking_signature: Some("sig".into()),
+                    redacted: Some(true),
+                },
+                AssistantMessageEvent::ThinkingDelta {
+                    content_index: 0,
+                    delta: String::new(),
+                    thinking_signature_delta: Some("tail".into()),
+                },
+                AssistantMessageEvent::ToolCallStart {
+                    content_index: 1,
+                    id: "call".into(),
+                    tool_name: "search".into(),
+                    namespace: Some("dynamic_tools".into()),
+                },
+            ])
+            .unwrap(),
+            json!([
+                {"type":"thinking_start","contentIndex":0,"thinking":"[Reasoning redacted]","thinkingSignature":"sig","redacted":true},
+                {"type":"thinking_delta","contentIndex":0,"delta":"","thinkingSignatureDelta":"tail"},
+                {"type":"toolcall_start","contentIndex":1,"id":"call","toolName":"search","namespace":"dynamic_tools"}
+            ])
+        );
     }
 
     /// Pins pi `types.ts:547-552` and `proxy.ts:353-362`: terminals replace the accumulated snapshot.
@@ -1139,10 +1056,16 @@ mod tests {
                 content: "a".into(),
                 content_signature: Some("text-sig".into()),
             },
-            AssistantMessageEvent::ThinkingStart { content_index: 1 },
+            AssistantMessageEvent::ThinkingStart {
+                content_index: 1,
+                thinking: None,
+                thinking_signature: None,
+                redacted: None,
+            },
             AssistantMessageEvent::ThinkingDelta {
                 content_index: 1,
                 delta: "b".into(),
+                thinking_signature_delta: None,
             },
             AssistantMessageEvent::ThinkingEnd {
                 content_index: 1,
@@ -1154,6 +1077,7 @@ mod tests {
                 content_index: 2,
                 id: "call".into(),
                 tool_name: "lookup".into(),
+                namespace: None,
             },
             AssistantMessageEvent::ToolCallDelta {
                 content_index: 2,
@@ -1161,7 +1085,7 @@ mod tests {
             },
             AssistantMessageEvent::ToolCallEnd {
                 content_index: 2,
-                tool_call: ToolCall::new("call", "lookup", Map::new()),
+                tool_call: ToolCall::new("call", "lookup", json!({})),
             },
         ];
         assert_eq!(

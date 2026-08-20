@@ -1227,11 +1227,8 @@ fn thinking_mut(output: &mut AssistantMessage, index: usize) -> Option<&mut Thin
     }
 }
 
-fn tool_arguments(raw: &str) -> Map<String, Value> {
+fn tool_arguments(raw: &str) -> Value {
     parse_streaming_json(Some(raw))
-        .as_object()
-        .cloned()
-        .unwrap_or_default()
 }
 
 fn composite_tool_call_id(call_id: &str, item_id: Option<&str>) -> String {
@@ -1253,7 +1250,12 @@ fn create_slot(
                 .content
                 .push(AssistantContent::Thinking(ThinkingContent::new("")));
             sender
-                .send(AssistantMessageEvent::ThinkingStart { content_index })
+                .send(AssistantMessageEvent::ThinkingStart {
+                    content_index,
+                    thinking: None,
+                    thinking_signature: None,
+                    redacted: None,
+                })
                 .map_err(OpenAIResponsesError::display)?;
             OutputSlot::Thinking { content_index }
         }
@@ -1279,6 +1281,7 @@ fn create_slot(
                     content_index,
                     id,
                     tool_name: item.name.clone(),
+                    namespace: item.namespace.clone(),
                 })
                 .map_err(OpenAIResponsesError::display)?;
             OutputSlot::FunctionCall {
@@ -1306,6 +1309,7 @@ fn create_slot(
                     content_index,
                     id,
                     tool_name: item.name.clone(),
+                    namespace: item.namespace.clone(),
                 })
                 .map_err(OpenAIResponsesError::display)?;
             OutputSlot::CustomToolCall {
@@ -1359,8 +1363,10 @@ fn append_custom_tool_input(
     let delta = append_grammar_tool_input_json_delta(buffer, property, next_input, close)
         .map_err(OpenAIResponsesError::display)?;
     if let Some(tool_call) = tool_call_mut(output, content_index) {
-        tool_call.arguments =
-            Map::from_iter([(property.to_owned(), Value::String(next_input.to_owned()))]);
+        tool_call.arguments = Value::Object(Map::from_iter([(
+            property.to_owned(),
+            Value::String(next_input.to_owned()),
+        )]));
     }
     Ok(delta)
 }
@@ -1581,6 +1587,7 @@ where
                     .send(AssistantMessageEvent::ThinkingDelta {
                         content_index,
                         delta: event.delta,
+                        thinking_signature_delta: None,
                     })
                     .map_err(OpenAIResponsesError::display)?;
             }
@@ -1598,6 +1605,7 @@ where
                     .send(AssistantMessageEvent::ThinkingDelta {
                         content_index,
                         delta: "\n\n".to_owned(),
+                        thinking_signature_delta: None,
                     })
                     .map_err(OpenAIResponsesError::display)?;
             }
@@ -2347,7 +2355,7 @@ mod tests {
             json!({
                 "type":"response.output_item.added",
                 "output_index":0,
-                "item":{"type":"function_call","id":"fc_test","call_id":"call_test","name":"lookup","arguments":""}
+                "item":{"type":"function_call","id":"fc_test","call_id":"call_test","name":"lookup","arguments":"","namespace":namespace}
             }),
             json!({
                 "type":"response.output_item.done",
@@ -2381,27 +2389,32 @@ mod tests {
         }
     }
 
+    /// Pins pi `src/api/openai-responses-shared.ts:485-502` start-time namespace state.
     #[tokio::test]
     async fn ports_function_namespace_round_trip() {
         let target = model("openai-responses", "openai", "gpt-5.4");
         let mut message = output(&target);
-        let (result, _) = process(
+        let (result, emitted) = process(
             function_call_events(Some("dynamic_tools")),
             &mut message,
             &target,
         )
         .await;
         result.unwrap();
+        assert!(emitted.iter().any(|event| matches!(
+            event,
+            AssistantMessageEvent::ToolCallStart {
+                namespace: Some(namespace),
+                ..
+            } if namespace == "dynamic_tools"
+        )));
         assert_eq!(
             first_tool_call(&message),
             &ToolCall {
                 kind: Default::default(),
                 id: "call_test|fc_test".to_owned(),
                 name: "lookup".to_owned(),
-                arguments: Map::from_iter([(
-                    "value".to_owned(),
-                    Value::String("hello".to_owned()),
-                )]),
+                arguments: json!({"value":"hello"}),
                 thought_signature: None,
                 namespace: Some("dynamic_tools".to_owned()),
             }
@@ -2594,10 +2607,7 @@ mod tests {
         let persisted = first_tool_call(&message);
         assert_eq!(
             persisted.arguments,
-            Map::from_iter([
-                ("path".to_owned(), json!("README.md")),
-                ("content".to_owned(), json!("updated")),
-            ])
+            json!({"path":"README.md","content":"updated"})
         );
         let ended = emitted
             .iter()

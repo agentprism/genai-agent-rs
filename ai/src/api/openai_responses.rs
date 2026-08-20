@@ -23,7 +23,7 @@ use crate::types::{
     AbortSignal, CacheRetention, Context, ErrorStopReason, Model, ModelCompat, ModelThinkingLevel,
     OpenAIResponsesCompat, ProviderEnv, ProviderHeaders, ProviderResponse, SessionAffinityFormat,
     SimpleStreamOptions, StopReason, StreamOptions, SuccessfulStopReason, ThinkingLevel, Tool,
-    ToolChoice, Usage,
+    ToolChoice, Usage, serialize_optional_js_f64,
 };
 use crate::utils::error_body::{
     ProviderErrorData, format_provider_error, normalize_provider_error,
@@ -201,7 +201,11 @@ struct WireRequest {
     store: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_js_f64"
+    )]
     temperature: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     service_tier: Option<Option<ResponseServiceTier>>,
@@ -1418,6 +1422,17 @@ mod tests {
         let body = payload(&model, &context(), &request_options);
         assert!(body.get("reasoning").is_none());
         assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+    }
+
+    /// Pins pi `src/api/openai-responses.ts:304-306` request-number behavior.
+    #[test]
+    fn whole_temperature_serializes_as_a_json_integer() {
+        let model = base_model("unused".to_owned(), "gpt-5.4");
+        let mut request_options = options();
+        request_options.stream.temperature = Some(1.0);
+        let wire = serde_json::to_string(&payload(&model, &context(), &request_options)).unwrap();
+        assert!(wire.contains(r#""temperature":1"#));
+        assert!(!wire.contains(r#""temperature":1.0"#));
     }
 
     #[test]
