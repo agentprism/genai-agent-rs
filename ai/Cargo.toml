@@ -23,7 +23,7 @@ openai-oxide = "0.16"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
-tokio = { version = "1", features = ["sync", "time", "rt-multi-thread", "macros", "test-util"] }
+tokio = { version = "1", features = ["sync", "time", "rt-multi-thread", "macros", "test-util", "net"] }
 
 [dev-dependencies]
 # Hermetic HTTP/SSE test server for wire tests (same stack as the fork's yakbak harness).
