@@ -594,6 +594,35 @@ mod tests {
         assert_eq!(error.to_string(), r#""scalar failure""#);
     }
 
+    /// Pins pi OpenAI SDK `core/streaming.js:49-50`: only a truthy `error`
+    /// field raises; a present-but-falsy `error` (OpenRouter emits
+    /// `"error": null` on ordinary chunks) streams through as data.
+    #[tokio::test]
+    async fn falsy_error_field_does_not_terminate_the_stream() {
+        let body = futures::stream::iter(vec![Ok::<_, String>(
+            concat!(
+                "data: {\"id\":\"a\",\"error\":null}\n\n",
+                "data: {\"id\":\"b\",\"error\":false}\n\n",
+                "data: {\"id\":\"c\",\"error\":\"\"}\n\n",
+                "data: {\"id\":\"d\",\"error\":0}\n\n",
+                "data: [DONE]\n\n"
+            )
+            .as_bytes()
+            .to_vec(),
+        )])
+        .boxed();
+        let mut stream = sse_json_stream(body, None);
+        for id in ["a", "b", "c", "d"] {
+            let value = stream
+                .next()
+                .await
+                .expect("chunk")
+                .expect("data, not error");
+            assert_eq!(value["id"], id);
+        }
+        assert!(stream.next().await.is_none());
+    }
+
     /// Pins pi `src/api/openai-completions.ts:672-681`,
     /// `src/api/openai-responses.ts:88-90`, and `src/utils/error-body.ts:38-53`.
     #[test]
