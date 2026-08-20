@@ -297,7 +297,10 @@ pub fn stream(
     let model = model.clone();
     let context = context.clone();
     let (sender, stream) = AssistantMessageEventStream::channel();
-    tokio::spawn(async move {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return terminal_setup_error(&model, "Tokio runtime is not available");
+    };
+    runtime.spawn(async move {
         run_stream(sender, model, context, options).await;
     });
     stream
@@ -492,13 +495,16 @@ async fn run_stream_inner(
                 start_emitted: start_emitted.clone(),
                 attempt_started: attempt_started.clone(),
             })
-            .await;
+            .await
+            .and_then(|()| {
+                if is_aborted(options) {
+                    Err(CodexRunError::aborted("Request was aborted"))
+                } else {
+                    successful_reason(output)
+                }
+            });
             match result {
-                Ok(()) => {
-                    if is_aborted(options) {
-                        return Err(CodexRunError::aborted("Request was aborted"));
-                    }
-                    let reason = successful_reason(output)?;
+                Ok(reason) => {
                     sender
                         .send(AssistantMessageEvent::Done {
                             reason,
@@ -1294,6 +1300,7 @@ async fn send_sse_request(
         .await
         .map_err(CodexRunError::transport_display)?;
     let status = response.status();
+    let status_text = reqwest_status_text(&response);
     let response_headers = headers_to_record(response.headers());
     let body = (!matches!(status.as_u16(), 101 | 204 | 205 | 304)).then(|| {
         response
@@ -1307,10 +1314,30 @@ async fn send_sse_request(
     });
     Ok(ProviderHttpResponse {
         status: status.as_u16(),
-        status_text: status.canonical_reason().unwrap_or_default().to_owned(),
+        status_text,
         headers: response_headers,
         body,
     })
+}
+
+fn reqwest_status_text(response: &reqwest::Response) -> String {
+    if !matches!(
+        response.version(),
+        http::Version::HTTP_10 | http::Version::HTTP_11
+    ) {
+        return String::new();
+    }
+    response
+        .extensions()
+        .get::<hyper::ext::ReasonPhrase>()
+        .map(|reason| String::from_utf8_lossy(reason.as_bytes()).into_owned())
+        .unwrap_or_else(|| {
+            response
+                .status()
+                .canonical_reason()
+                .unwrap_or_default()
+                .to_owned()
+        })
 }
 
 async fn send_sse_with_header_timeout(
@@ -1510,10 +1537,11 @@ fn matches_optional_character(value: &str, prefix: &str, suffix: &str) -> bool {
     value.match_indices(prefix).any(|(index, _)| {
         let remainder = &value[index + prefix.len()..];
         remainder.starts_with(suffix)
-            || remainder
-                .chars()
-                .next()
-                .is_some_and(|character| remainder[character.len_utf8()..].starts_with(suffix))
+            || remainder.chars().next().is_some_and(|character| {
+                character.len_utf16() == 1
+                    && !matches!(character, '\n' | '\r' | '\u{2028}' | '\u{2029}')
+                    && remainder[character.len_utf8()..].starts_with(suffix)
+            })
     })
 }
 

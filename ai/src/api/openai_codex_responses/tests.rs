@@ -570,6 +570,31 @@ async fn missing_sse_response_body_is_an_in_band_error_before_start() {
     assert_eq!(error.error_message.as_deref(), Some("No response body"));
 }
 
+/// Pins pi `types.ts:324-336` and `openai-codex-responses.ts:230-237,476-489`:
+/// neither public stream entry point synchronously fails without an async runtime.
+#[test]
+fn stream_entry_points_without_tokio_runtime_return_terminal_errors() {
+    let current = model("gpt-5.1-codex");
+    let streams = [
+        stream(
+            &current,
+            &context("hello"),
+            OpenAICodexResponsesOptions::default(),
+        ),
+        stream_simple(&current, &context("hello"), SimpleStreamOptions::default()),
+    ];
+    for mut events in streams {
+        let event = futures::executor::block_on(events.next()).expect("terminal event");
+        assert!(matches!(event, AssistantMessageEvent::Error { .. }));
+        let message = futures::executor::block_on(events.result()).expect("terminal result");
+        assert_eq!(message.stop_reason, StopReason::Error);
+        assert_eq!(
+            message.error_message.as_deref(),
+            Some("Tokio runtime is not available")
+        );
+    }
+}
+
 /// Ports pi `openai-codex-stream.test.ts:497-745,1131-1226`.
 #[tokio::test]
 async fn sse_session_affinity_presence_and_clamping_match_pi() {
@@ -1023,6 +1048,37 @@ async fn sse_retry_default_and_text_classification_match_pi() {
     );
 }
 
+/// Pins pi `openai-codex-responses.ts:129`: JavaScript `.?` consumes at most
+/// one non-line-terminator UTF-16 code unit.
+#[test]
+fn retryable_pattern_optional_character_excludes_js_line_terminators() {
+    for separator in ['\n', '\r', '\u{2028}', '\u{2029}'] {
+        assert!(!is_retryable_error(400, &format!("rate{separator}limit")));
+    }
+    assert!(!is_retryable_error(400, "rate😀limit"));
+    assert!(is_retryable_error(400, "rate limit"));
+    assert!(is_retryable_error(400, "rateélimit"));
+    assert!(is_retryable_error(400, "ratelimit"));
+}
+
+/// Pins pi `openai-codex-responses.ts:428-433,1551`: an empty HTTP/2 reason
+/// phrase remains empty so an empty non-2xx body reports `Request failed`.
+#[test]
+fn empty_http2_error_uses_request_failed_without_a_canonical_reason() {
+    let response: reqwest::Response = http::Response::builder()
+        .version(http::Version::HTTP_2)
+        .status(502)
+        .body(Vec::<u8>::new())
+        .expect("response")
+        .into();
+    let status_text = reqwest_status_text(&response);
+    assert!(status_text.is_empty());
+    assert_eq!(
+        parse_error_response(502, &status_text, ""),
+        "Request failed"
+    );
+}
+
 /// Port of pi `openai-codex-stream.test.ts:2474-2545`.
 #[tokio::test]
 async fn zstd_compresses_every_sse_request_body_at_level_three() {
@@ -1430,6 +1486,140 @@ async fn websocket_pre_stream_failure_falls_back_and_is_remembered() {
     assert_eq!(stats.sse_fallbacks, 2);
     assert_eq!(stats.websocket_fallback_active, Some(true));
     reset_open_ai_codex_websocket_debug_stats(Some("session-fallback"));
+}
+
+/// Pins pi `openai-codex-responses.ts:325,348-363`: semantic stop-reason errors
+/// after clean WebSocket completion use the transport-failure path and pin SSE.
+#[tokio::test]
+async fn websocket_semantic_terminal_errors_record_failure_and_pin_sse() {
+    for (index, status, incomplete_reason, expected_error) in [
+        (
+            0,
+            "incomplete",
+            Some("content_filter"),
+            "Response incomplete: content_filter",
+        ),
+        (1, "failed", None, "An unknown error occurred"),
+        (2, "cancelled", None, "An unknown error occurred"),
+    ] {
+        let terminal_type = if status == "incomplete" {
+            "response.incomplete"
+        } else {
+            "response.completed"
+        };
+        let server = LocalCodexServer::start(
+            vec![WsAction::Events(vec![json!({
+                "type":terminal_type,
+                "response":{
+                    "id":format!("resp_semantic_{index}"),
+                    "status":status,
+                    "incomplete_details":incomplete_reason.map(|reason| json!({"reason":reason})),
+                    "usage":{"input_tokens":5,"output_tokens":0,"total_tokens":5}
+                }
+            })])],
+            terminal_payload("completed", None),
+        )
+        .await;
+        let mut current = model("gpt-5.1-codex");
+        current.base_url = server.base_url();
+        let session_id = format!("semantic-status-{index}");
+        let (kinds, result) = collect_event_kinds(stream(
+            &current,
+            &context("hello"),
+            websocket_options(Some(&session_id), Transport::Auto),
+        ))
+        .await;
+        assert_eq!(kinds, ["start", "error"]);
+        assert_eq!(result.stop_reason, StopReason::Error);
+        assert_eq!(result.error_message.as_deref(), Some(expected_error));
+        let diagnostic = result
+            .diagnostics
+            .as_deref()
+            .and_then(|diagnostics| diagnostics.first())
+            .expect("transport diagnostic");
+        assert_eq!(diagnostic.kind, "provider_transport_failure");
+        assert_eq!(
+            diagnostic
+                .details
+                .as_ref()
+                .and_then(|details| details.get("eventsEmitted")),
+            Some(&Value::Bool(true))
+        );
+        assert!(
+            diagnostic
+                .details
+                .as_ref()
+                .is_some_and(|details| !details.contains_key("fallbackTransport"))
+        );
+
+        let recovered = stream(
+            &current,
+            &context("hello again"),
+            websocket_options(Some(&session_id), Transport::Auto),
+        )
+        .result()
+        .await
+        .expect("SSE recovery result");
+        assert_eq!(recovered.stop_reason, StopReason::Stop);
+        assert_eq!(
+            server.state.websocket_connections.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(server.state.http_requests.load(Ordering::Relaxed), 1);
+        let stats = get_open_ai_codex_websocket_debug_stats(&session_id).expect("stats");
+        assert_eq!(stats.websocket_failures, 1);
+        assert_eq!(stats.sse_fallbacks, 1);
+        assert_eq!(stats.websocket_fallback_active, Some(true));
+        assert_eq!(stats.last_websocket_error.as_deref(), Some(expected_error));
+        close_open_ai_codex_websocket_sessions(Some(&session_id));
+        reset_open_ai_codex_websocket_debug_stats(Some(&session_id));
+    }
+}
+
+/// Pins pi `openai-responses-shared.ts:485-502`: the Codex producer exposes a
+/// function-call namespace in its start-time partial state.
+#[tokio::test]
+async fn codex_toolcall_start_carries_start_time_namespace() {
+    let events = [
+        json!({
+            "type":"response.output_item.added","output_index":0,
+            "item":{
+                "type":"function_call","id":"fc_1","call_id":"call_1",
+                "name":"lookup","namespace":"dynamic_tools","arguments":"{}"
+            }
+        }),
+        json!({
+            "type":"response.output_item.done","output_index":0,
+            "item":{
+                "type":"function_call","id":"fc_1","call_id":"call_1",
+                "name":"lookup","namespace":"dynamic_tools","arguments":"{}"
+            }
+        }),
+        json!({
+            "type":"response.completed",
+            "response":{"id":"resp_1","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}
+        }),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect::<String>();
+    let fetch = QueueFetch::new([ResponseSpec::sse(events)]);
+    let mut stream = stream(
+        &model("gpt-5.1-codex"),
+        &context("hello"),
+        sse_options(fetch),
+    );
+    let mut namespace = None;
+    while let Some(event) = stream.next().await {
+        if let AssistantMessageEvent::ToolCallStart {
+            namespace: event_namespace,
+            ..
+        } = event
+        {
+            namespace = event_namespace;
+        }
+    }
+    assert_eq!(namespace.as_deref(), Some("dynamic_tools"));
 }
 
 /// Required WS pin from pi `openai-codex-responses.ts:1107-1208,1388-1454`:

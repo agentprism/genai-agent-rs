@@ -18,6 +18,7 @@ base64 = "0.23"
 futures = "0.3"
 http = "1"
 httpdate = "1"
+hyper = { version = "1", features = ["http1"] }
 # Ruled 2026-08-19: the OpenAI client for the openai-completions/openai-responses API
 # implementations — plays the role pi's `openai` SDK plays (transport + SSE framing).
 openai-oxide = "0.16"
@@ -35,5 +36,5 @@ zstd = "0.13"
 # Hermetic HTTP/SSE test server for wire tests (same stack as the fork's yakbak harness).
 bytes = "1"
 http-body-util = "0.1"
-hyper = { version = "1", features = ["http1", "server"] }
+hyper = { version = "1", features = ["server"] }
 hyper-util = { version = "0.1", features = ["tokio", "http1"] }
