@@ -433,6 +433,7 @@ async fn run_stream_inner(
             grammar_tool_input_properties: Some(&grammar_tool_input_properties),
             resolve_service_tier: None,
             apply_service_tier_pricing: Some(&apply_pricing),
+            capture_end_turn: false,
         },
     )
     .await

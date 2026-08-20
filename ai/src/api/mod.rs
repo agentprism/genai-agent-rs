@@ -49,8 +49,7 @@ pub enum ApiStreamOptions {
     Base(StreamOptions),
     OpenAICompletions(openai_completions::OpenAICompletionsOptions),
     OpenAIResponses(openai_responses::OpenAIResponsesOptions),
-    /// PORT TARGET: `OpenAICodexResponsesOptions`.
-    OpenAICodexResponses(StreamOptions),
+    OpenAICodexResponses(openai_codex_responses::OpenAICodexResponsesOptions),
     Custom {
         base: StreamOptions,
         extra: serde_json::Map<String, serde_json::Value>,

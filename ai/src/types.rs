@@ -7,6 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Number, Value};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::pin::Pin;
 use std::sync::Arc;
 
 macro_rules! open_string_newtype {
@@ -256,7 +257,44 @@ pub trait AbortSignal: Send + Sync {
 
 pub trait TelemetryContext: Send + Sync {}
 
-pub trait FetchFunction: Send + Sync {}
+pub type ProviderBodyStream =
+    Pin<Box<dyn futures::Stream<Item = Result<Vec<u8>, String>> + Send + 'static>>;
+
+#[derive(Clone)]
+pub struct ProviderHttpRequest {
+    pub method: String,
+    pub url: String,
+    pub headers: BTreeMap<String, String>,
+    pub body: Vec<u8>,
+    pub signal: Option<Arc<dyn AbortSignal>>,
+}
+
+impl fmt::Debug for ProviderHttpRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderHttpRequest")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("headers", &self.headers)
+            .field("body_len", &self.body.len())
+            .field("signal", &self.signal.is_some())
+            .finish()
+    }
+}
+
+pub struct ProviderHttpResponse {
+    pub status: u16,
+    pub status_text: String,
+    pub headers: BTreeMap<String, String>,
+    pub body: Option<ProviderBodyStream>,
+}
+
+pub trait FetchFunction: Send + Sync {
+    fn fetch(
+        &self,
+        request: ProviderHttpRequest,
+    ) -> BoxFuture<'_, Result<ProviderHttpResponse, String>>;
+}
 
 pub type OnPayload<TModel = Model> =
     Arc<dyn for<'a> Fn(Value, &'a TModel) -> BoxFuture<'a, Option<Value>> + Send + Sync + 'static>;

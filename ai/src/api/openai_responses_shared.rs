@@ -450,6 +450,7 @@ pub struct OpenAIResponsesStreamOptions<'a> {
     pub grammar_tool_input_properties: Option<&'a BTreeMap<String, String>>,
     pub resolve_service_tier: Option<&'a ResolveResponsesServiceTier<'a>>,
     pub apply_service_tier_pricing: Option<&'a ApplyResponsesServiceTierPricing<'a>>,
+    pub capture_end_turn: bool,
 }
 
 fn encode_text_signature_v1(id: String, phase: Option<TextSignaturePhase>) -> String {
@@ -954,6 +955,8 @@ struct TerminalResponse {
     output: Vec<Value>,
     #[serde(default, deserialize_with = "deserialize_present_option")]
     service_tier: Option<Option<ResponseServiceTier>>,
+    #[serde(default)]
+    end_turn: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1387,6 +1390,11 @@ fn finalize_response(
     reasoning_blocks_by_id: &BTreeMap<String, usize>,
     options: &OpenAIResponsesStreamOptions<'_>,
 ) -> Result<(), OpenAIResponsesError> {
+    if options.capture_end_turn
+        && let Some(end_turn) = response.end_turn.as_ref().and_then(Value::as_bool)
+    {
+        output.end_turn = Some(end_turn);
+    }
     for raw in response.output {
         let OutputItem::Reasoning { item, .. } = decode_output_item(raw)? else {
             continue;
@@ -2188,6 +2196,7 @@ mod tests {
                 grammar_tool_input_properties: None,
                 resolve_service_tier: Some(&resolve),
                 apply_service_tier_pricing: Some(&apply),
+                capture_end_turn: false,
             },
         )
         .await

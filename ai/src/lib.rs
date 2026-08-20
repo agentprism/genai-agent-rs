@@ -14,6 +14,7 @@
 pub mod api;
 pub mod event_stream;
 pub mod models;
+pub mod session_resources;
 pub mod types;
 pub mod utils;
 
