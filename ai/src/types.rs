@@ -251,6 +251,7 @@ pub struct ProviderResponse {
 
 pub trait AbortSignal: Send + Sync {
     fn is_aborted(&self) -> bool;
+    fn cancelled(&self) -> BoxFuture<'_, ()>;
 }
 
 pub trait TelemetryContext: Send + Sync {}
