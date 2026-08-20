@@ -788,7 +788,7 @@ where
         sender,
         model,
         OpenAIResponsesStreamOptions {
-            service_tier: options.service_tier,
+            service_tier: options.service_tier.clone(),
             grammar_tool_input_properties: Some(grammar_properties),
             resolve_service_tier: Some(&resolve),
             apply_service_tier_pricing: Some(&apply),
@@ -1009,7 +1009,7 @@ fn build_request_body(
         tool_choice: options.tool_choice.unwrap_or(ResponseToolChoiceMode::Auto),
         parallel_tool_calls: true,
         temperature: options.stream.temperature,
-        service_tier: options.service_tier,
+        service_tier: options.service_tier.clone(),
         tools,
         reasoning,
     })

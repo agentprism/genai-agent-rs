@@ -1,8 +1,7 @@
 //! OpenAI Responses ⇐ pi `src/api/openai-responses.ts`.
 //!
-//! `openai-oxide` owns request issue and SSE framing. The raw Responses stream is used so
-//! newly introduced event types remain forward-compatible; known events are decoded by
-//! `openai_responses_shared`.
+//! The raw Responses stream remains forward-compatible; known events are decoded by
+//! `openai_responses_shared`, while the HTTP/SSE path preserves pi's SDK-visible behavior.
 
 use crate::api::constrained_sampling::create_grammar_tool_input_properties;
 use crate::api::github_copilot_headers::{build_copilot_dynamic_headers, has_copilot_vision_input};
@@ -13,6 +12,7 @@ use crate::api::openai_responses_shared::{
     ResponseServiceTier, ResponseTool, ResponseToolChoice, ResponseToolChoiceMode,
     convert_responses_messages, convert_responses_tools, process_responses_stream,
 };
+use crate::api::openai_sse::{OpenAiHttpError, OpenAiSseError, OpenAiSseRequest, acquire_sse};
 use crate::api::simple_options::build_base_options;
 use crate::api::{ApiStreamOptions, ProviderStreams};
 use crate::event_stream::{
@@ -20,29 +20,22 @@ use crate::event_stream::{
 };
 use crate::models::clamp_thinking_level;
 use crate::types::{
-    AbortSignal, CacheRetention, Context, ErrorStopReason, Model, ModelCompat, ModelThinkingLevel,
-    OpenAIResponsesCompat, ProviderEnv, ProviderHeaders, ProviderResponse, SessionAffinityFormat,
+    CacheRetention, Context, ErrorStopReason, Model, ModelCompat, ModelThinkingLevel,
+    OpenAIResponsesCompat, ProviderEnv, ProviderHeaders, SessionAffinityFormat,
     SimpleStreamOptions, StopReason, StreamOptions, SuccessfulStopReason, ThinkingLevel, Tool,
     ToolChoice, Usage, serialize_optional_js_f64,
-};
-use crate::utils::error_body::{
-    ProviderErrorData, format_provider_error, normalize_provider_error,
 };
 use crate::utils::pi_user_agent::get_pi_user_agent;
 use crate::utils::provider_env::get_provider_env_value;
 use crate::utils::provider_retry::{
-    ProviderErrorMetadata, ProviderRetryClassify, ProviderRetryError, ProviderRetryOptions,
-    retry_provider_request,
+    ProviderRetryError, ProviderRetryOptions, retry_provider_request,
 };
 use futures::{StreamExt, stream::BoxStream};
-use openai_oxide::config::Config;
-use openai_oxide::{OpenAI, OpenAIError, RequestOptions};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS: u64 = 16;
 const OPENAI_TOOL_CALL_PROVIDERS: [&str; 3] = ["openai", "openai-codex", "opencode"];
@@ -135,40 +128,6 @@ struct ResolvedCompat {
     supports_explicit_prompt_cache_mode: bool,
 }
 
-#[derive(Debug, Clone)]
-struct ResponsesClientConfig {
-    api_key: String,
-    base_url: String,
-    authorization: Option<http::HeaderValue>,
-    timeout_secs: u64,
-}
-
-impl Config for ResponsesClientConfig {
-    fn base_url(&self) -> &str {
-        &self.base_url
-    }
-
-    fn api_key(&self) -> &str {
-        &self.api_key
-    }
-
-    fn build_request(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        if let Some(authorization) = &self.authorization {
-            request.header(http::header::AUTHORIZATION, authorization.clone())
-        } else {
-            request.bearer_auth(&self.api_key)
-        }
-    }
-
-    fn timeout_secs(&self) -> u64 {
-        self.timeout_secs
-    }
-
-    fn max_retries(&self) -> u32 {
-        0
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum PromptCacheMode {
@@ -227,7 +186,10 @@ pub fn stream(
     let model = model.clone();
     let context = context.clone();
     let (sender, stream) = AssistantMessageEventStream::channel();
-    tokio::spawn(async move {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return terminal_setup_error(&model, "Tokio runtime is not available");
+    };
+    runtime.spawn(async move {
         run_stream(sender, model, context, options).await;
     });
     stream
@@ -329,12 +291,6 @@ async fn run_stream_inner(
     options: &OpenAIResponsesOptions,
     output: &mut crate::types::AssistantMessage,
 ) -> Result<(), ResponsesRunError> {
-    if model.api.as_str() != "openai-responses" {
-        return Err(ResponsesRunError::new(format!(
-            "Model API {} does not match openai-responses",
-            model.api
-        )));
-    }
     if model
         .compat
         .as_ref()
@@ -352,11 +308,6 @@ async fn run_stream_inner(
         .is_some_and(|signal| signal.is_aborted())
     {
         return Err(ResponsesRunError::aborted("Request was aborted"));
-    }
-    if options.stream.request.fetch.is_some() {
-        return Err(ResponsesRunError::new(
-            "Custom fetch is not supported by the openai-oxide transport",
-        ));
     }
     let api_key = get_client_api_key(
         model.provider.as_str(),
@@ -376,14 +327,13 @@ async fn run_stream_inner(
         compat.supports_open_ai_grammar_tools,
     )
     .map_err(ResponsesRunError::display)?;
-    let client = create_client(
+    let headers = create_headers(
         model,
         context,
         &api_key,
         options.stream.request.headers.as_ref(),
         cache_session_id,
         &compat,
-        options.stream.request.timeout_ms,
     )?;
     let mut params = build_params(
         model,
@@ -403,22 +353,21 @@ async fn run_stream_inner(
         max_retry_delay_ms: options.stream.request.max_retry_delay_ms,
         signal: options.stream.request.signal.clone(),
     };
-    let sdk_stream = retry_provider_request(|| acquire_stream(&client, &params), retry_options)
+    let request = OpenAiSseRequest {
+        url: format!("{}/responses", model.base_url.trim_end_matches('/')),
+        headers,
+        body: serde_json::to_vec(&params).map_err(ResponsesRunError::display)?,
+        fetch: options.stream.request.fetch.clone(),
+        signal: options.stream.request.signal.clone(),
+        timeout_ms: options.stream.request.timeout_ms,
+    };
+    let acquired = retry_provider_request(|| acquire_sse(&request), retry_options)
         .await
         .map_err(format_retry_error)?;
-    let mut sdk_stream =
-        abortable_response_stream(sdk_stream, options.stream.request.signal.clone());
+    let mut sdk_stream = response_stream(acquired.stream);
 
     if let Some(on_response) = &options.stream.request.on_response {
-        // openai-oxide 0.16 consumes response metadata while constructing SseStream.
-        on_response(
-            ProviderResponse {
-                status: 200,
-                headers: BTreeMap::new(),
-            },
-            model,
-        )
-        .await;
+        on_response(acquired.response.clone(), model).await;
     }
     sender
         .send(AssistantMessageEvent::Start)
@@ -433,7 +382,7 @@ async fn run_stream_inner(
         sender,
         model,
         OpenAIResponsesStreamOptions {
-            service_tier: options.service_tier,
+            service_tier: options.service_tier.clone(),
             grammar_tool_input_properties: Some(&grammar_tool_input_properties),
             resolve_service_tier: None,
             apply_service_tier_pricing: Some(&apply_pricing),
@@ -611,16 +560,19 @@ fn get_compat(model: &Model) -> ResolvedCompat {
     }
 }
 
-fn create_client(
+fn create_headers(
     model: &Model,
     context: &Context,
     api_key: &str,
     options_headers: Option<&ProviderHeaders>,
     session_id: Option<&str>,
     compat: &ResolvedCompat,
-    timeout_ms: Option<u64>,
-) -> Result<OpenAI, ResponsesRunError> {
-    let mut headers = BTreeMap::from([("User-Agent".to_owned(), get_pi_user_agent())]);
+) -> Result<BTreeMap<String, String>, ResponsesRunError> {
+    let mut headers = BTreeMap::from([
+        ("Accept".to_owned(), "application/json".to_owned()),
+        ("Content-Type".to_owned(), "application/json".to_owned()),
+        ("User-Agent".to_owned(), get_pi_user_agent()),
+    ]);
     if let Some(model_headers) = &model.headers {
         headers.extend(model_headers.clone());
     }
@@ -653,32 +605,13 @@ fn create_client(
             }
         }
     }
-
-    let mut header_map = http::HeaderMap::new();
-    for (name, value) in headers {
-        let name = name
-            .parse::<http::HeaderName>()
-            .map_err(ResponsesRunError::display)?;
-        let value = value
-            .parse::<http::HeaderValue>()
-            .map_err(ResponsesRunError::display)?;
-        header_map.insert(name, value);
+    if !headers
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case("authorization"))
+    {
+        headers.insert("Authorization".to_owned(), format!("Bearer {api_key}"));
     }
-    let authorization = header_map.remove(http::header::AUTHORIZATION);
-    let config = ResponsesClientConfig {
-        api_key: api_key.to_owned(),
-        base_url: model.base_url.clone(),
-        authorization,
-        timeout_secs: timeout_ms.map_or(600, |timeout_ms| timeout_ms.div_ceil(1_000)),
-    };
-    let request_options = if let Some(timeout_ms) = timeout_ms {
-        RequestOptions::new()
-            .headers(header_map)
-            .timeout(Duration::from_millis(timeout_ms))
-    } else {
-        RequestOptions::new().headers(header_map)
-    };
-    Ok(OpenAI::with_config(config).with_options(request_options))
+    Ok(headers)
 }
 
 fn prompt_cache_retention(
@@ -868,7 +801,7 @@ fn build_params(
             .filter(|tokens| *tokens != 0)
             .map(|tokens| tokens.max(OPENAI_RESPONSES_MIN_OUTPUT_TOKENS)),
         temperature: options.stream.temperature,
-        service_tier: options.service_tier,
+        service_tier: options.service_tier.clone(),
         tools,
         tool_choice: options.tool_choice.clone(),
         reasoning,
@@ -909,105 +842,28 @@ fn apply_service_tier_pricing(
         usage.cost.input + usage.cost.output + usage.cost.cache_read + usage.cost.cache_write;
 }
 
-#[derive(Debug)]
-struct OxideRequestError {
-    source: OpenAIError,
-    metadata: Option<ProviderErrorMetadata>,
-}
-
-impl From<OpenAIError> for OxideRequestError {
-    fn from(source: OpenAIError) -> Self {
-        let metadata = match &source {
-            OpenAIError::ApiError { status, .. } => Some(ProviderErrorMetadata {
-                status: Some(*status),
-                headers: BTreeMap::new(),
-            }),
-            OpenAIError::RequestError(_) => Some(ProviderErrorMetadata::default()),
-            OpenAIError::JsonError(_)
-            | OpenAIError::StreamError(_)
-            | OpenAIError::InvalidArgument(_) => None,
-        };
-        Self { source, metadata }
-    }
-}
-
-impl fmt::Display for OxideRequestError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.source.fmt(formatter)
-    }
-}
-
-impl ProviderRetryClassify for OxideRequestError {
-    fn provider_error_metadata(&self) -> Option<&ProviderErrorMetadata> {
-        self.metadata.as_ref()
-    }
-
-    fn provider_error_message(&self) -> String {
-        self.to_string()
-    }
-}
-
-async fn acquire_stream(
-    client: &OpenAI,
-    params: &Value,
-) -> Result<BoxStream<'static, Result<Value, OpenAIError>>, OxideRequestError> {
-    client
-        .responses()
-        .create_stream_raw(params)
-        .await
-        .map(|stream| stream.boxed())
-        .map_err(Into::into)
-}
-
-fn format_oxide_error(error: OpenAIError) -> ResponsesRunError {
-    let status = match &error {
-        OpenAIError::ApiError { status, .. } => Some(i64::from(*status)),
-        _ => None,
-    };
-    let data = ProviderErrorData {
-        message: error.to_string(),
-        status_code: status,
-        ..ProviderErrorData::default()
-    };
-    ResponsesRunError::new(format_provider_error(
-        &normalize_provider_error(&data),
-        Some("OpenAI API error"),
-    ))
-}
-
-fn format_retry_error(error: ProviderRetryError<OxideRequestError>) -> ResponsesRunError {
+fn format_retry_error(error: ProviderRetryError<OpenAiHttpError>) -> ResponsesRunError {
     match error {
-        ProviderRetryError::Original(error) => format_oxide_error(error.source),
+        ProviderRetryError::Original(error) => {
+            let aborted = error.aborted();
+            let message = error.formatted(Some("OpenAI API error"), false);
+            if aborted {
+                ResponsesRunError::aborted(message)
+            } else {
+                ResponsesRunError::new(message)
+            }
+        }
         ProviderRetryError::Abort => ResponsesRunError::aborted("Request aborted"),
         error @ ProviderRetryError::ServerDelay { .. } => ResponsesRunError::display(error),
     }
 }
 
-fn abortable_response_stream(
-    stream: BoxStream<'static, Result<Value, OpenAIError>>,
-    signal: Option<Arc<dyn AbortSignal>>,
+fn response_stream(
+    stream: BoxStream<'static, Result<Value, OpenAiSseError>>,
 ) -> BoxStream<'static, Result<Value, OpenAIResponsesError>> {
-    futures::stream::unfold((stream, signal, false), |(mut stream, signal, done)| async move {
-        if done {
-            return None;
-        }
-        let item = if let Some(signal) = signal.as_ref() {
-            tokio::select! {
-                item = stream.next() => item.map(|item| item.map_err(|error| OpenAIResponsesError::new(format_oxide_error(error).message))),
-                () = signal.cancelled() => Some(Err(OpenAIResponsesError::new("Request was aborted"))),
-            }
-        } else {
-            stream
-                .next()
-                .await
-                .map(|item| item.map_err(|error| OpenAIResponsesError::new(format_oxide_error(error).message)))
-        };
-        item.map(|item| {
-            let done = item.is_err();
-            (item, (stream, signal, done))
-        })
-    })
-    .boxed()
+    stream
+        .map(|item| item.map_err(|error| OpenAIResponsesError::new(error.to_string())))
+        .boxed()
 }
 
 #[cfg(test)]
@@ -1015,20 +871,20 @@ mod tests {
     use super::*;
     use crate::types::{
         ConstrainedSamplingConfig, ImageContent, Message, ModelCost, ModelCostRates,
-        StrictPreference, TextContent, ThinkingLevelMap, ToolConstrainedSampling,
+        ProviderResponse, StrictPreference, TextContent, ThinkingLevelMap, ToolConstrainedSampling,
         ToolResultMessage, ToolResultRole, UserContent, UserContentBlock, UserMessage, UserRole,
     };
     use bytes::Bytes;
     use futures::StreamExt;
-    use http_body_util::{BodyExt, Full};
-    use hyper::body::Incoming;
+    use http_body_util::{BodyExt, StreamBody};
+    use hyper::body::{Frame, Incoming};
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
     use hyper::{Request, Response, StatusCode};
     use hyper_util::rt::TokioIo;
     use serde_json::json;
     use std::collections::VecDeque;
-    use std::sync::{Mutex, PoisonError};
+    use std::sync::{Arc, Mutex, PoisonError};
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
 
@@ -1036,7 +892,7 @@ mod tests {
     struct Script {
         status: StatusCode,
         headers: BTreeMap<String, String>,
-        body: String,
+        body: Vec<Bytes>,
     }
 
     impl Script {
@@ -1049,7 +905,7 @@ mod tests {
             Self {
                 status: StatusCode::OK,
                 headers: BTreeMap::new(),
-                body,
+                body: vec![Bytes::from(body)],
             }
         }
 
@@ -1057,7 +913,17 @@ mod tests {
             Self {
                 status,
                 headers: BTreeMap::new(),
-                body: json!({"error":{"message":message}}).to_string(),
+                body: vec![Bytes::from(
+                    json!({"error":{"message":message}}).to_string(),
+                )],
+            }
+        }
+
+        fn raw_error(status: StatusCode, body: impl Into<Bytes>) -> Self {
+            Self {
+                status,
+                headers: BTreeMap::new(),
+                body: vec![body.into()],
             }
         }
     }
@@ -1066,6 +932,7 @@ mod tests {
     struct CapturedRequest {
         path: String,
         headers: BTreeMap<String, String>,
+        header_lines: Vec<(String, String)>,
         body: Value,
     }
 
@@ -1110,6 +977,17 @@ mod tests {
                                         .map(|value| (name.as_str().to_owned(), value.to_owned()))
                                 })
                                 .collect();
+                            let header_lines = request
+                                .headers()
+                                .keys()
+                                .flat_map(|name| {
+                                    request.headers().get_all(name).iter().filter_map(|value| {
+                                        value.to_str().ok().map(|value| {
+                                            (name.as_str().to_owned(), value.to_owned())
+                                        })
+                                    })
+                                })
+                                .collect();
                             let bytes = request.into_body().collect().await.unwrap().to_bytes();
                             let body = serde_json::from_slice(&bytes).unwrap();
                             captured
@@ -1118,6 +996,7 @@ mod tests {
                                 .push(CapturedRequest {
                                     path,
                                     headers,
+                                    header_lines,
                                     body,
                                 });
                             let script = scripts
@@ -1136,8 +1015,12 @@ mod tests {
                             for (name, value) in script.headers {
                                 response = response.header(name, value);
                             }
+                            let frames =
+                                futures::stream::iter(script.body.into_iter().map(|bytes| {
+                                    Ok::<_, std::convert::Infallible>(Frame::data(bytes))
+                                }));
                             Ok::<_, std::convert::Infallible>(
-                                response.body(Full::new(Bytes::from(script.body))).unwrap(),
+                                response.body(StreamBody::new(frames)).unwrap(),
                             )
                         }
                     });
@@ -1750,13 +1633,19 @@ mod tests {
         );
     }
 
+    /// Pins pi `src/api/openai-responses.ts:151-160`: the callback receives the
+    /// successful response's real status and headers before stream events.
     #[tokio::test]
     async fn raw_transport_ignores_unknown_events_and_runs_hooks() {
-        let server = start_server(vec![Script::sse(vec![
+        let mut script = Script::sse(vec![
             json!({"type":"response.future_event","unknown":true}),
             json!({"type":"response.completed","response":{"id":"resp_test","status":"completed"}}),
-        ])])
-        .await;
+        ]);
+        script.status = StatusCode::CREATED;
+        script
+            .headers
+            .insert("x-provider-response".to_owned(), "real".to_owned());
+        let server = start_server(vec![script]).await;
         let observed_response = Arc::new(Mutex::new(None::<ProviderResponse>));
         let hook_response = observed_response.clone();
         let mut request_options = options();
@@ -1778,13 +1667,17 @@ mod tests {
         let (message, captured) = run_and_capture(model, context(), request_options, &server).await;
         assert_eq!(message.stop_reason, StopReason::Stop);
         assert_eq!(captured.body["hook_field"], "present");
+        let response = observed_response
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let response = response.as_ref().expect("provider response");
+        assert_eq!(response.status, 201);
         assert_eq!(
-            observed_response
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .as_ref()
-                .map(|response| response.status),
-            Some(200)
+            response
+                .headers
+                .get("x-provider-response")
+                .map(String::as_str),
+            Some("real")
         );
     }
 
@@ -1808,5 +1701,137 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    /// Pins pi `src/api/openai-responses.ts:103-115`: the adapter echoes
+    /// `model.api` without using it as a request gate.
+    #[tokio::test]
+    async fn model_api_is_echo_only() {
+        let server = start_server(vec![completed_script()]).await;
+        let mut model = base_model(server.base_url.clone(), "gpt-5.4");
+        model.api = "custom-responses-alias".into();
+        let (message, _) = run_and_capture(model, context(), options(), &server).await;
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        assert_eq!(message.api.as_str(), "custom-responses-alias");
+    }
+
+    /// Pins pi `src/api/openai-responses.ts:218-260` and
+    /// `src/api/openai-completions.ts:747-753`: custom authorization replaces
+    /// the default bearer value and occupies exactly one header line.
+    #[tokio::test]
+    async fn custom_authorization_is_sent_exactly_once() {
+        let server = start_server(vec![completed_script()]).await;
+        let mut request_options = options();
+        request_options.stream.request.headers = Some(BTreeMap::from([(
+            "authorization".to_owned(),
+            Some("Bearer caller-token".to_owned()),
+        )]));
+        let (_, captured) = run_and_capture(
+            base_model(server.base_url.clone(), "gpt-5.4"),
+            context(),
+            request_options,
+            &server,
+        )
+        .await;
+        let authorization = captured
+            .header_lines
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .collect::<Vec<_>>();
+        assert_eq!(authorization.len(), 1);
+        assert_eq!(authorization[0].1, "Bearer caller-token");
+    }
+
+    /// Pins pi `src/api/openai-responses.ts:88-90` and
+    /// `src/utils/error-body.ts:38-53,128-135`: Responses failures preserve
+    /// the parsed error body and retain raw non-JSON SDK messages.
+    #[tokio::test]
+    async fn provider_error_strings_preserve_json_and_non_json_bodies() {
+        let json_server = start_server(vec![Script::raw_error(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"bad request","type":"invalid_request_error","param":"input[0]","code":"bad"}}"#,
+        )])
+        .await;
+        let (message, _) = run_and_capture(
+            base_model(json_server.base_url.clone(), "gpt-5.4"),
+            context(),
+            options(),
+            &json_server,
+        )
+        .await;
+        assert_eq!(
+            message.error_message.as_deref(),
+            Some(concat!(
+                "OpenAI API error (400): ",
+                r#"{"message":"bad request","type":"invalid_request_error","param":"input[0]","code":"bad"}"#
+            ))
+        );
+
+        let text_server = start_server(vec![Script::raw_error(
+            StatusCode::BAD_GATEWAY,
+            "upstream exploded",
+        )])
+        .await;
+        let (message, _) = run_and_capture(
+            base_model(text_server.base_url.clone(), "gpt-5.4"),
+            context(),
+            options(),
+            &text_server,
+        )
+        .await;
+        assert_eq!(
+            message.error_message.as_deref(),
+            Some("OpenAI API error (502): 502 upstream exploded")
+        );
+    }
+
+    /// Pins pi `src/api/openai-responses-shared.ts:576-581`,
+    /// `src/api/openai-responses.ts:349-360`, and
+    /// `src/api/openai-codex-responses.ts:623-630`: unknown service-tier strings
+    /// are preserved and use the default cost multiplier.
+    #[tokio::test]
+    async fn unknown_service_tier_passes_through_at_multiplier_one() {
+        let server = start_server(vec![Script::sse(vec![json!({
+            "type":"response.completed",
+            "response":{
+                "id":"resp_tier","status":"completed","service_tier":"future-tier",
+                "usage":{
+                    "input_tokens":100_000,"output_tokens":100_000,
+                    "total_tokens":200_000,"input_tokens_details":{"cached_tokens":0}
+                }
+            }
+        })])])
+        .await;
+        let mut request_options = options();
+        request_options.service_tier =
+            Some(Some(ResponseServiceTier::Other("future-tier".to_owned())));
+        let model = base_model(server.base_url.clone(), "gpt-5.4");
+        let expected_input = model.cost.rates.input * 0.1;
+        let expected_output = model.cost.rates.output * 0.1;
+        let (message, captured) = run_and_capture(model, context(), request_options, &server).await;
+        assert_eq!(captured.body["service_tier"], "future-tier");
+        assert!((message.usage.cost.input - expected_input).abs() < f64::EPSILON);
+        assert!((message.usage.cost.output - expected_output).abs() < f64::EPSILON);
+    }
+
+    /// Pins pi `src/api/openai-responses.ts:103-110,191-195`: neither public
+    /// stream entry point synchronously throws without an async runtime.
+    #[test]
+    fn stream_entry_points_without_tokio_runtime_return_terminal_errors() {
+        let model = base_model("https://example.invalid/v1".to_owned(), "gpt-5.4");
+        let streams = [
+            stream(&model, &context(), options()),
+            stream_simple(&model, &context(), SimpleStreamOptions::default()),
+        ];
+        for mut events in streams {
+            let event = futures::executor::block_on(events.next()).expect("terminal event");
+            assert!(matches!(event, AssistantMessageEvent::Error { .. }));
+            let message = futures::executor::block_on(events.result()).unwrap();
+            assert_eq!(message.stop_reason, StopReason::Error);
+            assert_eq!(
+                message.error_message.as_deref(),
+                Some("Tokio runtime is not available")
+            );
+        }
     }
 }

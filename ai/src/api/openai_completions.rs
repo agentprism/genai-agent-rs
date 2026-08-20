@@ -1,7 +1,4 @@
 //! OpenAI Chat Completions ⇐ pi `src/api/openai-completions.ts`.
-//!
-//! `openai-oxide` owns client construction, request issue, and SSE framing. Its SDK
-//! retries are disabled; pi's provider retry policy wraps stream acquisition only.
 
 use crate::api::constrained_sampling::{
     GrammarConstrainedSamplingFormat, GrammarToolInputJsonBuffer,
@@ -11,6 +8,7 @@ use crate::api::constrained_sampling::{
 };
 use crate::api::github_copilot_headers::{build_copilot_dynamic_headers, has_copilot_vision_input};
 use crate::api::openai_prompt_cache::clamp_open_ai_prompt_cache_key;
+use crate::api::openai_sse::{OpenAiHttpError, OpenAiSseError, OpenAiSseRequest, acquire_sse};
 use crate::api::simple_options::{
     build_base_options, clamp_thinking_budget_to_answer_room, thinking_budget_for_level,
 };
@@ -26,28 +24,24 @@ use crate::types::{
     AssistantContent, AssistantMessage, CacheControlFormat, CacheRetention, ChatTemplateKwargValue,
     Context, DeferredToolsMode, ErrorStopReason, ImageContent, MaxTokensField, Message, Model,
     ModelCompat, ModelInput, ModelThinkingLevel, OpenAICompletionsCompat, OpenRouterRouting,
-    ProviderEnv, ProviderHeaders, ProviderResponse, SessionAffinityFormat, SimpleStreamOptions,
-    StopReason, StreamOptions, SuccessfulStopReason, TextContent, ThinkingBudgets, ThinkingContent,
+    ProviderEnv, ProviderHeaders, SessionAffinityFormat, SimpleStreamOptions, StopReason,
+    StreamOptions, SuccessfulStopReason, TextContent, ThinkingBudgets, ThinkingContent,
     ThinkingFormat, ThinkingLevel, ThinkingTokenBudgetField, ThinkingVariable, Tool, ToolCall,
     ToolChoice, ToolResultMessage, Usage, VercelGatewayRouting, serialize_optional_js_f64,
-};
-use crate::utils::error_body::{
-    ProviderErrorData, format_provider_error, normalize_provider_error,
 };
 use crate::utils::json_parse::parse_streaming_json;
 use crate::utils::pi_user_agent::get_pi_user_agent;
 use crate::utils::provider_env::get_provider_env_value;
 use crate::utils::provider_retry::{
-    ProviderErrorMetadata, ProviderRetryClassify, ProviderRetryOptions, retry_provider_request,
+    ProviderRetryError, ProviderRetryOptions, retry_provider_request,
 };
 use crate::utils::sanitize_unicode::sanitize_surrogates;
 use futures::{StreamExt, stream::BoxStream};
-use openai_oxide::{ClientConfig, OpenAI, OpenAIError, RequestOptions};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -234,7 +228,7 @@ enum WireMessage {
         content: WireContent,
     },
     Assistant {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
         content: Option<WireContent>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_calls: Option<Vec<WireAssistantToolCall>>,
@@ -381,7 +375,10 @@ pub fn stream(
     let model = model.clone();
     let context = context.clone();
     let (sender, stream) = AssistantMessageEventStream::channel();
-    tokio::spawn(async move {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return terminal_setup_error(&model, "Tokio runtime is not available");
+    };
+    runtime.spawn(async move {
         run_stream(sender, model, context, options).await;
     });
     stream
@@ -481,12 +478,6 @@ async fn run_stream_inner(
     options: &OpenAICompletionsOptions,
     output: &mut AssistantMessage,
 ) -> Result<(), CompletionError> {
-    if model.api.as_str() != "openai-completions" {
-        return Err(CompletionError::new(format!(
-            "Model API {} does not match openai-completions",
-            model.api
-        )));
-    }
     if model
         .compat
         .as_ref()
@@ -504,11 +495,6 @@ async fn run_stream_inner(
         .is_some_and(|signal| signal.is_aborted())
     {
         return Err(CompletionError::aborted("Request was aborted"));
-    }
-    if options.stream.request.fetch.is_some() {
-        return Err(CompletionError::new(
-            "Custom fetch is not supported by the openai-oxide transport",
-        ));
     }
     let api_key = get_client_api_key(
         model.provider.as_str(),
@@ -528,14 +514,13 @@ async fn run_stream_inner(
     let cache_session_id = (cache_retention != CacheRetention::None)
         .then_some(options.stream.session_id.as_deref())
         .flatten();
-    let client = create_client(
+    let headers = create_headers(
         model,
         context,
         &api_key,
         options.stream.request.headers.as_ref(),
         cache_session_id,
         &compat,
-        options.stream.request.timeout_ms,
     )?;
     let mut params = build_params(
         model,
@@ -556,26 +541,26 @@ async fn run_stream_inner(
         max_retry_delay_ms: options.stream.request.max_retry_delay_ms,
         signal: options.stream.request.signal.clone(),
     };
-    let mut sdk_stream = retry_provider_request(|| acquire_stream(&client, &params), retry_options)
+    let request = OpenAiSseRequest {
+        url: format!("{}/chat/completions", model.base_url.trim_end_matches('/')),
+        headers,
+        body: serde_json::to_vec(&params).map_err(CompletionError::display)?,
+        fetch: options.stream.request.fetch.clone(),
+        signal: options.stream.request.signal.clone(),
+        timeout_ms: options.stream.request.timeout_ms,
+    };
+    let acquired = retry_provider_request(|| acquire_sse(&request), retry_options)
         .await
-        .map_err(CompletionError::display)?;
+        .map_err(format_retry_error)?;
 
     if let Some(on_response) = &options.stream.request.on_response {
-        // openai-oxide 0.16 does not expose the successful streaming Response after
-        // constructing SseStream; acquisition nevertheless proves a 2xx response.
-        on_response(
-            ProviderResponse {
-                status: 200,
-                headers: BTreeMap::new(),
-            },
-            model,
-        )
-        .await;
+        on_response(acquired.response.clone(), model).await;
     }
 
     sender
         .send(AssistantMessageEvent::Start)
         .map_err(CompletionError::display)?;
+    let mut sdk_stream = acquired.stream;
     let mut state = StreamingState::default();
     while let Some(chunk) = next_chunk(&mut sdk_stream, options).await? {
         process_chunk(
@@ -738,16 +723,19 @@ fn resolve_cache_retention(
     })
 }
 
-fn create_client(
+fn create_headers(
     model: &Model,
     context: &Context,
     api_key: &str,
     options_headers: Option<&ProviderHeaders>,
     session_id: Option<&str>,
     compat: &ResolvedCompat,
-    timeout_ms: Option<u64>,
-) -> Result<OpenAI, CompletionError> {
-    let mut headers = BTreeMap::from([("User-Agent".to_owned(), get_pi_user_agent())]);
+) -> Result<BTreeMap<String, String>, CompletionError> {
+    let mut headers = BTreeMap::from([
+        ("Accept".to_owned(), "application/json".to_owned()),
+        ("Content-Type".to_owned(), "application/json".to_owned()),
+        ("User-Agent".to_owned(), get_pi_user_agent()),
+    ]);
     if let Some(model_headers) = &model.headers {
         headers.extend(model_headers.clone());
     }
@@ -774,107 +762,35 @@ fn create_client(
     if let Some(options_headers) = options_headers {
         for (name, value) in options_headers {
             if let Some(value) = value {
+                headers.retain(|key, _| !key.eq_ignore_ascii_case(name));
                 headers.insert(name.clone(), value.clone());
             } else {
                 headers.retain(|key, _| !key.eq_ignore_ascii_case(name));
             }
         }
     }
-
-    let mut header_map = http::HeaderMap::new();
-    for (name, value) in headers {
-        let name = name
-            .parse::<http::HeaderName>()
-            .map_err(CompletionError::display)?;
-        let value = value
-            .parse::<http::HeaderValue>()
-            .map_err(CompletionError::display)?;
-        header_map.insert(name, value);
+    if !headers
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case("authorization"))
+    {
+        headers.insert("Authorization".to_owned(), format!("Bearer {api_key}"));
     }
-    let mut config = ClientConfig::new(api_key)
-        .base_url(model.base_url.clone())
-        .max_retries(0);
-    if let Some(timeout_ms) = timeout_ms {
-        config = config.timeout_secs(timeout_ms.div_ceil(1_000));
-    }
-    let request_options = if let Some(timeout_ms) = timeout_ms {
-        RequestOptions::new()
-            .headers(header_map)
-            .timeout(Duration::from_millis(timeout_ms))
-    } else {
-        RequestOptions::new().headers(header_map)
-    };
-    Ok(OpenAI::with_config(config).with_options(request_options))
-}
-
-#[derive(Debug)]
-struct OxideRequestError {
-    source: OpenAIError,
-    metadata: Option<ProviderErrorMetadata>,
-}
-
-impl From<OpenAIError> for OxideRequestError {
-    fn from(source: OpenAIError) -> Self {
-        let metadata = match &source {
-            OpenAIError::ApiError { status, .. } => Some(ProviderErrorMetadata {
-                status: Some(*status),
-                headers: BTreeMap::new(),
-            }),
-            OpenAIError::RequestError(_) => Some(ProviderErrorMetadata::default()),
-            OpenAIError::JsonError(_)
-            | OpenAIError::StreamError(_)
-            | OpenAIError::InvalidArgument(_) => None,
-        };
-        Self { source, metadata }
-    }
-}
-
-impl fmt::Display for OxideRequestError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.source.fmt(formatter)
-    }
-}
-
-impl ProviderRetryClassify for OxideRequestError {
-    fn provider_error_metadata(&self) -> Option<&ProviderErrorMetadata> {
-        self.metadata.as_ref()
-    }
-
-    fn provider_error_message(&self) -> String {
-        self.to_string()
-    }
-}
-
-async fn acquire_stream(
-    client: &OpenAI,
-    params: &Value,
-) -> Result<BoxStream<'static, Result<Value, OpenAIError>>, OxideRequestError> {
-    client
-        .chat()
-        .completions()
-        .create_stream_raw(params)
-        .await
-        .map(|stream| stream.boxed())
-        .map_err(Into::into)
+    Ok(headers)
 }
 
 async fn next_chunk(
-    stream: &mut BoxStream<'static, Result<Value, OpenAIError>>,
+    stream: &mut BoxStream<'static, Result<Value, OpenAiSseError>>,
     options: &OpenAICompletionsOptions,
 ) -> Result<Option<RawChunk>, CompletionError> {
     let next = async {
-        stream.next().await.transpose().and_then(|chunk| {
-            chunk
-                .map(|chunk| {
-                    if !chunk.is_object() {
-                        Ok(RawChunk::default())
-                    } else {
-                        serde_json::from_value(chunk)
-                    }
-                })
-                .transpose()
-                .map_err(OpenAIError::from)
-        })
+        match stream.next().await {
+            Some(Ok(chunk)) if chunk.is_object() => serde_json::from_value(chunk)
+                .map(Some)
+                .map_err(|error| OpenAiSseError::new(error.to_string())),
+            Some(Ok(_)) => Ok(Some(RawChunk::default())),
+            Some(Err(error)) => Err(error),
+            None => Ok(None),
+        }
     };
     let result = if let Some(signal) = &options.stream.request.signal {
         tokio::select! {
@@ -884,32 +800,38 @@ async fn next_chunk(
     } else {
         next.await
     };
-    result.map_err(format_oxide_error)
+    result.map_err(|error| {
+        if error.aborted_flag() {
+            CompletionError::aborted(error.to_string())
+        } else {
+            CompletionError::new(error.to_string())
+        }
+    })
 }
 
-fn format_oxide_error(error: OpenAIError) -> CompletionError {
-    let status = match &error {
-        OpenAIError::ApiError { status, .. } => Some(i64::from(*status)),
-        _ => None,
-    };
-    let data = ProviderErrorData {
-        message: error.to_string(),
-        status_code: status,
-        ..ProviderErrorData::default()
-    };
-    CompletionError::new(format_provider_error(
-        &normalize_provider_error(&data),
-        None,
-    ))
+fn format_retry_error(error: ProviderRetryError<OpenAiHttpError>) -> CompletionError {
+    match error {
+        ProviderRetryError::Original(error) => {
+            let aborted = error.aborted();
+            let message = error.formatted(None, true);
+            if aborted {
+                CompletionError::aborted(message)
+            } else {
+                CompletionError::new(message)
+            }
+        }
+        ProviderRetryError::Abort => CompletionError::aborted("Request aborted"),
+        error @ ProviderRetryError::ServerDelay { .. } => CompletionError::display(error),
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct RawChunk {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     model: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_struct_or_none")]
     usage: Option<RawUsage>,
     #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     choices: Vec<RawChoice>,
@@ -917,47 +839,75 @@ struct RawChunk {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct RawChoice {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     finish_reason: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_struct_or_none")]
     usage: Option<RawUsage>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_struct_or_none")]
     delta: Option<RawDelta>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct RawDelta {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     content: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     reasoning_content: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     reasoning: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     reasoning_text: Option<String>,
     #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     tool_calls: Vec<RawToolCallDelta>,
-    #[serde(default)]
-    reasoning_details: Option<Vec<Value>>,
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
+    reasoning_details: Vec<Value>,
 }
 
 fn deserialize_vec_or_default<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
+    T: serde::de::DeserializeOwned + Default,
 {
-    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+    let value = Value::deserialize(deserializer)?;
+    Ok(value.as_array().map_or_else(Vec::new, |values| {
+        values
+            .iter()
+            .cloned()
+            .map(|value| serde_json::from_value(value).unwrap_or_default())
+            .collect()
+    }))
+}
+
+fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Value::deserialize(deserializer)?
+        .as_str()
+        .map(str::to_owned))
+}
+
+fn deserialize_struct_or_none<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = Value::deserialize(deserializer)?;
+    if !value.is_object() {
+        return Ok(None);
+    }
+    Ok(serde_json::from_value(value).ok())
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct RawToolCallDelta {
     #[serde(default, deserialize_with = "deserialize_optional_usize")]
     index: Option<usize>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_struct_or_none")]
     function: Option<RawFunctionDelta>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_struct_or_none")]
     custom: Option<RawCustomDelta>,
 }
 
@@ -965,8 +915,8 @@ fn deserialize_optional_usize<'de, D>(deserializer: D) -> Result<Option<usize>, 
 where
     D: serde::Deserializer<'de>,
 {
-    let value = Option::<u64>::deserialize(deserializer)?;
-    value
+    Value::deserialize(deserializer)?
+        .as_u64()
         .map(usize::try_from)
         .transpose()
         .map_err(serde::de::Error::custom)
@@ -974,17 +924,17 @@ where
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct RawFunctionDelta {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     name: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     arguments: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct RawCustomDelta {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     name: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     input: Option<String>,
 }
 
@@ -998,9 +948,9 @@ struct RawUsage {
     cached_tokens: Option<u64>,
     #[serde(default, deserialize_with = "deserialize_nonnegative_u64")]
     prompt_cache_hit_tokens: Option<u64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_struct_or_none")]
     prompt_tokens_details: Option<RawPromptDetails>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_struct_or_none")]
     completion_tokens_details: Option<RawCompletionDetails>,
 }
 
@@ -1008,8 +958,7 @@ fn deserialize_nonnegative_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D
 where
     D: serde::Deserializer<'de>,
 {
-    let value = Option::<i64>::deserialize(deserializer)?;
-    Ok(value.and_then(|value| u64::try_from(value).ok()))
+    Ok(Value::deserialize(deserializer)?.as_u64())
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1143,7 +1092,7 @@ fn process_chunk(
             tool_delta,
         )?;
     }
-    for detail in delta.reasoning_details.unwrap_or_default() {
+    for detail in delta.reasoning_details {
         if !is_open_ai_reasoning_detail(&detail) {
             continue;
         }
@@ -1729,7 +1678,7 @@ fn apply_thinking_parameters(
         ThinkingFormat::Qwen => {
             dialect.insert("enable_thinking".to_owned(), Value::Bool(effort.is_some()));
             if compat.supports_reasoning_effort
-                && let Some(mapped) = resolve_defined_effort(model, effort)
+                && let Some(mapped) = effort.map(|effort| resolve_nullish_effort(model, effort))
             {
                 dialect.insert("reasoning_effort".to_owned(), Value::String(mapped));
             }
@@ -2701,13 +2650,13 @@ fn apply_compat(resolved: &mut ResolvedCompat, compat: &OpenAICompletionsCompat)
 mod tests {
     use super::*;
     use crate::types::{
-        ModelCost, ModelCostRates, ThinkingLevelMap, ToolResultRole, UserContent, UserMessage,
-        UserRole,
+        ModelCost, ModelCostRates, ProviderResponse, ThinkingLevelMap, ToolResultRole, UserContent,
+        UserMessage, UserRole,
     };
     use bytes::Bytes;
     use futures::StreamExt;
-    use http_body_util::{BodyExt, Full};
-    use hyper::body::Incoming;
+    use http_body_util::{BodyExt, StreamBody};
+    use hyper::body::{Frame, Incoming};
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
     use hyper::{Request, Response, StatusCode};
@@ -2721,7 +2670,7 @@ mod tests {
     struct Script {
         status: StatusCode,
         headers: BTreeMap<String, String>,
-        body: String,
+        body: Vec<Bytes>,
     }
 
     impl Script {
@@ -2734,7 +2683,15 @@ mod tests {
             Self {
                 status: StatusCode::OK,
                 headers: BTreeMap::new(),
-                body,
+                body: vec![Bytes::from(body)],
+            }
+        }
+
+        fn raw_sse(chunks: Vec<Vec<u8>>) -> Self {
+            Self {
+                status: StatusCode::OK,
+                headers: BTreeMap::new(),
+                body: chunks.into_iter().map(Bytes::from).collect(),
             }
         }
 
@@ -2742,8 +2699,18 @@ mod tests {
             Self {
                 status,
                 headers: BTreeMap::new(),
-                body: json!({"error":{"message":message,"type":"test","param":null,"code":null}})
-                    .to_string(),
+                body: vec![Bytes::from(
+                    json!({"error":{"message":message,"type":"test","param":null,"code":null}})
+                        .to_string(),
+                )],
+            }
+        }
+
+        fn raw_error(status: StatusCode, body: impl Into<Bytes>) -> Self {
+            Self {
+                status,
+                headers: BTreeMap::new(),
+                body: vec![body.into()],
             }
         }
     }
@@ -2751,6 +2718,7 @@ mod tests {
     #[derive(Debug, Clone)]
     struct CapturedRequest {
         headers: BTreeMap<String, String>,
+        header_lines: Vec<(String, String)>,
         body: Value,
     }
 
@@ -2794,12 +2762,27 @@ mod tests {
                                         .map(|value| (name.as_str().to_owned(), value.to_owned()))
                                 })
                                 .collect();
+                            let header_lines = request
+                                .headers()
+                                .keys()
+                                .flat_map(|name| {
+                                    request.headers().get_all(name).iter().filter_map(|value| {
+                                        value.to_str().ok().map(|value| {
+                                            (name.as_str().to_owned(), value.to_owned())
+                                        })
+                                    })
+                                })
+                                .collect();
                             let bytes = request.into_body().collect().await.unwrap().to_bytes();
                             let body = serde_json::from_slice(&bytes).unwrap();
                             captured
                                 .lock()
                                 .unwrap_or_else(PoisonError::into_inner)
-                                .push(CapturedRequest { headers, body });
+                                .push(CapturedRequest {
+                                    headers,
+                                    header_lines,
+                                    body,
+                                });
                             let script = scripts
                                 .lock()
                                 .unwrap_or_else(PoisonError::into_inner)
@@ -2816,8 +2799,12 @@ mod tests {
                             for (name, value) in script.headers {
                                 response = response.header(name, value);
                             }
+                            let frames =
+                                futures::stream::iter(script.body.into_iter().map(|bytes| {
+                                    Ok::<_, std::convert::Infallible>(Frame::data(bytes))
+                                }));
                             Ok::<_, std::convert::Infallible>(
-                                response.body(Full::new(Bytes::from(script.body))).unwrap(),
+                                response.body(StreamBody::new(frames)).unwrap(),
                             )
                         }
                     });
@@ -2932,6 +2919,16 @@ mod tests {
             .cloned()
             .unwrap();
         (message, captured)
+    }
+
+    async fn run_message(
+        model: &Model,
+        context: &Context,
+        options: OpenAICompletionsOptions,
+    ) -> AssistantMessage {
+        let mut events = stream(model, context, options);
+        while events.next().await.is_some() {}
+        events.result().await.unwrap()
     }
 
     fn completions_compat(value: OpenAICompletionsCompat) -> Option<ModelCompat> {
@@ -3243,17 +3240,38 @@ mod tests {
         );
     }
 
-    /// Pins tolerant raw response parsing for the off-spec fields read at
-    /// openai-completions.ts:530-638.
+    /// Pins pi `src/api/openai-completions.ts:539-566,1491-1509`: wrong-typed
+    /// content, reasoning, and usage fields are ignored during chunk decoding.
     #[test]
     fn raw_chunk_tolerance_matches_pi_source() {
         let chunk: RawChunk = serde_json::from_value(json!({
             "id":"",
-            "choices":null,
-            "usage":null
+            "choices":[{
+                "delta":{"content":[],"reasoning":123},
+                "usage":{"prompt_tokens":1.5,"completion_tokens":"2"}
+            }],
+            "usage":{
+                "prompt_tokens":1.5,
+                "completion_tokens":"2",
+                "prompt_tokens_details":[]
+            }
         }))
         .unwrap();
+        let usage = chunk.usage.expect("usage object");
+        assert_eq!(usage.prompt_tokens, None);
+        assert_eq!(usage.completion_tokens, None);
+        assert!(usage.prompt_tokens_details.is_none());
+        let choice = chunk.choices.first().expect("choice");
+        let delta = choice.delta.as_ref().expect("delta object");
+        assert_eq!(delta.content, None);
+        assert_eq!(delta.reasoning, None);
+        let usage = choice.usage.as_ref().expect("choice usage");
+        assert_eq!(usage.prompt_tokens, None);
+        assert_eq!(usage.completion_tokens, None);
+
+        let chunk: RawChunk = serde_json::from_value(json!({"choices":null,"usage":null})).unwrap();
         assert!(chunk.choices.is_empty());
+        assert!(chunk.usage.is_none());
         let delta: RawDelta = serde_json::from_value(json!({"tool_calls":null})).unwrap();
         assert!(delta.tool_calls.is_empty());
     }
@@ -4786,5 +4804,350 @@ mod tests {
             captured.headers.get("user-agent").map(String::as_str),
             Some(get_pi_user_agent().as_str())
         );
+    }
+
+    /// Pins pi `src/api/openai-completions.ts:265-276`: the adapter echoes `model.api`
+    /// and does not reject a model before issuing the Completions request.
+    #[tokio::test]
+    async fn model_api_is_echo_only() {
+        let server = start_server(vec![Script::sse(vec![stop_chunk("test-model")])], false).await;
+        let mut test_model = model(server.base_url.clone());
+        test_model.api = "custom-completions-alias".into();
+        let message = run_message(&test_model, &context(), options()).await;
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        assert_eq!(message.api.as_str(), "custom-completions-alias");
+        assert_eq!(server.captured.lock().unwrap().len(), 1);
+    }
+
+    /// Pins pi `src/api/openai-completions.ts:1221-1226,1336-1348`: an assistant
+    /// tool-call turn without text carries an explicit JSON `content: null`.
+    #[test]
+    fn assistant_tool_call_without_text_serializes_explicit_null_content() {
+        let test_model = model("https://example.invalid/v1".to_owned());
+        let mut assistant =
+            AssistantMessage::pending("openai-completions", "openai", "test-model", 2);
+        assistant.content = vec![AssistantContent::ToolCall(ToolCall::new(
+            "call-1",
+            "read",
+            Map::new(),
+        ))];
+        assistant.stop_reason = StopReason::ToolUse;
+        let test_context = Context {
+            system_prompt: None,
+            messages: vec![Message::Assistant(Box::new(assistant))],
+            tools: None,
+        };
+        let messages = convert_messages(&test_model, &test_context).unwrap();
+        assert!(messages[0].get("content").is_some());
+        assert!(messages[0]["content"].is_null());
+        assert!(messages[0]["tool_calls"].is_array());
+    }
+
+    /// Pins pi `src/api/openai-completions.ts:826-846`: qwen uses nullish
+    /// fallback for an explicit-null map entry while zai uses defined semantics.
+    #[test]
+    fn qwen_explicit_null_effort_falls_back_to_the_level_name() {
+        let mut test_model = model("https://example.invalid/v1".to_owned());
+        test_model.reasoning = true;
+        test_model.thinking_level_map = Some(ThinkingLevelMap {
+            high: Some(None),
+            ..ThinkingLevelMap::default()
+        });
+        let mut request_options = options();
+        request_options.reasoning_effort = Some(ThinkingLevel::High);
+
+        test_model.compat = completions_compat(OpenAICompletionsCompat {
+            thinking_format: Some(ThinkingFormat::Qwen),
+            supports_reasoning_effort: Some(true),
+            ..OpenAICompletionsCompat::default()
+        });
+        assert_eq!(
+            payload(&test_model, &context(), &request_options)["reasoning_effort"],
+            "high"
+        );
+
+        test_model.compat = completions_compat(OpenAICompletionsCompat {
+            thinking_format: Some(ThinkingFormat::Zai),
+            supports_reasoning_effort: Some(true),
+            ..OpenAICompletionsCompat::default()
+        });
+        assert!(
+            payload(&test_model, &context(), &request_options)
+                .get("reasoning_effort")
+                .is_none()
+        );
+    }
+
+    /// Pins pi `src/api/openai-completions.ts:711-753`: caller authorization
+    /// replaces SDK bearer auth and reaches the server as exactly one header line.
+    #[tokio::test]
+    async fn custom_authorization_is_sent_exactly_once() {
+        let server = start_server(vec![Script::sse(vec![stop_chunk("test-model")])], false).await;
+        let mut request_options = options();
+        request_options.stream.request.headers = Some(BTreeMap::from([(
+            "authorization".to_owned(),
+            Some("Bearer caller-token".to_owned()),
+        )]));
+        let (_, captured) = run_and_capture(
+            model(server.base_url.clone()),
+            context(),
+            request_options,
+            &server,
+        )
+        .await;
+        let authorization = captured
+            .header_lines
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .collect::<Vec<_>>();
+        assert_eq!(authorization.len(), 1);
+        assert_eq!(authorization[0].1, "Bearer caller-token");
+    }
+
+    /// Pins pi `src/api/openai-completions.ts:311-320`: `onResponse` observes
+    /// the successful response's real status and headers before stream events.
+    #[tokio::test]
+    async fn on_response_receives_real_status_and_headers() {
+        let mut script = Script::sse(vec![stop_chunk("test-model")]);
+        script.status = StatusCode::CREATED;
+        script
+            .headers
+            .insert("x-provider-response".to_owned(), "real".to_owned());
+        let server = start_server(vec![script], false).await;
+        let observed = Arc::new(Mutex::new(None::<ProviderResponse>));
+        let callback = observed.clone();
+        let mut request_options = options();
+        request_options.stream.request.on_response = Some(Arc::new(move |response, _| {
+            let callback = callback.clone();
+            Box::pin(async move {
+                *callback.lock().unwrap_or_else(PoisonError::into_inner) = Some(response);
+            })
+        }));
+        let message =
+            run_message(&model(server.base_url.clone()), &context(), request_options).await;
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        let response = observed.lock().unwrap();
+        let response = response.as_ref().unwrap();
+        assert_eq!(response.status, 201);
+        assert_eq!(
+            response.headers.get("x-provider-response"),
+            Some(&"real".to_owned())
+        );
+    }
+
+    /// Pins pi `src/api/openai-completions.ts:672-681` and
+    /// `src/utils/error-body.ts:38-53,128-135`: parsed and raw failures retain
+    /// exact provider body data, params, and the OpenRouter raw appendix.
+    #[tokio::test]
+    async fn provider_error_strings_preserve_json_and_non_json_bodies() {
+        let json_body = r#"{"error":{"message":"bad request","type":"invalid_request_error","param":"tools[0]","code":"bad","metadata":{"raw":{"upstream":"detail"}}}}"#;
+        let json_server = start_server(
+            vec![Script::raw_error(StatusCode::BAD_REQUEST, json_body)],
+            false,
+        )
+        .await;
+        let json_error =
+            run_message(&model(json_server.base_url.clone()), &context(), options()).await;
+        assert_eq!(
+            json_error.error_message.as_deref(),
+            Some(concat!(
+                r#"400: {"message":"bad request","type":"invalid_request_error","param":"tools[0]","code":"bad","metadata":{"raw":{"upstream":"detail"}}}"#,
+                "\n[object Object]"
+            ))
+        );
+
+        let text_server = start_server(
+            vec![Script::raw_error(
+                StatusCode::BAD_GATEWAY,
+                "upstream exploded",
+            )],
+            false,
+        )
+        .await;
+        let text_error =
+            run_message(&model(text_server.base_url.clone()), &context(), options()).await;
+        assert_eq!(
+            text_error.error_message.as_deref(),
+            Some("502 upstream exploded")
+        );
+    }
+
+    /// Pins pi `src/utils/provider-retry.ts:22-67,105-123`: response retry
+    /// headers control classification, delay, and the maximum-delay fail-fast.
+    #[tokio::test]
+    async fn response_headers_drive_retry_delay_classification_and_cap() {
+        let mut seconds = Script::error(StatusCode::TOO_MANY_REQUESTS, "retry after seconds");
+        seconds
+            .headers
+            .insert("retry-after".to_owned(), "61".to_owned());
+        let seconds_server = start_server(vec![seconds], false).await;
+        let mut request_options = options();
+        request_options.stream.request.max_retries = Some(1);
+        request_options.stream.request.max_retry_delay_ms = Some(60_000);
+        assert_eq!(
+            run_message(
+                &model(seconds_server.base_url.clone()),
+                &context(),
+                request_options,
+            )
+            .await
+            .error_message
+            .as_deref(),
+            Some("Server requested 61s retry delay (max: 60s). 429 retry after seconds")
+        );
+        assert_eq!(seconds_server.captured.lock().unwrap().len(), 1);
+
+        let mut delayed = Script::error(StatusCode::TOO_MANY_REQUESTS, "rate limited");
+        delayed
+            .headers
+            .insert("retry-after-ms".to_owned(), "40".to_owned());
+        let delayed_server = start_server(
+            vec![delayed, Script::sse(vec![stop_chunk("test-model")])],
+            false,
+        )
+        .await;
+        let mut request_options = options();
+        request_options.stream.request.max_retries = Some(1);
+        let started = std::time::Instant::now();
+        let message = run_message(
+            &model(delayed_server.base_url.clone()),
+            &context(),
+            request_options,
+        )
+        .await;
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        assert!(started.elapsed() >= std::time::Duration::from_millis(30));
+
+        let mut forced = Script::error(StatusCode::BAD_REQUEST, "retry forced");
+        forced
+            .headers
+            .insert("x-should-retry".to_owned(), "true".to_owned());
+        let forced_server = start_server(
+            vec![forced, Script::sse(vec![stop_chunk("test-model")])],
+            false,
+        )
+        .await;
+        let mut request_options = options();
+        request_options.stream.request.max_retries = Some(1);
+        assert_eq!(
+            run_message(
+                &model(forced_server.base_url.clone()),
+                &context(),
+                request_options,
+            )
+            .await
+            .stop_reason,
+            StopReason::Stop
+        );
+
+        let mut denied = Script::error(StatusCode::INTERNAL_SERVER_ERROR, "retry denied");
+        denied
+            .headers
+            .insert("x-should-retry".to_owned(), "false".to_owned());
+        let denied_server = start_server(
+            vec![denied, Script::sse(vec![stop_chunk("test-model")])],
+            false,
+        )
+        .await;
+        let mut request_options = options();
+        request_options.stream.request.max_retries = Some(1);
+        assert_eq!(
+            run_message(
+                &model(denied_server.base_url.clone()),
+                &context(),
+                request_options,
+            )
+            .await
+            .stop_reason,
+            StopReason::Error
+        );
+        assert_eq!(denied_server.captured.lock().unwrap().len(), 1);
+
+        let mut capped = Script::error(StatusCode::TOO_MANY_REQUESTS, "rate limited");
+        capped
+            .headers
+            .insert("retry-after-ms".to_owned(), "61000".to_owned());
+        let capped_server = start_server(vec![capped], false).await;
+        let mut request_options = options();
+        request_options.stream.request.max_retries = Some(1);
+        request_options.stream.request.max_retry_delay_ms = Some(60_000);
+        let message = run_message(
+            &model(capped_server.base_url.clone()),
+            &context(),
+            request_options,
+        )
+        .await;
+        assert_eq!(
+            message.error_message.as_deref(),
+            Some("Server requested 61s retry delay (max: 60s). 429 rate limited")
+        );
+    }
+
+    /// Pins pi `src/api/openai-completions.ts:311-319,505-550`: the SDK-backed
+    /// SSE path preserves a UTF-8 scalar split across network chunks.
+    #[tokio::test]
+    async fn split_multibyte_sse_delta_is_byte_correct() {
+        let event = json!({
+            "id":"chatcmpl-utf8","model":"test-model",
+            "choices":[{"index":0,"delta":{"content":"café"},"finish_reason":"stop"}]
+        });
+        let wire = format!("data: {event}\n\ndata: [DONE]\n\n").into_bytes();
+        let split = wire
+            .windows(2)
+            .position(|window| window == "é".as_bytes())
+            .unwrap()
+            + 1;
+        let server = start_server(
+            vec![Script::raw_sse(vec![
+                wire[..split].to_vec(),
+                wire[split..].to_vec(),
+            ])],
+            false,
+        )
+        .await;
+        let message = run_message(&model(server.base_url.clone()), &context(), options()).await;
+        let Some(AssistantContent::Text(text)) = message.content.first() else {
+            panic!("text response");
+        };
+        assert_eq!(text.text, "café");
+    }
+
+    /// Pins pi `src/api/openai-completions.ts:311-319,505-550`: the OpenAI SDK
+    /// concatenates multiple `data:` fields in one SSE event with a newline.
+    #[tokio::test]
+    async fn multiline_data_sse_event_is_concatenated_before_json_decode() {
+        let wire = concat!(
+            "data: {\"id\":\"chatcmpl-multiline\",\"model\":\"test-model\",\n",
+            "data: \"choices\":[{\"index\":0,\"delta\":{\"content\":\"joined\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let server =
+            start_server(vec![Script::raw_sse(vec![wire.as_bytes().to_vec()])], false).await;
+        let message = run_message(&model(server.base_url.clone()), &context(), options()).await;
+        let Some(AssistantContent::Text(text)) = message.content.first() else {
+            panic!("text response");
+        };
+        assert_eq!(text.text, "joined");
+    }
+
+    /// Pins pi `src/api/openai-completions.ts:265-272,664-708`: neither public
+    /// stream entry point synchronously throws when no async runtime is active.
+    #[test]
+    fn stream_entry_points_without_tokio_runtime_return_terminal_errors() {
+        let test_model = model("https://example.invalid/v1".to_owned());
+        let streams = [
+            stream(&test_model, &context(), options()),
+            stream_simple(&test_model, &context(), SimpleStreamOptions::default()),
+        ];
+        for mut events in streams {
+            let event = futures::executor::block_on(events.next()).unwrap();
+            assert!(matches!(event, AssistantMessageEvent::Error { .. }));
+            let message = futures::executor::block_on(events.result()).unwrap();
+            assert_eq!(message.stop_reason, StopReason::Error);
+            assert_eq!(
+                message.error_message.as_deref(),
+                Some("Tokio runtime is not available")
+            );
+        }
     }
 }

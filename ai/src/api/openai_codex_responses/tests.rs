@@ -851,6 +851,21 @@ async fn client_service_tier_prices_codex_default_echo() {
     }
 }
 
+/// Pins pi `src/api/openai-codex-responses.ts:599-630`: an unknown echoed
+/// service tier passes through resolution and uses multiplier one.
+#[test]
+fn unknown_service_tier_passes_through_resolution_at_multiplier_one() {
+    let tier = ResponseServiceTier::Other("future-tier".to_owned());
+    assert_eq!(
+        resolve_codex_service_tier(
+            Some(Some(tier.clone())),
+            Some(Some(ResponseServiceTier::Priority)),
+        ),
+        Some(Some(tier.clone()))
+    );
+    assert_eq!(service_tier_multiplier(&model("gpt-5.5"), Some(tier)), 1.0);
+}
+
 /// Ports pi `openai-codex-stream.test.ts:2360-2432` (all retry header forms).
 #[tokio::test(start_paused = true)]
 async fn sse_retries_honor_retry_after_ms_seconds_and_http_date() {

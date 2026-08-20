@@ -40,14 +40,52 @@ impl OpenAIResponsesError {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResponseServiceTier {
     Auto,
     Default,
     Flex,
     Scale,
     Priority,
+    Other(String),
+}
+
+impl ResponseServiceTier {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Auto => "auto",
+            Self::Default => "default",
+            Self::Flex => "flex",
+            Self::Scale => "scale",
+            Self::Priority => "priority",
+            Self::Other(value) => value,
+        }
+    }
+}
+
+impl Serialize for ResponseServiceTier {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ResponseServiceTier {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match String::deserialize(deserializer)?.as_str() {
+            "auto" => Self::Auto,
+            "default" => Self::Default,
+            "flex" => Self::Flex,
+            "scale" => Self::Scale,
+            "priority" => Self::Priority,
+            value => Self::Other(value.to_owned()),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -967,7 +1005,10 @@ struct IncompleteDetails {
 
 impl IncompleteDetails {
     fn string_reason(&self) -> Option<&str> {
-        self.reason.as_ref().and_then(Value::as_str)
+        self.reason
+            .as_ref()
+            .and_then(Value::as_str)
+            .filter(|reason| !reason.is_empty())
     }
 }
 
@@ -1105,7 +1146,7 @@ struct ReasoningText {
 #[derive(Debug, Deserialize)]
 struct MessageItem {
     id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_known_phase")]
     phase: Option<TextSignaturePhase>,
     #[serde(default)]
     content: Vec<OutputMessageContent>,
@@ -1122,6 +1163,19 @@ enum OutputMessageContent {
         #[serde(default)]
         refusal: String,
     },
+    #[serde(other)]
+    Unknown,
+}
+
+fn deserialize_known_phase<'de, D>(deserializer: D) -> Result<Option<TextSignaturePhase>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Value::deserialize(deserializer)?.as_str() {
+        Some("commentary") => Some(TextSignaturePhase::Commentary),
+        Some("final_answer") => Some(TextSignaturePhase::FinalAnswer),
+        _ => None,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -1377,6 +1431,7 @@ fn message_item_text(item: &MessageItem) -> String {
         .map(|content| match content {
             OutputMessageContent::OutputText { text } => text.as_str(),
             OutputMessageContent::Refusal { refusal } => refusal.as_str(),
+            OutputMessageContent::Unknown => "",
         })
         .collect()
 }
@@ -1478,14 +1533,15 @@ fn finalize_response(
     calculate_cost(model, &mut output.usage);
     if let Some(apply) = options.apply_service_tier_pricing {
         let response_tier = response.service_tier;
-        let request_tier = options.service_tier;
-        let service_tier = options.resolve_service_tier.map_or_else(
-            || match response_tier {
+        let request_tier = options.service_tier.clone();
+        let service_tier = if let Some(resolve) = options.resolve_service_tier {
+            resolve(response_tier, request_tier)
+        } else {
+            match response_tier {
                 Some(Some(tier)) => Some(Some(tier)),
                 Some(None) | None => request_tier,
-            },
-            |resolve| resolve(response_tier, request_tier),
-        );
+            }
+        };
         apply(&mut output.usage, service_tier);
     }
 
@@ -2823,6 +2879,66 @@ mod tests {
         })];
         let (result, _) = process(events, &mut message, &target).await;
         assert_eq!(result.unwrap_err().to_string(), "server_error: boom");
+        assert_eq!(message.raw_stop_reason.as_deref(), Some("failed"));
+    }
+
+    /// Pins pi `src/api/openai-responses-shared.ts:699,748`: unknown message
+    /// content-part types contribute empty text and unknown phases are ignored.
+    #[tokio::test]
+    async fn unknown_message_content_and_phase_are_tolerated() {
+        let target = model("openai-responses", "openai", "gpt-5-mini");
+        let mut message = output(&target);
+        let events = vec![
+            json!({
+                "type":"response.output_item.added","output_index":0,
+                "item":{
+                    "type":"message","id":"msg_future","phase":"future_phase","content":[]
+                }
+            }),
+            json!({
+                "type":"response.output_item.done","output_index":0,
+                "item":{
+                    "type":"message","id":"msg_future","phase":"future_phase",
+                    "content":[
+                        {"type":"future_content","value":"ignored"},
+                        {"type":"output_text","text":"kept"}
+                    ]
+                }
+            }),
+            json!({
+                "type":"response.completed",
+                "response":{"id":"resp_future","status":"completed"}
+            }),
+        ];
+        let (result, _) = process(events, &mut message, &target).await;
+        result.unwrap();
+        let Some(AssistantContent::Text(text)) = message.content.first() else {
+            panic!("text block");
+        };
+        assert_eq!(text.text, "kept");
+        let signature: Value =
+            serde_json::from_str(text.text_signature.as_deref().expect("text signature")).unwrap();
+        assert!(signature.get("phase").is_none());
+    }
+
+    /// Pins pi `src/api/openai-responses-shared.ts:748-753`: an empty
+    /// incomplete reason is nullish for a failed response's fallback message.
+    #[tokio::test]
+    async fn failed_with_empty_incomplete_reason_uses_unknown_error_fallback() {
+        let target = model("openai-responses", "openai", "gpt-5-mini");
+        let mut message = output(&target);
+        let events = vec![json!({
+            "type":"response.failed",
+            "response":{
+                "id":"resp_failed","status":"failed",
+                "incomplete_details":{"reason":""}
+            }
+        })];
+        let (result, _) = process(events, &mut message, &target).await;
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Unknown error (no error details in response)"
+        );
         assert_eq!(message.raw_stop_reason.as_deref(), Some("failed"));
     }
 
