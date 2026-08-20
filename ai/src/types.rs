@@ -1160,6 +1160,8 @@ pub struct RoutingSortOptions {
         deserialize_with = "deserialize_present_option"
     )]
     pub partition: Option<Option<String>>,
+    #[serde(default, flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1174,6 +1176,8 @@ pub struct OpenRouterMaxPrice {
     pub audio: Option<NumberOrString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<NumberOrString>,
+    #[serde(default, flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1202,6 +1206,8 @@ pub struct PercentileThresholds {
         serialize_with = "serialize_optional_js_f64"
     )]
     pub p99: Option<f64>,
+    #[serde(default, flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -1251,6 +1257,8 @@ pub struct OpenRouterRouting {
     pub preferred_min_throughput: Option<RoutingThreshold>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_max_latency: Option<RoutingThreshold>,
+    #[serde(default, flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1260,12 +1268,14 @@ pub enum DataCollection {
     Allow,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct VercelGatewayRouting {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub only: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<Vec<String>>,
+    #[serde(default, flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2037,6 +2047,54 @@ mod tests {
         }
     }
 
+    /// Pins pi `types.ts:742-750`: routing sort objects are schema-free runtime
+    /// data, so unknown keys survive load and serialization.
+    #[test]
+    fn routing_sort_options_preserve_unknown_keys() {
+        let wire = json!({"by":"latency","partition":null,"futureSort":{"window":5}});
+        let decoded: RoutingSortOptions = serde_json::from_value(wire.clone()).unwrap();
+        assert_round_trip(&decoded, wire);
+    }
+
+    /// Pins pi `types.ts:751-763`: max-price objects are schema-free runtime
+    /// data, including custom nested price dimensions.
+    #[test]
+    fn open_router_max_price_preserves_unknown_keys() {
+        let wire = json!({"prompt":1,"completion":"2.5","video":{"unit":"second","price":3}});
+        let decoded: OpenRouterMaxPrice = serde_json::from_value(wire.clone()).unwrap();
+        assert_round_trip(&decoded, wire);
+    }
+
+    /// Pins pi `types.ts:764-789`: percentile threshold objects retain unknown
+    /// percentile keys exactly as loaded.
+    #[test]
+    fn percentile_thresholds_preserve_unknown_keys() {
+        let wire = json!({"p50":10,"p99":20,"p99_9":25});
+        let decoded: PercentileThresholds = serde_json::from_value(wire.clone()).unwrap();
+        assert_round_trip(&decoded, wire);
+    }
+
+    /// Pins pi `types.ts:717-790`: OpenRouter routing is schema-free runtime
+    /// data, so custom routing fields survive load and serialization.
+    #[test]
+    fn open_router_routing_preserves_unknown_keys() {
+        let wire = json!({
+            "only":["provider-a"],
+            "custom_router":{"region":"west","weights":[1,2]}
+        });
+        let decoded: OpenRouterRouting = serde_json::from_value(wire.clone()).unwrap();
+        assert_round_trip(&decoded, wire);
+    }
+
+    /// Pins pi `types.ts:792-802`: Vercel gateway routing is schema-free runtime
+    /// data, so future gateway keys round-trip unchanged.
+    #[test]
+    fn vercel_gateway_routing_preserves_unknown_keys() {
+        let wire = json!({"order":["anthropic"],"customGateway":{"region":"iad1"}});
+        let decoded: VercelGatewayRouting = serde_json::from_value(wire.clone()).unwrap();
+        assert_round_trip(&decoded, wire);
+    }
+
     /// Pins pi `types.ts:822-850`: known compat families remain schema-free
     /// runtime objects, including unknown keys and their JSON values.
     #[test]
@@ -2167,6 +2225,7 @@ mod tests {
                 p75: None,
                 p90: Some(2.5),
                 p99: None,
+                extra: Map::new(),
             }))
             .unwrap(),
             r#"{"p50":1,"p90":2.5}"#

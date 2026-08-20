@@ -216,6 +216,13 @@ pub(crate) async fn acquire_sse(
 }
 
 async fn send_request(request: &OpenAiSseRequest) -> Result<ProviderHttpResponse, OpenAiHttpError> {
+    if request
+        .signal
+        .as_ref()
+        .is_some_and(|signal| signal.is_aborted())
+    {
+        return Err(OpenAiHttpError::transport("Request was aborted.", true));
+    }
     let send = async {
         if let Some(fetch) = &request.fetch {
             return fetch

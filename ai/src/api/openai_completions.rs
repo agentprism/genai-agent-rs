@@ -487,15 +487,6 @@ async fn run_stream_inner(
             "Model compat variant does not match openai-completions",
         ));
     }
-    if options
-        .stream
-        .request
-        .signal
-        .as_ref()
-        .is_some_and(|signal| signal.is_aborted())
-    {
-        return Err(CompletionError::aborted("Request was aborted"));
-    }
     let api_key = get_client_api_key(
         model.provider.as_str(),
         options.stream.request.api_key.as_deref(),
@@ -794,19 +785,18 @@ async fn next_chunk(
     };
     let result = if let Some(signal) = &options.stream.request.signal {
         tokio::select! {
+            biased;
             result = next => result,
-            () = signal.cancelled() => return Err(CompletionError::aborted("Request was aborted")),
+            () = signal.cancelled() => return Ok(None),
         }
     } else {
         next.await
     };
-    result.map_err(|error| {
-        if error.aborted_flag() {
-            CompletionError::aborted(error.to_string())
-        } else {
-            CompletionError::new(error.formatted(true))
-        }
-    })
+    match result {
+        Err(error) if error.aborted_flag() => Ok(None),
+        Err(error) => Err(CompletionError::new(error.formatted(true))),
+        Ok(chunk) => Ok(chunk),
+    }
 }
 
 fn format_retry_error(error: ProviderRetryError<OpenAiHttpError>) -> CompletionError {
@@ -2650,8 +2640,9 @@ fn apply_compat(resolved: &mut ResolvedCompat, compat: &OpenAICompletionsCompat)
 mod tests {
     use super::*;
     use crate::types::{
-        FetchFunction, ModelCost, ModelCostRates, ProviderHttpRequest, ProviderHttpResponse,
-        ProviderResponse, ThinkingLevelMap, ToolResultRole, UserContent, UserMessage, UserRole,
+        AbortSignal, FetchFunction, ModelCost, ModelCostRates, ProviderHttpRequest,
+        ProviderHttpResponse, ProviderResponse, ThinkingLevelMap, ToolResultRole, UserContent,
+        UserMessage, UserRole,
     };
     use bytes::Bytes;
     use futures::StreamExt;
@@ -2662,8 +2653,10 @@ mod tests {
     use hyper::{Request, Response, StatusCode};
     use hyper_util::rt::TokioIo;
     use serde_json::json;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, PoisonError};
     use tokio::net::TcpListener;
+    use tokio::sync::Notify;
     use tokio::task::JoinHandle;
 
     #[derive(Clone)]
@@ -2730,6 +2723,71 @@ mod tests {
                     headers: BTreeMap::new(),
                     body: Some(futures::stream::iter(vec![Ok(body)]).boxed()),
                 })
+            })
+        }
+    }
+
+    struct PendingStaticFetch(Vec<u8>);
+
+    impl FetchFunction for PendingStaticFetch {
+        fn fetch(
+            &self,
+            _request: ProviderHttpRequest,
+        ) -> futures::future::BoxFuture<'_, Result<ProviderHttpResponse, String>> {
+            let body = self.0.clone();
+            Box::pin(async move {
+                Ok(ProviderHttpResponse {
+                    status: 200,
+                    status_text: "OK".to_owned(),
+                    headers: BTreeMap::new(),
+                    body: Some(
+                        futures::stream::iter(vec![Ok(body)])
+                            .chain(futures::stream::pending())
+                            .boxed(),
+                    ),
+                })
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingFetch {
+        calls: AtomicUsize,
+    }
+
+    impl FetchFunction for RecordingFetch {
+        fn fetch(
+            &self,
+            _request: ProviderHttpRequest,
+        ) -> futures::future::BoxFuture<'_, Result<ProviderHttpResponse, String>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async { Err("unexpected request".to_owned()) })
+        }
+    }
+
+    #[derive(Default)]
+    struct ManualAbort {
+        aborted: AtomicBool,
+        notify: Notify,
+    }
+
+    impl ManualAbort {
+        fn abort(&self) {
+            self.aborted.store(true, Ordering::Release);
+            self.notify.notify_waiters();
+        }
+    }
+
+    impl AbortSignal for ManualAbort {
+        fn is_aborted(&self) -> bool {
+            self.aborted.load(Ordering::Acquire)
+        }
+
+        fn cancelled(&self) -> futures::future::BoxFuture<'_, ()> {
+            Box::pin(async move {
+                while !self.is_aborted() {
+                    self.notify.notified().await;
+                }
             })
         }
     }
@@ -3181,6 +3239,31 @@ mod tests {
         });
         let body = payload(&test_model, &test_context, &request_options);
         assert!(body.get("tool_stream").is_none());
+    }
+
+    /// Pins pi `src/types.ts:596-599,717-790` and
+    /// `src/api/openai-completions.ts:933-936`: OpenRouter routing is forwarded
+    /// verbatim as the request's `provider` field, including unknown nested keys.
+    #[test]
+    fn unknown_open_router_routing_key_reaches_request_body() {
+        let mut test_model = model("https://openrouter.ai/api/v1".to_owned());
+        let compat: OpenAICompletionsCompat = serde_json::from_value(json!({
+            "openRouterRouting": {
+                "only": ["provider-a"],
+                "custom_router": {"region":"west","weights":[1,2]}
+            }
+        }))
+        .unwrap();
+        test_model.compat = completions_compat(compat);
+
+        let body = payload(&test_model, &context(), &options());
+        assert_eq!(
+            body["provider"],
+            json!({
+                "only":["provider-a"],
+                "custom_router":{"region":"west","weights":[1,2]}
+            })
+        );
     }
 
     /// Pins pi `src/api/openai-completions.ts:798-800` request-number behavior.
@@ -4815,6 +4898,118 @@ mod tests {
         assert_eq!(first.id, "old-id");
         assert_eq!(first.arguments, json!({"a":1}));
         assert_eq!(second.arguments, json!({"b":2}));
+    }
+
+    /// Pins pi `src/api/openai-completions.ts:291-318,664-683` and
+    /// `src/utils/provider-retry.ts:69-71,113-118`: pre-abort still reaches
+    /// payload construction, but the request point emits `Request aborted`.
+    #[tokio::test]
+    async fn preaborted_signal_runs_payload_without_sending_and_preserves_key_precedence() {
+        let signal = Arc::new(ManualAbort::default());
+        signal.abort();
+        let fetch = Arc::new(RecordingFetch::default());
+        let payload_calls = Arc::new(AtomicUsize::new(0));
+        let callback_calls = payload_calls.clone();
+        let mut request_options = options();
+        request_options.stream.request.signal = Some(signal.clone());
+        request_options.stream.request.fetch = Some(fetch.clone());
+        request_options.stream.request.on_payload = Some(Arc::new(move |_, _| {
+            callback_calls.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async { None })
+        }));
+
+        let message = run_message(
+            &model("https://example.invalid/v1".to_owned()),
+            &context(),
+            request_options,
+        )
+        .await;
+        assert_eq!(message.stop_reason, StopReason::Aborted);
+        assert_eq!(message.error_message.as_deref(), Some("Request aborted"));
+        assert_eq!(payload_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(fetch.calls.load(Ordering::Relaxed), 0);
+
+        let mut missing_key = OpenAICompletionsOptions::default();
+        missing_key.stream.request.signal = Some(signal);
+        let message = run_message(
+            &model("https://example.invalid/v1".to_owned()),
+            &context(),
+            missing_key,
+        )
+        .await;
+        assert_eq!(
+            message.error_message.as_deref(),
+            Some("No API key for provider: openai")
+        );
+    }
+
+    /// Pins pi OpenAI SDK `core/streaming.js:73-82` and
+    /// `src/api/openai-completions.ts:640-646`: a mid-stream abort silently ends
+    /// iteration, closes every open block, then emits `Request was aborted`.
+    #[tokio::test]
+    async fn midstream_abort_finishes_open_blocks_before_the_error_event() {
+        let body = [
+            json!({"choices":[{"delta":{"content":"answer"},"finish_reason":null}]}),
+            json!({"choices":[{"delta":{"reasoning_content":"thought"},"finish_reason":null}]}),
+            json!({"choices":[{"delta":{"tool_calls":[{
+                "index":0,"id":"call-1","function":{"name":"lookup","arguments":"{}"}
+            }]},"finish_reason":null}]}),
+        ]
+        .into_iter()
+        .map(|chunk| format!("data: {chunk}\n\n"))
+        .collect::<String>()
+        .into_bytes();
+        let signal = Arc::new(ManualAbort::default());
+        let mut request_options = options();
+        request_options.stream.request.signal = Some(signal.clone());
+        request_options.stream.request.fetch = Some(Arc::new(PendingStaticFetch(body)));
+        let mut events = stream(
+            &model("https://example.invalid/v1".to_owned()),
+            &context(),
+            request_options,
+        );
+        let mut kinds = Vec::new();
+        while let Some(event) = events.next().await {
+            let kind = match event {
+                AssistantMessageEvent::Start => "start",
+                AssistantMessageEvent::TextStart { .. } => "text_start",
+                AssistantMessageEvent::TextDelta { .. } => "text_delta",
+                AssistantMessageEvent::ThinkingStart { .. } => "thinking_start",
+                AssistantMessageEvent::ThinkingDelta { .. } => "thinking_delta",
+                AssistantMessageEvent::ToolCallStart { .. } => "toolcall_start",
+                AssistantMessageEvent::ToolCallDelta { .. } => {
+                    signal.abort();
+                    "toolcall_delta"
+                }
+                AssistantMessageEvent::TextEnd { .. } => "text_end",
+                AssistantMessageEvent::ThinkingEnd { .. } => "thinking_end",
+                AssistantMessageEvent::ToolCallEnd { .. } => "toolcall_end",
+                AssistantMessageEvent::Error { reason, ref error } => {
+                    assert_eq!(reason, ErrorStopReason::Aborted);
+                    assert_eq!(error.stop_reason, StopReason::Aborted);
+                    assert_eq!(error.error_message.as_deref(), Some("Request was aborted"));
+                    "error"
+                }
+                AssistantMessageEvent::Done { .. } => "done",
+            };
+            kinds.push(kind);
+        }
+        assert_eq!(
+            kinds,
+            [
+                "start",
+                "text_start",
+                "text_delta",
+                "thinking_start",
+                "thinking_delta",
+                "toolcall_start",
+                "toolcall_delta",
+                "text_end",
+                "thinking_end",
+                "toolcall_end",
+                "error",
+            ]
+        );
     }
 
     /// Ports retry.test.ts default no-retry behavior with real socket time.

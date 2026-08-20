@@ -515,6 +515,46 @@ async fn sse_header_wait_uses_timeout_ms() {
     assert!(!completed_signal.is_aborted());
 }
 
+/// Pins pi `src/api/openai-codex-responses.ts:256-323,377-384`: api-key and
+/// account resolution plus body construction and `onPayload` precede abort at
+/// the transport request point.
+#[tokio::test]
+async fn preaborted_codex_preserves_key_and_payload_ordering_without_a_request() {
+    let signal = Arc::new(ManualAbort::default());
+    signal.abort();
+    let fetch = QueueFetch::new(std::iter::empty());
+    let payload_calls = Arc::new(AtomicUsize::new(0));
+    let callback_calls = payload_calls.clone();
+    let mut options = sse_options(fetch.clone());
+    options.stream.request.signal = Some(signal.clone());
+    options.stream.request.on_payload = Some(Arc::new(move |_, _| {
+        callback_calls.fetch_add(1, Ordering::Relaxed);
+        Box::pin(async { None })
+    }));
+
+    let mut events = stream(&model("gpt-5.1-codex"), &context("hello"), options);
+    while events.next().await.is_some() {}
+    let message = events.result().await.unwrap();
+    assert_eq!(message.stop_reason, StopReason::Aborted);
+    assert_eq!(
+        message.error_message.as_deref(),
+        Some("Request was aborted")
+    );
+    assert_eq!(payload_calls.load(Ordering::Relaxed), 1);
+    assert!(fetch.requests().is_empty());
+
+    let mut missing_key = OpenAICodexResponsesOptions::default();
+    missing_key.stream.transport = Some(Transport::Sse);
+    missing_key.stream.request.signal = Some(signal);
+    let mut events = stream(&model("gpt-5.1-codex"), &context("hello"), missing_key);
+    while events.next().await.is_some() {}
+    let message = events.result().await.unwrap();
+    assert_eq!(
+        message.error_message.as_deref(),
+        Some("No API key for provider: openai-codex")
+    );
+}
+
 /// Port of pi `openai-codex-stream.test.ts:389-495`.
 #[tokio::test]
 async fn abort_signal_stops_sse_body_reads_after_headers() {

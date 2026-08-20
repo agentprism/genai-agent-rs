@@ -300,15 +300,6 @@ async fn run_stream_inner(
             "Model compat variant does not match openai-responses",
         ));
     }
-    if options
-        .stream
-        .request
-        .signal
-        .as_ref()
-        .is_some_and(|signal| signal.is_aborted())
-    {
-        return Err(ResponsesRunError::aborted("Request was aborted"));
-    }
     let api_key = get_client_api_key(
         model.provider.as_str(),
         options.stream.request.api_key.as_deref(),
@@ -862,7 +853,12 @@ fn response_stream(
     stream: BoxStream<'static, Result<Value, OpenAiSseError>>,
 ) -> BoxStream<'static, Result<Value, OpenAIResponsesError>> {
     stream
-        .map(|item| item.map_err(|error| OpenAIResponsesError::new(error.to_string())))
+        .filter_map(|item| async move {
+            match item {
+                Err(error) if error.aborted_flag() => None,
+                item => Some(item.map_err(|error| OpenAIResponsesError::new(error.to_string()))),
+            }
+        })
         .boxed()
 }
 
@@ -870,10 +866,10 @@ fn response_stream(
 mod tests {
     use super::*;
     use crate::types::{
-        ConstrainedSamplingConfig, FetchFunction, ImageContent, Message, ModelCost, ModelCostRates,
-        ProviderHttpRequest, ProviderHttpResponse, ProviderResponse, StrictPreference, TextContent,
-        ThinkingLevelMap, ToolConstrainedSampling, ToolResultMessage, ToolResultRole, UserContent,
-        UserContentBlock, UserMessage, UserRole,
+        AbortSignal, ConstrainedSamplingConfig, FetchFunction, ImageContent, Message, ModelCost,
+        ModelCostRates, ProviderHttpRequest, ProviderHttpResponse, ProviderResponse,
+        StrictPreference, TextContent, ThinkingLevelMap, ToolConstrainedSampling,
+        ToolResultMessage, ToolResultRole, UserContent, UserContentBlock, UserMessage, UserRole,
     };
     use bytes::Bytes;
     use futures::StreamExt;
@@ -885,8 +881,10 @@ mod tests {
     use hyper_util::rt::TokioIo;
     use serde_json::json;
     use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, PoisonError};
     use tokio::net::TcpListener;
+    use tokio::sync::Notify;
     use tokio::task::JoinHandle;
 
     #[derive(Clone)]
@@ -944,6 +942,71 @@ mod tests {
                     headers: BTreeMap::new(),
                     body: Some(futures::stream::iter(vec![Ok(body)]).boxed()),
                 })
+            })
+        }
+    }
+
+    struct PendingStaticFetch(Vec<u8>);
+
+    impl FetchFunction for PendingStaticFetch {
+        fn fetch(
+            &self,
+            _request: ProviderHttpRequest,
+        ) -> futures::future::BoxFuture<'_, Result<ProviderHttpResponse, String>> {
+            let body = self.0.clone();
+            Box::pin(async move {
+                Ok(ProviderHttpResponse {
+                    status: 200,
+                    status_text: "OK".to_owned(),
+                    headers: BTreeMap::new(),
+                    body: Some(
+                        futures::stream::iter(vec![Ok(body)])
+                            .chain(futures::stream::pending())
+                            .boxed(),
+                    ),
+                })
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingFetch {
+        calls: AtomicUsize,
+    }
+
+    impl FetchFunction for RecordingFetch {
+        fn fetch(
+            &self,
+            _request: ProviderHttpRequest,
+        ) -> futures::future::BoxFuture<'_, Result<ProviderHttpResponse, String>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async { Err("unexpected request".to_owned()) })
+        }
+    }
+
+    #[derive(Default)]
+    struct ManualAbort {
+        aborted: AtomicBool,
+        notify: Notify,
+    }
+
+    impl ManualAbort {
+        fn abort(&self) {
+            self.aborted.store(true, Ordering::Release);
+            self.notify.notify_waiters();
+        }
+    }
+
+    impl AbortSignal for ManualAbort {
+        fn is_aborted(&self) -> bool {
+            self.aborted.load(Ordering::Acquire)
+        }
+
+        fn cancelled(&self) -> futures::future::BoxFuture<'_, ()> {
+            Box::pin(async move {
+                while !self.is_aborted() {
+                    self.notify.notified().await;
+                }
             })
         }
     }
@@ -1615,6 +1678,128 @@ mod tests {
                     .any(|item| item["role"] == "user")
             );
         }
+    }
+
+    /// Pins pi `src/api/openai-responses.ts:130-158,181-191` and
+    /// `src/utils/provider-retry.ts:69-71,113-118`: pre-abort still reaches
+    /// payload construction, but the request point emits `Request aborted`.
+    #[tokio::test]
+    async fn preaborted_signal_runs_payload_without_sending_and_preserves_key_precedence() {
+        let signal = Arc::new(ManualAbort::default());
+        signal.abort();
+        let fetch = Arc::new(RecordingFetch::default());
+        let payload_calls = Arc::new(AtomicUsize::new(0));
+        let callback_calls = payload_calls.clone();
+        let mut request_options = options();
+        request_options.stream.request.signal = Some(signal.clone());
+        request_options.stream.request.fetch = Some(fetch.clone());
+        request_options.stream.request.on_payload = Some(Arc::new(move |_, _| {
+            callback_calls.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async { None })
+        }));
+
+        let mut events = stream(
+            &base_model("https://example.invalid/v1".to_owned(), "gpt-5-mini"),
+            &context(),
+            request_options,
+        );
+        while events.next().await.is_some() {}
+        let message = events.result().await.unwrap();
+        assert_eq!(message.stop_reason, StopReason::Aborted);
+        assert_eq!(message.error_message.as_deref(), Some("Request aborted"));
+        assert_eq!(payload_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(fetch.calls.load(Ordering::Relaxed), 0);
+
+        let mut missing_key = OpenAIResponsesOptions::default();
+        missing_key.stream.request.signal = Some(signal);
+        let mut events = stream(
+            &base_model("https://example.invalid/v1".to_owned(), "gpt-5-mini"),
+            &context(),
+            missing_key,
+        );
+        while events.next().await.is_some() {}
+        let message = events.result().await.unwrap();
+        assert_eq!(
+            message.error_message.as_deref(),
+            Some("No API key for provider: openai")
+        );
+    }
+
+    /// Pins pi OpenAI SDK `core/streaming.js:73-82` and
+    /// `src/api/openai-responses-shared.ts:597-758`: mid-stream abort ends the
+    /// iterator without closing open blocks, then reports the missing terminal event.
+    #[tokio::test]
+    async fn midstream_abort_keeps_open_blocks_open_and_reports_missing_terminal_event() {
+        let body = [
+            json!({
+                "type":"response.output_item.added","output_index":0,
+                "item":{"type":"message","id":"msg-closed","content":[]}
+            }),
+            json!({"type":"response.output_text.delta","output_index":0,"delta":"closed"}),
+            json!({
+                "type":"response.output_item.done","output_index":0,
+                "item":{"type":"message","id":"msg-closed","content":[{"type":"output_text","text":"closed"}]}
+            }),
+            json!({
+                "type":"response.output_item.added","output_index":1,
+                "item":{"type":"reasoning","id":"rs-open","summary":[]}
+            }),
+            json!({"type":"response.reasoning_text.delta","output_index":1,"delta":"open"}),
+        ]
+        .into_iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .collect::<String>()
+        .into_bytes();
+        let signal = Arc::new(ManualAbort::default());
+        let mut request_options = options();
+        request_options.stream.request.signal = Some(signal.clone());
+        request_options.stream.request.fetch = Some(Arc::new(PendingStaticFetch(body)));
+        let mut events = stream(
+            &base_model("https://example.invalid/v1".to_owned(), "gpt-5-mini"),
+            &context(),
+            request_options,
+        );
+        let mut kinds = Vec::new();
+        while let Some(event) = events.next().await {
+            let kind = match event {
+                AssistantMessageEvent::Start => "start",
+                AssistantMessageEvent::TextStart { .. } => "text_start",
+                AssistantMessageEvent::TextDelta { .. } => "text_delta",
+                AssistantMessageEvent::TextEnd { .. } => "text_end",
+                AssistantMessageEvent::ThinkingStart { .. } => "thinking_start",
+                AssistantMessageEvent::ThinkingDelta { .. } => {
+                    signal.abort();
+                    "thinking_delta"
+                }
+                AssistantMessageEvent::Error { reason, ref error } => {
+                    assert_eq!(reason, ErrorStopReason::Aborted);
+                    assert_eq!(error.stop_reason, StopReason::Aborted);
+                    assert_eq!(
+                        error.error_message.as_deref(),
+                        Some("OpenAI Responses stream ended before a terminal response event")
+                    );
+                    "error"
+                }
+                AssistantMessageEvent::ThinkingEnd { .. } => "thinking_end",
+                AssistantMessageEvent::ToolCallStart { .. }
+                | AssistantMessageEvent::ToolCallDelta { .. }
+                | AssistantMessageEvent::ToolCallEnd { .. } => "toolcall",
+                AssistantMessageEvent::Done { .. } => "done",
+            };
+            kinds.push(kind);
+        }
+        assert_eq!(
+            kinds,
+            [
+                "start",
+                "text_start",
+                "text_delta",
+                "text_end",
+                "thinking_start",
+                "thinking_delta",
+                "error",
+            ]
+        );
     }
 
     #[tokio::test]

@@ -413,9 +413,6 @@ async fn run_stream_inner(
     options: &OpenAICodexResponsesOptions,
     output: &mut AssistantMessage,
 ) -> Result<(), CodexRunError> {
-    if is_aborted(options) {
-        return Err(CodexRunError::aborted("Request was aborted"));
-    }
     let api_key = options
         .stream
         .request
