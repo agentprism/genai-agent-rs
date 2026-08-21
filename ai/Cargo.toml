@@ -4,7 +4,7 @@
 name = "agentprism-ai"
 version = "0.0.1"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.94"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/agentprism/genai-agent-rs"
 description = "Faithful Rust port of pi-ai (@earendil-works/pi-ai): provider-neutral types, the assistant event protocol, and per-wire-protocol API implementations."
@@ -14,6 +14,9 @@ publish = false # until the first reviewed, publishable milestone
 name = "ai"
 
 [dependencies]
+# Ruled 2026-08-21: the selected Anthropic SDK. The fidelity layer owns raw HTTP/SSE because
+# adk-anthropic's public stream API does not expose pi's response hook or per-request fetch seam.
+adk-anthropic = "=1.0.0"
 base64 = "0.23"
 chrono = "0.4"
 futures = "0.3"

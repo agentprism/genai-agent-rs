@@ -1,21 +1,31 @@
 pub mod ant_ling;
+pub mod anthropic;
 pub mod baseten;
 pub mod cerebras;
+pub mod cloudflare_ai_gateway;
 pub mod cloudflare_auth;
 pub mod cloudflare_stream;
 pub mod cloudflare_workers_ai;
 pub mod data;
 pub mod deepseek;
 pub mod faux;
+pub mod fireworks;
+pub mod github_copilot;
 pub mod groq;
 pub mod huggingface;
+pub mod kimi_coding;
+pub mod minimax;
+pub mod minimax_cn;
 pub mod moonshotai;
 pub mod moonshotai_cn;
 pub mod nvidia;
+pub mod opencode;
+pub mod opencode_go;
 pub mod qwen_token_plan;
 pub mod qwen_token_plan_cn;
 pub mod qwen_token_plan_individual;
 pub mod together;
+pub mod vercel_ai_gateway;
 pub mod xiaomi;
 pub mod xiaomi_token_plan_ams;
 pub mod xiaomi_token_plan_cn;
@@ -101,17 +111,27 @@ mod tests {
     /// Ports the factory metadata exercised by pi `test/providers.test.ts` and
     /// each phase-scoped `src/providers/<name>.ts` constructor.
     #[test]
-    fn openai_family_factories_preserve_identity_base_url_and_catalog() {
+    fn ported_provider_factories_preserve_identity_base_url_and_catalog() {
         let cases: Vec<(ProviderRef, &str)> = vec![
             (ant_ling::ant_ling_provider(), "https://api.ant-ling.com/v1"),
+            (anthropic::anthropic_provider(), "https://api.anthropic.com"),
             (
                 baseten::baseten_provider(),
                 "https://inference.baseten.co/v1",
             ),
             (cerebras::cerebras_provider(), "https://api.cerebras.ai/v1"),
             (cloudflare_workers_ai::cloudflare_workers_ai_provider(), ""),
+            (cloudflare_ai_gateway::cloudflare_ai_gateway_provider(), ""),
             (deepseek::deepseek_provider(), "https://api.deepseek.com"),
             (groq::groq_provider(), "https://api.groq.com/openai/v1"),
+            (
+                fireworks::fireworks_provider(),
+                "https://api.fireworks.ai/inference",
+            ),
+            (
+                github_copilot::github_copilot_provider(),
+                "https://api.individual.githubcopilot.com",
+            ),
             (
                 huggingface::huggingface_provider(),
                 "https://router.huggingface.co/v1",
@@ -123,6 +143,18 @@ mod tests {
             (
                 moonshotai_cn::moonshotai_cn_provider(),
                 "https://api.moonshot.cn/v1",
+            ),
+            (
+                kimi_coding::kimi_coding_provider(),
+                "https://api.kimi.com/coding",
+            ),
+            (
+                minimax::minimax_provider(),
+                "https://api.minimax.io/anthropic",
+            ),
+            (
+                minimax_cn::minimax_cn_provider(),
+                "https://api.minimaxi.com/anthropic",
             ),
             (
                 nvidia::nvidia_provider(),
@@ -168,19 +200,32 @@ mod tests {
                 openrouter::openrouter_provider(),
                 "https://openrouter.ai/api/v1",
             ),
+            (opencode::opencode_provider(), ""),
+            (opencode_go::opencode_go_provider(), ""),
+            (
+                vercel_ai_gateway::vercel_ai_gateway_provider(),
+                "https://ai-gateway.vercel.sh",
+            ),
             (xai::xai_provider(), "https://api.x.ai/v1"),
         ];
         for (provider, base_url) in cases {
             let expected_name = match provider.id() {
                 "ant-ling" => "Ant Ling",
+                "anthropic" => "Anthropic",
                 "baseten" => "Baseten",
                 "cerebras" => "Cerebras",
                 "cloudflare-workers-ai" => "Cloudflare Workers AI",
+                "cloudflare-ai-gateway" => "Cloudflare AI Gateway",
                 "deepseek" => "DeepSeek",
                 "groq" => "Groq",
+                "fireworks" => "Fireworks",
+                "github-copilot" => "GitHub Copilot",
                 "huggingface" => "Hugging Face",
                 "moonshotai" => "Moonshot AI",
                 "moonshotai-cn" => "Moonshot AI CN",
+                "kimi-coding" => "Kimi For Coding",
+                "minimax" => "MiniMax",
+                "minimax-cn" => "MiniMax CN",
                 "nvidia" => "NVIDIA",
                 "qwen-token-plan" => "Qwen Token Plan",
                 "qwen-token-plan-cn" => "Qwen Token Plan CN",
@@ -195,6 +240,9 @@ mod tests {
                 "openai" => "OpenAI",
                 "openai-codex" => "OpenAI Codex",
                 "openrouter" => "OpenRouter",
+                "opencode" => "OpenCode Zen",
+                "opencode-go" => "OpenCode Go",
+                "vercel-ai-gateway" => "Vercel AI Gateway",
                 "xai" => "xAI",
                 id => panic!("unexpected provider {id}"),
             };
@@ -224,6 +272,14 @@ mod tests {
         assert!(codex.auth().api_key.is_none());
         assert!(codex.auth().oauth.is_some());
         for provider in [openrouter::openrouter_provider(), xai::xai_provider()] {
+            assert!(provider.auth().api_key.is_some());
+            assert!(provider.auth().oauth.is_some());
+        }
+        for provider in [
+            anthropic::anthropic_provider(),
+            kimi_coding::kimi_coding_provider(),
+            github_copilot::github_copilot_provider(),
+        ] {
             assert!(provider.auth().api_key.is_some());
             assert!(provider.auth().oauth.is_some());
         }

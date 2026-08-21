@@ -21,6 +21,7 @@
 //!   to the implementation is a terminal `error` event, mirroring the checked assertion on
 //!   pi's dynamic-dispatch path.
 
+pub mod anthropic_messages;
 pub mod constrained_sampling;
 pub mod github_copilot_headers;
 pub mod openai_codex_responses;
@@ -48,6 +49,7 @@ use futures::future::BoxFuture;
 #[derive(Debug, Clone)]
 pub enum ApiStreamOptions {
     Base(StreamOptions),
+    AnthropicMessages(anthropic_messages::AnthropicOptions),
     OpenAICompletions(openai_completions::OpenAICompletionsOptions),
     OpenAIResponses(openai_responses::OpenAIResponsesOptions),
     OpenAICodexResponses(openai_codex_responses::OpenAICodexResponsesOptions),

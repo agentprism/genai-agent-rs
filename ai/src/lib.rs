@@ -24,6 +24,9 @@ pub mod session_resources;
 pub mod types;
 pub mod utils;
 
+pub use api::anthropic_messages::{
+    AnthropicEffort, AnthropicMessagesClient, AnthropicOptions, AnthropicThinkingDisplay,
+};
 pub use auth::{context::*, credential_store::*, helpers::*, types::*};
 pub use event_stream::*;
 pub use models::*;

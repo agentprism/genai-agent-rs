@@ -103,7 +103,8 @@ impl ProviderStreams for OpenAIResponsesApi {
                 stream(model, context, OpenAIResponsesOptions::from(options))
             }
             ApiStreamOptions::OpenAIResponses(options) => stream(model, context, options),
-            ApiStreamOptions::OpenAICompletions(_)
+            ApiStreamOptions::AnthropicMessages(_)
+            | ApiStreamOptions::OpenAICompletions(_)
             | ApiStreamOptions::OpenAICodexResponses(_)
             | ApiStreamOptions::Custom { .. } => {
                 terminal_setup_error(model, "API options variant does not match openai-responses")

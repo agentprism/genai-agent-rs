@@ -128,7 +128,8 @@ impl ProviderStreams for OpenAICompletionsApi {
                 stream(model, context, OpenAICompletionsOptions::from(options))
             }
             ApiStreamOptions::OpenAICompletions(options) => stream(model, context, options),
-            ApiStreamOptions::OpenAIResponses(_)
+            ApiStreamOptions::AnthropicMessages(_)
+            | ApiStreamOptions::OpenAIResponses(_)
             | ApiStreamOptions::OpenAICodexResponses(_)
             | ApiStreamOptions::Custom { .. } => terminal_setup_error(
                 model,

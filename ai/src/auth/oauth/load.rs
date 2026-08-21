@@ -3,6 +3,9 @@ use crate::auth::types::{AuthError, AuthFuture, OAuthAuth};
 use std::sync::OnceLock;
 
 pub struct OAuthFlowLoaders {
+    pub anthropic: OAuthLoader,
+    pub github_copilot: OAuthLoader,
+    pub kimi_coding: OAuthLoader,
     pub openai_codex: OAuthLoader,
     pub openrouter: OAuthLoader,
     pub xai: OAuthLoader,
@@ -29,6 +32,18 @@ fn load(
             ))),
         }
     })
+}
+
+pub fn load_anthropic_oauth() -> AuthFuture<OAuthAuth> {
+    load(|loaders| &loaders.anthropic, "anthropic")
+}
+
+pub fn load_github_copilot_oauth() -> AuthFuture<OAuthAuth> {
+    load(|loaders| &loaders.github_copilot, "github-copilot")
+}
+
+pub fn load_kimi_coding_oauth() -> AuthFuture<OAuthAuth> {
+    load(|loaders| &loaders.kimi_coding, "kimi-coding")
 }
 
 pub fn load_openai_codex_oauth() -> AuthFuture<OAuthAuth> {

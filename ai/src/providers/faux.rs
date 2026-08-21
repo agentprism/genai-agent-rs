@@ -821,6 +821,7 @@ impl ProviderStreams for FauxCore {
     ) -> AssistantMessageEventStream {
         let stream = match options {
             ApiStreamOptions::Base(stream) => stream,
+            ApiStreamOptions::AnthropicMessages(options) => options.stream,
             ApiStreamOptions::OpenAICompletions(options) => options.stream,
             ApiStreamOptions::OpenAIResponses(options) => options.stream,
             ApiStreamOptions::OpenAICodexResponses(options) => options.stream,

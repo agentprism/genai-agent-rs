@@ -154,7 +154,8 @@ impl ProviderStreams for OpenAICodexResponsesApi {
         match options {
             ApiStreamOptions::Base(options) => stream(model, context, options.into()),
             ApiStreamOptions::OpenAICodexResponses(options) => stream(model, context, options),
-            ApiStreamOptions::OpenAICompletions(_)
+            ApiStreamOptions::AnthropicMessages(_)
+            | ApiStreamOptions::OpenAICompletions(_)
             | ApiStreamOptions::OpenAIResponses(_)
             | ApiStreamOptions::Custom { .. } => terminal_setup_error(
                 model,
