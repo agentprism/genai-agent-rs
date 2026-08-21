@@ -39,6 +39,7 @@ impl ProviderStreams for CloudflareStreams {
         let env = match &options {
             ApiStreamOptions::Base(options) => options.request.env.as_ref(),
             ApiStreamOptions::AnthropicMessages(options) => options.stream.request.env.as_ref(),
+            ApiStreamOptions::BedrockConverseStream(options) => options.stream.request.env.as_ref(),
             ApiStreamOptions::OpenAICompletions(options) => options.stream.request.env.as_ref(),
             ApiStreamOptions::OpenAIResponses(options) => options.stream.request.env.as_ref(),
             ApiStreamOptions::OpenAICodexResponses(options) => options.stream.request.env.as_ref(),

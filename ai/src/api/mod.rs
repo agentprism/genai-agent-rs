@@ -22,6 +22,7 @@
 //!   pi's dynamic-dispatch path.
 
 pub mod anthropic_messages;
+pub mod bedrock_converse_stream;
 pub mod constrained_sampling;
 pub mod github_copilot_headers;
 pub mod google_generative_ai;
@@ -53,6 +54,7 @@ use futures::future::BoxFuture;
 pub enum ApiStreamOptions {
     Base(StreamOptions),
     AnthropicMessages(anthropic_messages::AnthropicOptions),
+    BedrockConverseStream(bedrock_converse_stream::BedrockOptions),
     GoogleGenerativeAI(google_generative_ai::GoogleOptions),
     GoogleVertex(google_vertex::GoogleVertexOptions),
     OpenAICompletions(openai_completions::OpenAICompletionsOptions),

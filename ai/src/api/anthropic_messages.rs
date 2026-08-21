@@ -202,7 +202,8 @@ impl ProviderStreams for AnthropicMessagesApi {
         match options {
             ApiStreamOptions::Base(options) => stream(model, context, options.into()),
             ApiStreamOptions::AnthropicMessages(options) => stream(model, context, options),
-            ApiStreamOptions::OpenAICompletions(_)
+            ApiStreamOptions::BedrockConverseStream(_)
+            | ApiStreamOptions::OpenAICompletions(_)
             | ApiStreamOptions::OpenAIResponses(_)
             | ApiStreamOptions::OpenAICodexResponses(_)
             | ApiStreamOptions::GoogleGenerativeAI(_)
@@ -361,7 +362,7 @@ fn convert_content_blocks(content: &[UserContentBlock]) -> Value {
                 .iter()
                 .filter_map(|block| match block {
                     UserContentBlock::Text(text) => Some(text.text.as_str()),
-                    UserContentBlock::Image(_) => None,
+                    UserContentBlock::Image(_) | UserContentBlock::Unknown(_) => None,
                 })
                 .collect::<Vec<_>>()
                 .join("\n"),
@@ -369,18 +370,19 @@ fn convert_content_blocks(content: &[UserContentBlock]) -> Value {
     }
     let mut blocks = content
         .iter()
-        .map(|block| match block {
+        .filter_map(|block| match block {
             UserContentBlock::Text(text) => {
-                json!({"type":"text", "text":sanitize_surrogates(&text.text)})
+                Some(json!({"type":"text", "text":sanitize_surrogates(&text.text)}))
             }
-            UserContentBlock::Image(image) => json!({
+            UserContentBlock::Image(image) => Some(json!({
                 "type":"image",
                 "source":{
                     "type":"base64",
                     "media_type":image.mime_type,
                     "data":image.data,
                 }
-            }),
+            })),
+            UserContentBlock::Unknown(_) => None,
         })
         .collect::<Vec<_>>();
     if !blocks
@@ -492,6 +494,7 @@ fn convert_messages(
                                     "data":image.data,
                                 }
                             })),
+                            UserContentBlock::Unknown(_) => None,
                         })
                         .collect::<Vec<_>>();
                     if !blocks.is_empty() {
@@ -542,6 +545,7 @@ fn convert_messages(
                             "name":if is_oauth { to_claude_code_name(&call.name) } else { call.name.clone() },
                             "input":if call.arguments.is_null() { Value::Object(Map::new()) } else { call.arguments.clone() },
                         })),
+                        AssistantContent::Unknown(_) => {}
                     }
                 }
                 if !blocks.is_empty() {

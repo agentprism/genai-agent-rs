@@ -581,7 +581,7 @@ fn convert_tool_result_output(model: &Model, content: &[ToolResultContent]) -> T
         .iter()
         .filter_map(|block| match block {
             UserContentBlock::Text(text) => Some(text.text.as_str()),
-            UserContentBlock::Image(_) => None,
+            UserContentBlock::Image(_) | UserContentBlock::Unknown(_) => None,
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -589,7 +589,7 @@ fn convert_tool_result_output(model: &Model, content: &[ToolResultContent]) -> T
         .iter()
         .filter_map(|block| match block {
             UserContentBlock::Image(image) => Some(image),
-            UserContentBlock::Text(_) => None,
+            UserContentBlock::Text(_) | UserContentBlock::Unknown(_) => None,
         })
         .collect::<Vec<_>>();
     let has_text = !text.is_empty();
@@ -672,11 +672,12 @@ pub fn convert_responses_messages(
                     }],
                     UserContent::Blocks(blocks) => blocks
                         .iter()
-                        .map(|block| match block {
-                            UserContentBlock::Text(text) => ResponseInputContent::InputText {
+                        .filter_map(|block| match block {
+                            UserContentBlock::Text(text) => Some(ResponseInputContent::InputText {
                                 text: sanitize_surrogates(&text.text),
-                            },
-                            UserContentBlock::Image(image) => response_input_image(image),
+                            }),
+                            UserContentBlock::Image(image) => Some(response_input_image(image)),
+                            UserContentBlock::Unknown(_) => None,
                         })
                         .collect(),
                 };
@@ -794,6 +795,7 @@ pub fn convert_responses_messages(
                                 ));
                             }
                         }
+                        AssistantContent::Unknown(_) => {}
                     }
                 }
                 if messages.len() == output_start {

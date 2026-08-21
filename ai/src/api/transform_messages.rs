@@ -34,6 +34,10 @@ fn replace_images_with_placeholder(
                 result.push(UserContentBlock::Text(text.clone()));
                 previous_was_placeholder = text.text == placeholder;
             }
+            UserContentBlock::Unknown(value) => {
+                result.push(UserContentBlock::Unknown(value.clone()));
+                previous_was_placeholder = false;
+            }
         }
     }
     result
@@ -147,6 +151,7 @@ pub fn transform_messages(
                             }
                             content.push(AssistantContent::ToolCall(normalized));
                         }
+                        AssistantContent::Unknown(_) => content.push(block.clone()),
                     }
                 }
                 assistant.content = content.into();
@@ -177,7 +182,9 @@ pub fn transform_messages(
                     .iter()
                     .filter_map(|block| match block {
                         AssistantContent::ToolCall(tool_call) => Some(tool_call.clone()),
-                        AssistantContent::Text(_) | AssistantContent::Thinking(_) => None,
+                        AssistantContent::Text(_)
+                        | AssistantContent::Thinking(_)
+                        | AssistantContent::Unknown(_) => None,
                     })
                     .collect();
                 existing_tool_result_ids.clear();

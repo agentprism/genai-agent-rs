@@ -758,6 +758,7 @@ pub enum AssistantContent {
     Text(TextContent),
     Thinking(ThinkingContent),
     ToolCall(ToolCall),
+    Unknown(Value),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -839,6 +840,7 @@ impl<'de> Deserialize<'de> for AssistantMessageContent {
 pub enum UserContentBlock {
     Text(TextContent),
     Image(ImageContent),
+    Unknown(Value),
 }
 
 pub type ToolResultContent = UserContentBlock;

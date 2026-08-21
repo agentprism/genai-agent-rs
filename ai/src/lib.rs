@@ -13,6 +13,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod bedrock_provider;
 pub mod env_api_keys;
 pub mod event_stream;
 pub mod model_catalog;
@@ -27,6 +28,7 @@ pub mod utils;
 pub use api::anthropic_messages::{
     AnthropicEffort, AnthropicMessagesClient, AnthropicOptions, AnthropicThinkingDisplay,
 };
+pub use api::bedrock_converse_stream::{BedrockOptions, BedrockThinkingDisplay};
 pub use api::google_generative_ai::{
     GoogleGenerativeAIApi, GoogleOptions, GoogleThinkingOptions, GoogleToolChoice,
 };

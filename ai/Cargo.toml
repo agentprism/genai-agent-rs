@@ -20,13 +20,21 @@ adk-anthropic = "=1.0.0"
 # Ruled 2026-08-21: the selected Google SDK. The fidelity layer owns raw request conversion
 # because adk-gemini's typed request drops fields that pi's replacement-payload hook can add.
 adk-gemini = { version = "=1.0.0", features = ["vertex"] }
+aws-config = "1"
+aws-credential-types = "1"
+aws-sdk-bedrockruntime = "1"
+aws-smithy-runtime-api = { version = "1", features = ["client", "http-1x"] }
+aws-smithy-types = { version = "1", features = ["http-body-1-x"] }
+aws-types = "1"
 base64 = "0.23"
+bytes = "1"
 chrono = "0.4"
 eventsource-stream = "0.2"
 futures = "0.3"
 getrandom = "0.3"
 google-cloud-auth = { version = "=1.8.0", default-features = false, features = ["default-rustls-provider"] }
 http = "1"
+http-body = "1"
 httpdate = "1"
 hyper = { version = "1", features = ["http1"] }
 indexmap = { version = "2", features = ["serde"] }
@@ -49,7 +57,6 @@ zstd = "0.13"
 
 [dev-dependencies]
 # Hermetic HTTP/SSE test server for wire tests (same stack as the fork's yakbak harness).
-bytes = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["server"] }
 hyper-util = { version = "0.1", features = ["tokio", "http1"] }

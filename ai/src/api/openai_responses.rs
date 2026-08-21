@@ -104,6 +104,7 @@ impl ProviderStreams for OpenAIResponsesApi {
             }
             ApiStreamOptions::OpenAIResponses(options) => stream(model, context, options),
             ApiStreamOptions::AnthropicMessages(_)
+            | ApiStreamOptions::BedrockConverseStream(_)
             | ApiStreamOptions::OpenAICompletions(_)
             | ApiStreamOptions::OpenAICodexResponses(_)
             | ApiStreamOptions::GoogleGenerativeAI(_)

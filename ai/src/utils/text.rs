@@ -31,7 +31,7 @@ impl ContentText for [UserContentBlock] {
     fn append_text(&self, output: &mut Vec<String>) {
         output.extend(self.iter().filter_map(|block| match block {
             UserContentBlock::Text(text) => Some(text.text.clone()),
-            UserContentBlock::Image(_) => None,
+            UserContentBlock::Image(_) | UserContentBlock::Unknown(_) => None,
         }));
     }
 }
@@ -40,7 +40,9 @@ impl ContentText for [AssistantContent] {
     fn append_text(&self, output: &mut Vec<String>) {
         output.extend(self.iter().filter_map(|block| match block {
             AssistantContent::Text(text) => Some(text.text.clone()),
-            AssistantContent::Thinking(_) | AssistantContent::ToolCall(_) => None,
+            AssistantContent::Thinking(_)
+            | AssistantContent::ToolCall(_)
+            | AssistantContent::Unknown(_) => None,
         }));
     }
 }

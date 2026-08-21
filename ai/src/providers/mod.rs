@@ -1,3 +1,4 @@
+pub mod amazon_bedrock;
 pub mod ant_ling;
 pub mod anthropic;
 pub mod baseten;
@@ -116,6 +117,7 @@ mod tests {
     fn ported_provider_factories_preserve_identity_base_url_and_catalog() {
         let cases: Vec<(ProviderRef, &str)> = vec![
             (ant_ling::ant_ling_provider(), "https://api.ant-ling.com/v1"),
+            (amazon_bedrock::amazon_bedrock_provider(), ""),
             (anthropic::anthropic_provider(), "https://api.anthropic.com"),
             (
                 baseten::baseten_provider(),
@@ -218,6 +220,7 @@ mod tests {
         for (provider, base_url) in cases {
             let expected_name = match provider.id() {
                 "ant-ling" => "Ant Ling",
+                "amazon-bedrock" => "Amazon Bedrock",
                 "anthropic" => "Anthropic",
                 "baseten" => "Baseten",
                 "cerebras" => "Cerebras",

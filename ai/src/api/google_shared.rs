@@ -180,16 +180,17 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
                     UserContent::Text(text) => vec![json!({ "text": sanitize_surrogates(text) })],
                     UserContent::Blocks(blocks) => blocks
                         .iter()
-                        .map(|block| match block {
+                        .filter_map(|block| match block {
                             UserContentBlock::Text(text) => {
-                                json!({ "text": sanitize_surrogates(&text.text) })
+                                Some(json!({ "text": sanitize_surrogates(&text.text) }))
                             }
-                            UserContentBlock::Image(image) => json!({
+                            UserContentBlock::Image(image) => Some(json!({
                                 "inlineData": {
                                     "mimeType": image.mime_type,
                                     "data": image.data,
                                 }
-                            }),
+                            })),
+                            UserContentBlock::Unknown(_) => None,
                         })
                         .collect(),
                 };
@@ -284,6 +285,7 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
                             }
                             parts.push(Value::Object(part));
                         }
+                        AssistantContent::Unknown(_) => {}
                     }
                 }
                 if !parts.is_empty() {
@@ -296,7 +298,7 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
                     .iter()
                     .filter_map(|content| match content {
                         UserContentBlock::Text(text) => Some(text.text.as_str()),
-                        UserContentBlock::Image(_) => None,
+                        UserContentBlock::Image(_) | UserContentBlock::Unknown(_) => None,
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
@@ -312,6 +314,7 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
                                 }
                             })),
                             UserContentBlock::Text(_) => None,
+                            UserContentBlock::Unknown(_) => None,
                         })
                         .collect::<Vec<_>>()
                 } else {

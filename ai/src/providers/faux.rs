@@ -633,6 +633,9 @@ impl FauxCore {
                         })
                         .map_err(|error| error.to_string())?;
                 }
+                AssistantContent::Unknown(value) => {
+                    partial.content.push(AssistantContent::Unknown(value));
+                }
             }
         }
 
@@ -822,6 +825,7 @@ impl ProviderStreams for FauxCore {
         let stream = match options {
             ApiStreamOptions::Base(stream) => stream,
             ApiStreamOptions::AnthropicMessages(options) => options.stream,
+            ApiStreamOptions::BedrockConverseStream(options) => options.stream,
             ApiStreamOptions::OpenAICompletions(options) => options.stream,
             ApiStreamOptions::OpenAIResponses(options) => options.stream,
             ApiStreamOptions::OpenAICodexResponses(options) => options.stream,
@@ -1118,6 +1122,7 @@ fn user_content_block_to_text(content: &UserContentBlock) -> String {
         UserContentBlock::Image(ImageContent {
             mime_type, data, ..
         }) => format!("[image:{mime_type}:{}]", data.encode_utf16().count()),
+        UserContentBlock::Unknown(_) => String::new(),
     }
 }
 
@@ -1132,6 +1137,7 @@ fn assistant_content_to_text(content: &crate::types::AssistantMessageContent) ->
                 call.name,
                 serde_json::to_string(&call.arguments).unwrap_or_default()
             ),
+            AssistantContent::Unknown(_) => String::new(),
         })
         .collect::<Vec<_>>()
         .join("\n")

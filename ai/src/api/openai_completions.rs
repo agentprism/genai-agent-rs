@@ -129,6 +129,7 @@ impl ProviderStreams for OpenAICompletionsApi {
             }
             ApiStreamOptions::OpenAICompletions(options) => stream(model, context, options),
             ApiStreamOptions::AnthropicMessages(_)
+            | ApiStreamOptions::BedrockConverseStream(_)
             | ApiStreamOptions::OpenAIResponses(_)
             | ApiStreamOptions::OpenAICodexResponses(_)
             | ApiStreamOptions::GoogleGenerativeAI(_)
@@ -1378,6 +1379,7 @@ fn finish_blocks(
                     })
                     .map_err(CompletionError::display)?;
             }
+            AssistantContent::Unknown(_) => {}
         }
     }
     Ok(())
@@ -2034,20 +2036,21 @@ fn convert_messages_wire(
                     crate::types::UserContent::Blocks(blocks) => {
                         let parts = blocks
                             .iter()
-                            .map(|block| match block {
+                            .filter_map(|block| match block {
                                 crate::types::UserContentBlock::Text(text) => {
-                                    WireContentPart::Text {
+                                    Some(WireContentPart::Text {
                                         text: sanitize_surrogates(&text.text),
                                         cache_control: None,
-                                    }
+                                    })
                                 }
                                 crate::types::UserContentBlock::Image(image) => {
-                                    WireContentPart::ImageUrl {
+                                    Some(WireContentPart::ImageUrl {
                                         image_url: WireImageUrl {
                                             url: data_url(image),
                                         },
-                                    }
+                                    })
                                 }
+                                crate::types::UserContentBlock::Unknown(_) => None,
                             })
                             .collect::<Vec<_>>();
                         if parts.is_empty() {
@@ -2298,7 +2301,8 @@ fn append_tool_result_message(
         .iter()
         .filter_map(|block| match block {
             crate::types::UserContentBlock::Text(block) => Some(block.text.as_str()),
-            crate::types::UserContentBlock::Image(_) => None,
+            crate::types::UserContentBlock::Image(_)
+            | crate::types::UserContentBlock::Unknown(_) => None,
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -2334,6 +2338,7 @@ fn append_tool_result_message(
                 },
             }),
             crate::types::UserContentBlock::Text(_) => None,
+            crate::types::UserContentBlock::Unknown(_) => None,
         }));
     }
 }

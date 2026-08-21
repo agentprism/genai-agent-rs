@@ -52,6 +52,7 @@ fn block_chars(block: &UserContentBlock) -> usize {
     match block {
         UserContentBlock::Text(text) => utf16_len(&text.text),
         UserContentBlock::Image(_) => ESTIMATED_IMAGE_CHARS,
+        UserContentBlock::Unknown(_) => 0,
     }
 }
 
@@ -79,6 +80,7 @@ pub fn estimate_message_tokens(message: &Message) -> f64 {
                                     .unwrap_or_else(|_| "[unserializable]".to_owned()),
                             )
                     }
+                    AssistantContent::Unknown(_) => 0,
                 })
                 .sum(),
         ),

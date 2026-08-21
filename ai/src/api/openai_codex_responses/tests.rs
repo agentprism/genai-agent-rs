@@ -1168,7 +1168,9 @@ async fn zstd_compresses_every_sse_request_body_at_level_three() {
 fn message_text(message: &AssistantMessage) -> Option<&str> {
     message.content.iter().find_map(|content| match content {
         AssistantContent::Text(text) => Some(text.text.as_str()),
-        AssistantContent::Thinking(_) | AssistantContent::ToolCall(_) => None,
+        AssistantContent::Thinking(_)
+        | AssistantContent::ToolCall(_)
+        | AssistantContent::Unknown(_) => None,
     })
 }
 

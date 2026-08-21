@@ -1601,6 +1601,7 @@ impl RequestOptionsAccess for ApiStreamOptions {
         match self {
             Self::Base(options) => &options.request,
             Self::AnthropicMessages(options) => &options.stream.request,
+            Self::BedrockConverseStream(options) => &options.stream.request,
             Self::OpenAICompletions(options) => &options.stream.request,
             Self::OpenAIResponses(options) => &options.stream.request,
             Self::OpenAICodexResponses(options) => &options.stream.request,
@@ -1614,6 +1615,7 @@ impl RequestOptionsAccess for ApiStreamOptions {
         match self {
             Self::Base(options) => &mut options.request,
             Self::AnthropicMessages(options) => &mut options.stream.request,
+            Self::BedrockConverseStream(options) => &mut options.stream.request,
             Self::OpenAICompletions(options) => &mut options.stream.request,
             Self::OpenAIResponses(options) => &mut options.stream.request,
             Self::OpenAICodexResponses(options) => &mut options.stream.request,
