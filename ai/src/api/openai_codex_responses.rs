@@ -23,23 +23,27 @@ use crate::event_stream::{
 use crate::models::clamp_thinking_level;
 use crate::session_resources::register_session_resource_cleanup;
 use crate::types::{
-    AbortSignal, AssistantContent, AssistantMessage, AssistantMessageDiagnostic, CacheRetention,
-    Context, DiagnosticCode, DiagnosticErrorInfo, ErrorStopReason, Message, Model, ModelCompat,
-    ModelThinkingLevel, ProviderHttpRequest, ProviderHttpResponse, ProviderResponse,
-    SimpleStreamOptions, StopReason, StreamOptions, SuccessfulStopReason, ThinkingLevel, Tool,
-    ToolChoice, Transport, Usage, serialize_optional_js_f64,
+    AbortSignal, AssistantMessage, AssistantMessageDiagnostic, CacheRetention, Context,
+    DiagnosticCode, DiagnosticErrorInfo, ErrorStopReason, Message, Model, ModelThinkingLevel,
+    ProviderHttpRequest, ProviderHttpResponse, ProviderResponse, SimpleStreamOptions, StopReason,
+    StreamOptions, SuccessfulStopReason, ThinkingLevel, ToolChoice, Transport, Usage,
+    serialize_optional_js_f64,
 };
+#[cfg(test)]
+use crate::types::{AssistantContent, ModelCompat, Tool};
+use crate::utils::deferred_tools::split_deferred_tools_identity;
 use crate::utils::headers::headers_to_record;
 use crate::utils::pi_user_agent::get_pi_user_agent;
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use http::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Cursor;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -185,6 +189,7 @@ struct CodexRunError {
     kind: CodexErrorKind,
     diagnostic_name: &'static str,
     websocket_close_code: Option<u16>,
+    stack: String,
 }
 
 impl CodexRunError {
@@ -194,60 +199,54 @@ impl CodexRunError {
             kind: CodexErrorKind::Other,
             diagnostic_name: "Error",
             websocket_close_code: None,
+            stack: std::backtrace::Backtrace::force_capture().to_string(),
         }
     }
 
     fn aborted(message: impl Into<String>) -> Self {
         Self {
-            message: message.into(),
             kind: CodexErrorKind::Aborted,
-            diagnostic_name: "Error",
-            websocket_close_code: None,
+            ..Self::new(message)
         }
     }
 
     fn transport(message: impl Into<String>) -> Self {
         Self {
-            message: message.into(),
             kind: CodexErrorKind::Transport,
-            diagnostic_name: "Error",
-            websocket_close_code: None,
+            ..Self::new(message)
         }
     }
 
     fn websocket_close(message: impl Into<String>, code: Option<u16>) -> Self {
         Self {
-            message: message.into(),
             kind: CodexErrorKind::Transport,
             diagnostic_name: "WebSocketCloseError",
             websocket_close_code: code,
+            ..Self::new(message)
         }
     }
 
     fn protocol(message: impl Into<String>) -> Self {
         Self {
-            message: message.into(),
             kind: CodexErrorKind::Protocol,
             diagnostic_name: "CodexProtocolError",
-            websocket_close_code: None,
+            ..Self::new(message)
         }
     }
 
     fn api(message: impl Into<String>, code: Option<String>) -> Self {
         Self {
-            message: message.into(),
             kind: CodexErrorKind::Api { code },
             diagnostic_name: "CodexApiError",
-            websocket_close_code: None,
+            ..Self::new(message)
         }
     }
 
     fn retry_delay(message: impl Into<String>) -> Self {
         Self {
-            message: message.into(),
             kind: CodexErrorKind::RetryDelay,
             diagnostic_name: "RetryDelayExceededError",
-            websocket_close_code: None,
+            ..Self::new(message)
         }
     }
 
@@ -387,7 +386,21 @@ async fn run_stream(
     options: OpenAICodexResponsesOptions,
 ) {
     let mut output = pending_message(&model);
-    if let Err(error) = run_stream_inner(&sender, &model, &context, &options, &mut output).await {
+    let result = AssertUnwindSafe(run_stream_inner(
+        &sender,
+        &model,
+        &context,
+        &options,
+        &mut output,
+    ))
+    .catch_unwind()
+    .await
+    .unwrap_or_else(|panic| {
+        Err(CodexRunError::new(
+            crate::utils::diagnostics::format_panic_payload(panic.as_ref()),
+        ))
+    });
+    if let Err(error) = result {
         let aborted = is_aborted(&options) || matches!(error.kind, CodexErrorKind::Aborted);
         output.stop_reason = if aborted {
             StopReason::Aborted
@@ -631,7 +644,7 @@ fn append_transport_diagnostic(
         error: Some(DiagnosticErrorInfo {
             name: Some(error.diagnostic_name.to_owned()),
             message: error.message.clone(),
-            stack: None,
+            stack: Some(error.stack.clone()),
             code: error.diagnostic_code(),
         }),
         details: Some(details),
@@ -691,13 +704,16 @@ async fn process_websocket_stream(attempt: WebSocketAttempt<'_>) -> Result<(), C
         attempt_started,
     } = attempt;
     let url = resolve_codex_websocket_url(&model.base_url)?;
+    let websocket_connect_timeout_ms =
+        normalize_timeout_ms(options.stream.websocket_connect_timeout_ms)?;
+    let idle_timeout_ms = normalize_timeout_ms(options.stream.request.timeout_ms)?;
     let acquired = acquire_websocket(
         &url,
         headers,
         cache_session_id,
         account_id,
         options.stream.request.signal.clone(),
-        options.stream.websocket_connect_timeout_ms,
+        websocket_connect_timeout_ms,
     )
     .await?;
     let cached_context = matches!(
@@ -722,7 +738,7 @@ async fn process_websocket_stream(attempt: WebSocketAttempt<'_>) -> Result<(), C
     let mut events = websocket_event_stream(
         &acquired,
         options.stream.request.signal.clone(),
-        options.stream.request.timeout_ms,
+        idle_timeout_ms,
         sender.clone(),
         start_emitted,
         attempt_started,
@@ -843,58 +859,12 @@ fn response_items_for_continuation(
 }
 
 fn codex_compat(model: &Model) -> crate::types::OpenAIResponsesCompat {
-    match model.compat.as_ref() {
-        Some(ModelCompat::OpenAIResponses(compat)) => compat.clone(),
-        None | Some(_) => Default::default(),
-    }
-}
-
-fn split_deferred_tools(context: &Context, enabled: bool) -> (Vec<Tool>, Vec<(String, Tool)>) {
-    let mut unique = Vec::<(String, Tool)>::new();
-    for tool in context.tools.iter().flatten() {
-        if let Some((_, existing)) = unique.iter_mut().find(|(name, _)| name == &tool.name) {
-            *existing = tool.clone();
-        } else {
-            unique.push((tool.name.clone(), tool.clone()));
-        }
-    }
-    if !enabled {
-        return (
-            unique.into_iter().map(|(_, tool)| tool).collect(),
-            Vec::new(),
-        );
-    }
-    let mut deferred_names = BTreeSet::new();
-    let mut used_names = BTreeSet::new();
-    for message in &context.messages {
-        match message {
-            Message::Assistant(message) => {
-                for content in &message.content {
-                    if let AssistantContent::ToolCall(call) = content {
-                        used_names.insert(call.name.clone());
-                    }
-                }
-            }
-            Message::ToolResult(message) => {
-                for name in message.added_tool_names.iter().flatten() {
-                    if !used_names.contains(name) {
-                        deferred_names.insert(name.clone());
-                    }
-                }
-            }
-            Message::User(_) => {}
-        }
-    }
-    let mut immediate = Vec::new();
-    let mut deferred = Vec::new();
-    for (name, tool) in unique {
-        if deferred_names.contains(&name) {
-            deferred.push((name, tool));
-        } else {
-            immediate.push(tool);
-        }
-    }
-    (immediate, deferred)
+    model
+        .compat
+        .as_ref()
+        .and_then(|compat| serde_json::to_value(compat).ok())
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
 }
 
 #[derive(Serialize)]
@@ -951,7 +921,9 @@ fn build_request_body(
     } else {
         None
     };
-    let (immediate, deferred) = split_deferred_tools(context, deferred_mode.is_some());
+    let split = split_deferred_tools_identity(context, deferred_mode.is_some());
+    let immediate = split.immediate;
+    let deferred = split.deferred.into_iter().collect::<Vec<_>>();
     let allowed = CODEX_TOOL_CALL_PROVIDERS
         .into_iter()
         .map(str::to_owned)
@@ -1136,19 +1108,56 @@ fn extract_account_id(token: &str) -> Result<String, CodexRunError> {
         .get(1)
         .filter(|_| parts.len() == 3)
         .ok_or_else(|| CodexRunError::new("Failed to extract accountId from token"))?;
+    let payload = payload
+        .chars()
+        .filter(|character| !matches!(character, ' ' | '\t' | '\n' | '\r' | '\u{000c}'))
+        .collect::<String>();
     let bytes = STANDARD
-        .decode(payload)
-        .or_else(|_| STANDARD_NO_PAD.decode(payload))
+        .decode(&payload)
+        .or_else(|_| STANDARD_NO_PAD.decode(&payload))
         .map_err(|_| CodexRunError::new("Failed to extract accountId from token"))?;
-    let value: Value = serde_json::from_slice(&bytes)
+    let json_text = bytes.iter().copied().map(char::from).collect::<String>();
+    let value: Value = serde_json::from_str(&json_text)
         .map_err(|_| CodexRunError::new("Failed to extract accountId from token"))?;
-    value
+    let account_id = value
         .get(JWT_CLAIM_PATH)
         .and_then(|claim| claim.get("chatgpt_account_id"))
-        .and_then(Value::as_str)
-        .filter(|account_id| !account_id.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| CodexRunError::new("Failed to extract accountId from token"))
+        .filter(|account_id| js_truthy(account_id))
+        .ok_or_else(|| CodexRunError::new("Failed to extract accountId from token"))?;
+    Ok(js_string(account_id))
+}
+
+fn js_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value
+            .as_f64()
+            .is_some_and(|value| value != 0.0 && !value.is_nan()),
+        Value::String(value) => !value.is_empty(),
+        Value::Array(_) | Value::Object(_) => true,
+    }
+}
+
+fn js_string(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_owned(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => crate::utils::error_body::js_number_string(value),
+        Value::String(value) => value.clone(),
+        Value::Array(values) => values
+            .iter()
+            .map(|value| {
+                if value.is_null() {
+                    String::new()
+                } else {
+                    js_string(value)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        Value::Object(_) => "[object Object]".to_owned(),
+    }
 }
 
 fn is_aborted(options: &OpenAICodexResponsesOptions) -> bool {
@@ -1343,7 +1352,7 @@ async fn send_sse_with_header_timeout(
     headers: HeaderMap,
     body: Vec<u8>,
 ) -> Result<ProviderHttpResponse, CodexRunError> {
-    let timeout_ms = options.stream.request.timeout_ms;
+    let timeout_ms = normalize_timeout_ms(options.stream.request.timeout_ms)?;
     if let Some(timeout_ms) = timeout_ms.filter(|timeout| *timeout > 0) {
         let timeout_signal = Arc::new(HeaderTimeoutSignal {
             upstream: options.stream.request.signal.clone(),
@@ -1408,9 +1417,10 @@ async fn acquire_sse_response(
         .stream
         .request
         .max_retries
-        .unwrap_or(DEFAULT_MAX_RETRIES);
+        .unwrap_or(f64::from(DEFAULT_MAX_RETRIES));
     let mut last_error = None;
-    for attempt in 0..=max_retries {
+    let mut attempt = 0_u32;
+    while f64::from(attempt) <= max_retries {
         if is_aborted(options) {
             return Err(CodexRunError::aborted("Request was aborted"));
         }
@@ -1446,23 +1456,25 @@ async fn acquire_sse_response(
                             if matches!(error.kind, CodexErrorKind::Aborted) {
                                 return Err(error);
                             }
-                            if attempt < max_retries
+                            if f64::from(attempt) < max_retries
                                 && !matches!(error.kind, CodexErrorKind::RetryDelay)
                                 && !error.message.contains("usage limit")
                             {
                                 sleep_with_abort(exponential_delay(attempt), options).await?;
+                                attempt = attempt.saturating_add(1);
                                 continue;
                             }
                             return Err(error);
                         }
                     };
-                if attempt < max_retries && is_retryable_error(status, &error_text) {
+                if f64::from(attempt) < max_retries && is_retryable_error(status, &error_text) {
                     let delay = retry_after_delay_ms(&response_headers)
                         .map(|delay| validate_retry_delay(delay, options));
                     match delay.transpose()? {
                         Some(delay) => sleep_with_abort(delay, options).await?,
                         None => sleep_with_abort(exponential_delay(attempt), options).await?,
                     }
+                    attempt = attempt.saturating_add(1);
                     continue;
                 }
                 CodexRunError::new(parse_error_response(status, &status_text, &error_text))
@@ -1473,11 +1485,12 @@ async fn acquire_sse_response(
             return Err(CodexRunError::aborted("Request was aborted"));
         }
         last_error = Some(attempt_error.clone());
-        if attempt < max_retries
+        if f64::from(attempt) < max_retries
             && !matches!(attempt_error.kind, CodexErrorKind::RetryDelay)
             && !attempt_error.message.contains("usage limit")
         {
             sleep_with_abort(exponential_delay(attempt), options).await?;
+            attempt = attempt.saturating_add(1);
             continue;
         }
         return Err(attempt_error);
@@ -1493,9 +1506,10 @@ async fn sleep_with_abort(
     delay_ms: u64,
     options: &OpenAICodexResponsesOptions,
 ) -> Result<(), CodexRunError> {
+    let duration = crate::utils::sleep::duration_from_js_timeout(delay_ms as f64);
     tokio::select! {
         _ = wait_for_abort(options.stream.request.signal.clone()) => Err(CodexRunError::aborted("Request was aborted")),
-        _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => Ok(()),
+        _ = tokio::time::sleep(duration) => Ok(()),
     }
 }
 
@@ -1555,23 +1569,16 @@ fn retry_after_delay_ms(headers: &BTreeMap<String, String>) -> Option<u64> {
     {
         return duration_millis(seconds.max(0.0) * 1_000.0);
     }
-    let date = httpdate::parse_http_date(value).ok()?;
-    u64::try_from(
-        date.duration_since(SystemTime::now())
-            .unwrap_or_default()
-            .as_millis(),
-    )
-    .ok()
+    let date = parse_javascript_date_ms(value)?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+        * 1_000.0;
+    duration_millis((date - now).max(0.0))
 }
 
-fn parse_javascript_number(value: &str) -> Option<f64> {
-    let value = value.trim();
-    if value.is_empty() {
-        Some(0.0)
-    } else {
-        value.parse().ok()
-    }
-}
+use crate::utils::provider_retry::{parse_javascript_date_ms, parse_javascript_number};
 
 fn duration_millis(millis: f64) -> Option<u64> {
     let duration = Duration::try_from_secs_f64(millis / 1_000.0).ok()?;
@@ -1593,15 +1600,28 @@ fn validate_retry_delay(
         .stream
         .request
         .max_retry_delay_ms
-        .unwrap_or(DEFAULT_MAX_RETRY_DELAY_MS);
-    if maximum > 0 && delay_ms > maximum {
+        .unwrap_or(DEFAULT_MAX_RETRY_DELAY_MS as f64);
+    if maximum > 0.0 && delay_ms as f64 > maximum {
         return Err(CodexRunError::retry_delay(format!(
             "Server requested {}s retry delay (max: {}s)",
             delay_ms.div_ceil(1_000),
-            maximum.div_ceil(1_000)
+            (maximum / 1_000.0).ceil()
         )));
     }
     Ok(delay_ms)
+}
+
+fn normalize_timeout_ms(value: Option<f64>) -> Result<Option<u64>, CodexRunError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !value.is_finite() || value < 0.0 || value.floor() > u64::MAX as f64 {
+        return Err(CodexRunError::new(format!(
+            "Invalid timeoutMs: {}",
+            crate::utils::error_body::js_f64_string(value)
+        )));
+    }
+    Ok(Some(value.floor() as u64))
 }
 
 fn parse_error_response(status: u16, status_text: &str, raw: &str) -> String {
@@ -1662,16 +1682,6 @@ fn parse_error_response(status: u16, status_text: &str, raw: &str) -> String {
             .unwrap_or(message);
     }
     message
-}
-
-fn js_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(value) => *value,
-        Value::Number(value) => value.as_f64().is_some_and(|value| value != 0.0),
-        Value::String(value) => !value.is_empty(),
-        Value::Array(_) | Value::Object(_) => true,
-    }
 }
 
 #[cfg(test)]

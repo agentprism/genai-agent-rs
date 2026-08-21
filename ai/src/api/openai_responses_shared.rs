@@ -13,8 +13,8 @@ use crate::event_stream::{AssistantMessageEvent, AssistantStreamSender};
 use crate::models::calculate_cost;
 use crate::types::{
     AssistantContent, AssistantMessage, ImageContent, Message, Model, ModelInput, TextContent,
-    TextSignaturePhase, ThinkingContent, Tool, ToolCall, ToolResultContent, Usage, UserContent,
-    UserContentBlock,
+    TextSignaturePhase, ThinkingContent, Tool, ToolCall, ToolResultContent, Usage, UsageValue,
+    UserContent, UserContentBlock,
 };
 use crate::utils::hash::short_hash;
 use crate::utils::json_parse::parse_streaming_json;
@@ -491,13 +491,13 @@ pub struct OpenAIResponsesStreamOptions<'a> {
     pub capture_end_turn: bool,
 }
 
-fn encode_text_signature_v1(id: String, phase: Option<String>) -> String {
+fn encode_text_signature_v1(id: String, phase: Option<Value>) -> String {
     #[derive(Serialize)]
     struct Signature {
         v: u8,
         id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        phase: Option<String>,
+        phase: Option<Value>,
     }
 
     serde_json::to_string(&Signature { v: 1, id, phase }).expect("text signatures are serializable")
@@ -642,12 +642,15 @@ pub fn convert_responses_messages(
             .as_ref()
             .filter(|prompt| !prompt.is_empty())
     {
-        let supports_developer = match model.compat.as_ref() {
-            Some(crate::types::ModelCompat::OpenAIResponses(compat)) => {
-                compat.supports_developer_role.unwrap_or(true)
-            }
-            _ => true,
-        };
+        let supports_developer = model
+            .compat
+            .as_ref()
+            .and_then(|compat| serde_json::to_value(compat).ok())
+            .and_then(|value| {
+                serde_json::from_value::<crate::types::OpenAIResponsesCompat>(value).ok()
+            })
+            .and_then(|compat| compat.supports_developer_role)
+            .unwrap_or(true);
         messages.push(ResponseInputItem::Instruction(ResponseInstructionMessage {
             role: if model.reasoning && supports_developer {
                 ResponseInstructionRole::Developer
@@ -1030,11 +1033,11 @@ struct ResponseFailure {
 #[derive(Debug, Deserialize)]
 struct ResponseUsage {
     #[serde(default)]
-    input_tokens: Option<u64>,
+    input_tokens: Option<UsageValue>,
     #[serde(default)]
-    output_tokens: Option<u64>,
+    output_tokens: Option<UsageValue>,
     #[serde(default)]
-    total_tokens: Option<u64>,
+    total_tokens: Option<UsageValue>,
     #[serde(default)]
     input_tokens_details: Option<ResponseInputTokenDetails>,
     #[serde(default)]
@@ -1044,15 +1047,15 @@ struct ResponseUsage {
 #[derive(Debug, Deserialize)]
 struct ResponseInputTokenDetails {
     #[serde(default)]
-    cached_tokens: Option<u64>,
+    cached_tokens: Option<UsageValue>,
     #[serde(default)]
-    cache_write_tokens: Option<u64>,
+    cache_write_tokens: Option<UsageValue>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ResponseOutputTokenDetails {
     #[serde(default)]
-    reasoning_tokens: Option<u64>,
+    reasoning_tokens: Option<UsageValue>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1153,8 +1156,8 @@ struct ReasoningText {
 #[derive(Debug, Deserialize)]
 struct MessageItem {
     id: String,
-    #[serde(default, deserialize_with = "deserialize_truthy_phase_string")]
-    phase: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_truthy_phase")]
+    phase: Option<Value>,
     #[serde(default)]
     content: Vec<OutputMessageContent>,
 }
@@ -1174,14 +1177,19 @@ enum OutputMessageContent {
     Unknown,
 }
 
-fn deserialize_truthy_phase_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+fn deserialize_truthy_phase<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    Ok(Value::deserialize(deserializer)?
-        .as_str()
-        .filter(|phase| !phase.is_empty())
-        .map(str::to_owned))
+    let value = Value::deserialize(deserializer)?;
+    let truthy = match &value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_f64().is_some_and(|value| value != 0.0),
+        Value::String(value) => !value.is_empty(),
+        Value::Array(_) | Value::Object(_) => true,
+    };
+    Ok(truthy.then_some(value))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1255,7 +1263,7 @@ enum OutputSlot {
 }
 
 fn apply_message_phase_stop_reason(item: &OutputItem, output: &mut AssistantMessage) {
-    if matches!(item, OutputItem::Message(MessageItem { phase: Some(phase), .. }) if phase == "final_answer")
+    if matches!(item, OutputItem::Message(MessageItem { phase: Some(phase), .. }) if phase.as_str() == Some("final_answer"))
     {
         output.stop_reason = crate::types::StopReason::Stop;
     }
@@ -1500,34 +1508,37 @@ fn finalize_response(
         output.response_id = Some(id);
     }
     if let Some(usage) = response.usage {
-        let cached = usage
-            .input_tokens_details
-            .as_ref()
-            .and_then(|details| details.cached_tokens)
-            .unwrap_or(0);
-        let cache_write = usage
-            .input_tokens_details
-            .as_ref()
-            .and_then(|details| details.cache_write_tokens)
-            .unwrap_or(0);
+        let js_or_zero =
+            |value: Option<UsageValue>| value.filter(UsageValue::is_truthy).unwrap_or_default();
+        let cached = js_or_zero(
+            usage
+                .input_tokens_details
+                .as_ref()
+                .and_then(|details| details.cached_tokens.clone()),
+        );
+        let cache_write = js_or_zero(
+            usage
+                .input_tokens_details
+                .as_ref()
+                .and_then(|details| details.cache_write_tokens.clone()),
+        );
+        let input = (js_or_zero(usage.input_tokens).as_number()
+            - cached.as_number()
+            - cache_write.as_number())
+        .max(0.0);
         output.usage = Usage {
-            input: usage
-                .input_tokens
-                .unwrap_or(0)
-                .saturating_sub(cached)
-                .saturating_sub(cache_write),
-            output: usage.output_tokens.unwrap_or(0),
+            input: input.into(),
+            output: js_or_zero(usage.output_tokens),
             cache_read: cached,
             cache_write,
             cache_write_1h: None,
-            reasoning: Some(
+            reasoning: Some(js_or_zero(
                 usage
                     .output_tokens_details
                     .as_ref()
-                    .and_then(|details| details.reasoning_tokens)
-                    .unwrap_or(0),
-            ),
-            total_tokens: usage.total_tokens.unwrap_or(0),
+                    .and_then(|details| details.reasoning_tokens.clone()),
+            )),
+            total_tokens: js_or_zero(usage.total_tokens),
             cost: Default::default(),
         };
     }
@@ -2022,7 +2033,7 @@ mod tests {
     ) -> Message {
         let mut message = AssistantMessage::pending(api, provider, model, timestamp);
         message.role = AssistantRole::Assistant;
-        message.content = content;
+        message.content = content.into();
         message.stop_reason = StopReason::ToolUse;
         Message::Assistant(Box::new(message))
     }
@@ -2572,7 +2583,8 @@ mod tests {
         source.content = vec![
             AssistantContent::ToolCall(function),
             AssistantContent::ToolCall(custom),
-        ];
+        ]
+        .into();
         let targets = [
             model("openai-responses", "openai", "gpt-5.2"),
             model("openai-responses", "azure-openai-responses", "gpt-5.4"),

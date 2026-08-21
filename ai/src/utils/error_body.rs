@@ -4,6 +4,30 @@ use serde_json::Value;
 
 pub const MAX_PROVIDER_ERROR_BODY_CHARS: usize = 4_000;
 
+pub(crate) fn trim_javascript_whitespace(value: &str) -> &str {
+    value.trim_matches(|character| {
+        matches!(
+            character,
+            '\u{0009}'
+                | '\u{000a}'
+                | '\u{000b}'
+                | '\u{000c}'
+                | '\u{000d}'
+                | '\u{0020}'
+                | '\u{00a0}'
+                | '\u{1680}'
+                | '\u{2000}'
+                ..='\u{200a}'
+                    | '\u{2028}'
+                    | '\u{2029}'
+                    | '\u{202f}'
+                    | '\u{205f}'
+                    | '\u{3000}'
+                    | '\u{feff}'
+        )
+    })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProviderErrorBody {
     Text(String),
@@ -126,6 +150,68 @@ pub fn truncate_error_text(text: &str, max_chars: usize) -> String {
 
 pub fn safe_json_stringify(value: &Value) -> String {
     serde_json::to_string(&normalize_json_numbers(value)).unwrap_or_else(|_| value.to_string())
+}
+
+pub fn js_number_string(number: &serde_json::Number) -> String {
+    let Some(value) = number.as_f64() else {
+        return number.to_string();
+    };
+    if value == 0.0 {
+        return "0".to_owned();
+    }
+    if value.fract() == 0.0 && value.abs() < 1e21 {
+        return format!("{value:.0}");
+    }
+    let rendered = number.to_string();
+    let Some((mantissa, exponent)) = rendered
+        .split_once('e')
+        .or_else(|| rendered.split_once('E'))
+    else {
+        return rendered;
+    };
+    let Ok(exponent) = exponent.parse::<i32>() else {
+        return rendered;
+    };
+    if (-6..21).contains(&exponent) {
+        let negative = mantissa.starts_with('-');
+        let mantissa = mantissa.trim_start_matches('-');
+        let dot = mantissa.find('.').unwrap_or(mantissa.len());
+        let digits = mantissa.replace('.', "");
+        let decimal = i32::try_from(dot).unwrap_or(i32::MAX) + exponent;
+        let mut output = if decimal <= 0 {
+            format!("0.{}{}", "0".repeat((-decimal) as usize), digits)
+        } else if usize::try_from(decimal).is_ok_and(|decimal| decimal >= digits.len()) {
+            format!(
+                "{}{}",
+                digits,
+                "0".repeat(usize::try_from(decimal).unwrap_or(usize::MAX) - digits.len())
+            )
+        } else {
+            let decimal = usize::try_from(decimal).expect("positive decimal position");
+            format!("{}.{}", &digits[..decimal], &digits[decimal..])
+        };
+        if negative {
+            output.insert(0, '-');
+        }
+        output
+    } else {
+        format!(
+            "{mantissa}e{}{exponent}",
+            if exponent >= 0 { "+" } else { "" }
+        )
+    }
+}
+
+pub fn js_f64_string(number: f64) -> String {
+    if number.is_nan() {
+        "NaN".to_owned()
+    } else if number == f64::INFINITY {
+        "Infinity".to_owned()
+    } else if number == f64::NEG_INFINITY {
+        "-Infinity".to_owned()
+    } else {
+        js_number_string(&serde_json::Number::from_f64(number).expect("finite JSON number"))
+    }
 }
 
 fn normalize_json_numbers(value: &Value) -> Value {

@@ -1,6 +1,7 @@
 //! Header conversion ⇐ pi `src/utils/headers.ts`.
 
 use crate::types::ProviderHeaders;
+use indexmap::IndexMap;
 use std::collections::BTreeMap;
 
 pub fn headers_to_record(headers: &http::HeaderMap) -> BTreeMap<String, String> {
@@ -29,17 +30,19 @@ pub fn headers_to_record(headers: &http::HeaderMap) -> BTreeMap<String, String> 
 
 pub fn provider_headers_to_record(
     headers: Option<&ProviderHeaders>,
-) -> Option<BTreeMap<String, String>> {
+) -> Option<IndexMap<String, String>> {
     let result = headers?
         .iter()
         .filter_map(|(key, value)| value.as_ref().map(|value| (key.clone(), value.clone())))
-        .collect::<BTreeMap<_, _>>();
+        .collect::<IndexMap<_, _>>();
     (!result.is_empty()).then_some(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{headers_to_record, provider_headers_to_record};
+    use crate::types::ProviderHeaders;
+    use indexmap::IndexMap;
     use std::collections::BTreeMap;
 
     /// Derived from pi `src/utils/headers.ts:3-18`.
@@ -57,18 +60,31 @@ mod tests {
             ])
         );
 
-        let provider = BTreeMap::from([
+        let provider = ProviderHeaders::from([
             ("keep".to_owned(), Some("yes".to_owned())),
             ("remove".to_owned(), None),
         ]);
         assert_eq!(
             provider_headers_to_record(Some(&provider)),
-            Some(BTreeMap::from([("keep".to_owned(), "yes".to_owned())]))
+            Some(IndexMap::from([("keep".to_owned(), "yes".to_owned())]))
         );
         assert_eq!(
-            provider_headers_to_record(Some(&BTreeMap::from([("x".to_owned(), None)]))),
+            provider_headers_to_record(Some(&ProviderHeaders::from([("x".to_owned(), None)]))),
             None
         );
         assert_eq!(provider_headers_to_record(None), None);
+
+        let provider = ProviderHeaders::from([
+            ("z-last".to_owned(), Some("1".to_owned())),
+            ("a-first".to_owned(), Some("2".to_owned())),
+        ]);
+        assert_eq!(
+            provider_headers_to_record(Some(&provider))
+                .expect("headers")
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["z-last", "a-first"]
+        );
     }
 }

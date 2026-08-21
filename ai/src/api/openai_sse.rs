@@ -23,7 +23,7 @@ pub(crate) struct OpenAiSseRequest {
     pub body: Vec<u8>,
     pub fetch: Option<Arc<dyn FetchFunction>>,
     pub signal: Option<Arc<dyn AbortSignal>>,
-    pub timeout_ms: Option<u64>,
+    pub timeout_ms: Option<f64>,
 }
 
 pub(crate) struct AcquiredSse {
@@ -266,12 +266,17 @@ async fn send_request(request: &OpenAiSseRequest) -> Result<ProviderHttpResponse
     };
     tokio::pin!(send);
 
-    let timeout_ms = request.timeout_ms.unwrap_or(600_000);
+    let timeout_ms = request.timeout_ms.unwrap_or(600_000.0);
+    let timeout = if timeout_ms.is_finite() && timeout_ms > 0.0 {
+        Duration::from_secs_f64(timeout_ms / 1_000.0)
+    } else {
+        Duration::ZERO
+    };
     tokio::select! {
         () = wait_for_abort(request.signal.clone()) => {
             Err(OpenAiHttpError::transport("Request was aborted.", true))
         }
-        () = tokio::time::sleep(Duration::from_millis(timeout_ms)) => {
+        () = tokio::time::sleep(timeout) => {
             Err(OpenAiHttpError::transport("Request timed out.", false))
         }
         response = &mut send => response,
@@ -531,7 +536,7 @@ fn js_string(value: &Value) -> String {
     match value {
         Value::Null => "null".to_owned(),
         Value::Bool(value) => value.to_string(),
-        Value::Number(_) => safe_json_stringify(value),
+        Value::Number(number) => crate::utils::error_body::js_number_string(number),
         Value::String(value) => value.clone(),
         Value::Array(values) => values
             .iter()
@@ -591,6 +596,12 @@ mod tests {
         }));
         assert_eq!(error.to_string(), "1");
         assert_eq!(error.formatted(true), "1\n2");
+
+        let exponent = OpenAiSseError::api(json!({
+            "message": "failed",
+            "metadata": {"raw": 0.0000001}
+        }));
+        assert_eq!(exponent.formatted(true), "failed\n1e-7");
 
         let body = futures::stream::iter(vec![Ok::<_, String>(
             b"data: {\"error\":\"scalar failure\"}\n\n".to_vec(),

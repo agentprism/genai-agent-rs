@@ -20,21 +20,25 @@ use crate::event_stream::{
 };
 use crate::models::clamp_thinking_level;
 use crate::types::{
-    CacheRetention, Context, ErrorStopReason, Model, ModelCompat, ModelThinkingLevel,
-    OpenAIResponsesCompat, ProviderEnv, ProviderHeaders, SessionAffinityFormat,
-    SimpleStreamOptions, StopReason, StreamOptions, SuccessfulStopReason, ThinkingLevel, Tool,
-    ToolChoice, Usage, serialize_optional_js_f64,
+    CacheRetention, Context, ErrorStopReason, Model, ModelThinkingLevel, OpenAIResponsesCompat,
+    ProviderEnv, ProviderHeaders, SessionAffinityFormat, SimpleStreamOptions, StopReason,
+    StreamOptions, SuccessfulStopReason, ThinkingLevel, ToolChoice, Usage,
+    serialize_optional_js_f64,
 };
-use crate::utils::pi_user_agent::get_pi_user_agent;
+#[cfg(test)]
+use crate::types::{ModelCompat, Tool};
+use crate::utils::deferred_tools::split_deferred_tools_identity;
+use crate::utils::pi_user_agent::{get_pi_user_agent, openai_sdk_platform_headers};
 use crate::utils::provider_env::get_provider_env_value;
 use crate::utils::provider_retry::{
     ProviderRetryError, ProviderRetryOptions, retry_provider_request,
 };
-use futures::{StreamExt, stream::BoxStream};
+use futures::{FutureExt, StreamExt, stream::BoxStream};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::panic::AssertUnwindSafe;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS: u64 = 16;
@@ -259,7 +263,21 @@ async fn run_stream(
     options: OpenAIResponsesOptions,
 ) {
     let mut output = pending_message(&model);
-    if let Err(error) = run_stream_inner(&sender, &model, &context, &options, &mut output).await {
+    let result = AssertUnwindSafe(run_stream_inner(
+        &sender,
+        &model,
+        &context,
+        &options,
+        &mut output,
+    ))
+    .catch_unwind()
+    .await
+    .unwrap_or_else(|panic| {
+        Err(ResponsesRunError::new(
+            crate::utils::diagnostics::format_panic_payload(panic.as_ref()),
+        ))
+    });
+    if let Err(error) = result {
         let aborted = options
             .stream
             .request
@@ -291,15 +309,6 @@ async fn run_stream_inner(
     options: &OpenAIResponsesOptions,
     output: &mut crate::types::AssistantMessage,
 ) -> Result<(), ResponsesRunError> {
-    if model
-        .compat
-        .as_ref()
-        .is_some_and(|compat| !matches!(compat, ModelCompat::OpenAIResponses(_)))
-    {
-        return Err(ResponsesRunError::new(
-            "Model compat variant does not match openai-responses",
-        ));
-    }
     let api_key = get_client_api_key(
         model.provider.as_str(),
         options.stream.request.api_key.as_deref(),
@@ -325,6 +334,7 @@ async fn run_stream_inner(
         options.stream.request.headers.as_ref(),
         cache_session_id,
         &compat,
+        options.stream.request.timeout_ms,
     )?;
     let mut params = build_params(
         model,
@@ -532,10 +542,12 @@ fn resolve_cache_retention(
 }
 
 fn get_compat(model: &Model) -> ResolvedCompat {
-    let configured = match model.compat.as_ref() {
-        Some(ModelCompat::OpenAIResponses(compat)) => compat,
-        _ => &OpenAIResponsesCompat::default(),
-    };
+    let configured = model
+        .compat
+        .as_ref()
+        .and_then(|compat| serde_json::to_value(compat).ok())
+        .and_then(|value| serde_json::from_value::<OpenAIResponsesCompat>(value).ok())
+        .unwrap_or_default();
     ResolvedCompat {
         session_affinity_format: configured
             .session_affinity_format
@@ -558,12 +570,14 @@ fn create_headers(
     options_headers: Option<&ProviderHeaders>,
     session_id: Option<&str>,
     compat: &ResolvedCompat,
+    timeout_ms: Option<f64>,
 ) -> Result<BTreeMap<String, String>, ResponsesRunError> {
     let mut headers = BTreeMap::from([
         ("Accept".to_owned(), "application/json".to_owned()),
         ("Content-Type".to_owned(), "application/json".to_owned()),
         ("User-Agent".to_owned(), get_pi_user_agent()),
     ]);
+    headers.extend(openai_sdk_platform_headers(timeout_ms));
     if let Some(model_headers) = &model.headers {
         headers.extend(model_headers.clone());
     }
@@ -613,55 +627,6 @@ fn prompt_cache_retention(
         .then(|| "24h".to_owned())
 }
 
-fn split_deferred_tools(context: &Context, enabled: bool) -> (Vec<Tool>, Vec<(String, Tool)>) {
-    let mut unique = Vec::<(String, Tool)>::new();
-    for tool in context.tools.iter().flatten() {
-        if let Some((_, existing)) = unique.iter_mut().find(|(name, _)| name == &tool.name) {
-            *existing = tool.clone();
-        } else {
-            unique.push((tool.name.clone(), tool.clone()));
-        }
-    }
-    if !enabled {
-        return (
-            unique.into_iter().map(|(_, tool)| tool).collect(),
-            Vec::new(),
-        );
-    }
-
-    let mut deferred_names = BTreeSet::new();
-    let mut used_names = BTreeSet::new();
-    for message in &context.messages {
-        match message {
-            crate::types::Message::Assistant(message) => {
-                for block in &message.content {
-                    if let crate::types::AssistantContent::ToolCall(tool_call) = block {
-                        used_names.insert(tool_call.name.clone());
-                    }
-                }
-            }
-            crate::types::Message::ToolResult(message) => {
-                for name in message.added_tool_names.iter().flatten() {
-                    if !used_names.contains(name) {
-                        deferred_names.insert(name.clone());
-                    }
-                }
-            }
-            crate::types::Message::User(_) => {}
-        }
-    }
-    let mut immediate = Vec::new();
-    let mut deferred = Vec::new();
-    for (name, tool) in unique {
-        if deferred_names.contains(&name) {
-            deferred.push((name, tool));
-        } else {
-            immediate.push(tool);
-        }
-    }
-    (immediate, deferred)
-}
-
 fn thinking_mapping(model: &Model, level: ThinkingLevel) -> Option<&Option<String>> {
     let map = model.thinking_level_map.as_ref()?;
     match level {
@@ -699,7 +664,9 @@ fn build_params(
     } else {
         None
     };
-    let (immediate_tools, deferred_tools) = split_deferred_tools(context, deferred_mode.is_some());
+    let split = split_deferred_tools_identity(context, deferred_mode.is_some());
+    let immediate_tools = split.immediate;
+    let deferred_tools = split.deferred.into_iter().collect::<Vec<_>>();
     let allowed_providers = OPENAI_TOOL_CALL_PROVIDERS
         .into_iter()
         .map(str::to_owned)
@@ -1928,7 +1895,7 @@ mod tests {
         .await;
         let model = base_model(server.base_url.clone(), "gpt-5.4");
         let mut request_options = options();
-        request_options.stream.request.max_retries = Some(1);
+        request_options.stream.request.max_retries = Some(1.0);
         let (message, _) = run_and_capture(model, context(), request_options, &server).await;
         assert_eq!(message.stop_reason, StopReason::Stop);
         assert_eq!(
@@ -1960,7 +1927,7 @@ mod tests {
     async fn custom_authorization_is_sent_exactly_once() {
         let server = start_server(vec![completed_script()]).await;
         let mut request_options = options();
-        request_options.stream.request.headers = Some(BTreeMap::from([(
+        request_options.stream.request.headers = Some(ProviderHeaders::from([(
             "authorization".to_owned(),
             Some("Bearer caller-token".to_owned()),
         )]));

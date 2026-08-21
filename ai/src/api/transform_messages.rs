@@ -149,7 +149,7 @@ pub fn transform_messages(
                         }
                     }
                 }
-                assistant.content = content;
+                assistant.content = content.into();
                 transformed.push(Message::Assistant(assistant));
             }
         }
@@ -417,7 +417,7 @@ mod tests {
             model.id.clone(),
             1,
         );
-        message.content = content;
+        message.content = content.into();
         message.stop_reason = StopReason::Stop;
         message
     }
@@ -502,6 +502,7 @@ mod tests {
                 AssistantContent::Thinking(redacted),
                 AssistantContent::Text(text),
             ]
+            .into()
         );
 
         let foreign = Message::Assistant(Box::new(foreign_assistant(vec![
@@ -527,6 +528,7 @@ mod tests {
                 AssistantContent::Text(TextContent::new("reasoning")),
                 AssistantContent::Text(TextContent::new("answer")),
             ]
+            .into()
         );
     }
 
@@ -815,6 +817,9 @@ mod tests {
         let Message::Assistant(assistant) = &transformed[0] else {
             panic!("assistant")
         };
-        assert_eq!(assistant.content, vec![AssistantContent::ToolCall(call)]);
+        assert_eq!(
+            assistant.content,
+            vec![AssistantContent::ToolCall(call)].into()
+        );
     }
 }

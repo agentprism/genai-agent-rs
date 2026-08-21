@@ -20,27 +20,30 @@ use crate::event_stream::{
     AssistantMessageEvent, AssistantMessageEventStream, AssistantStreamSender,
 };
 use crate::models::{calculate_cost, clamp_thinking_level};
+#[cfg(test)]
+use crate::types::ModelCompat;
 use crate::types::{
     AssistantContent, AssistantMessage, CacheControlFormat, CacheRetention, ChatTemplateKwargValue,
     Context, DeferredToolsMode, ErrorStopReason, ImageContent, MaxTokensField, Message, Model,
-    ModelCompat, ModelInput, ModelThinkingLevel, OpenAICompletionsCompat, OpenRouterRouting,
-    ProviderEnv, ProviderHeaders, SessionAffinityFormat, SimpleStreamOptions, StopReason,
-    StreamOptions, SuccessfulStopReason, TextContent, ThinkingBudgets, ThinkingContent,
-    ThinkingFormat, ThinkingLevel, ThinkingTokenBudgetField, ThinkingVariable, Tool, ToolCall,
-    ToolChoice, ToolResultMessage, Usage, VercelGatewayRouting, serialize_optional_js_f64,
+    ModelInput, ModelThinkingLevel, OpenAICompletionsCompat, OpenRouterRouting, ProviderEnv,
+    ProviderHeaders, SessionAffinityFormat, SimpleStreamOptions, StopReason, StreamOptions,
+    SuccessfulStopReason, TextContent, ThinkingBudgets, ThinkingContent, ThinkingFormat,
+    ThinkingLevel, ThinkingTokenBudgetField, ThinkingVariable, Tool, ToolCall, ToolChoice,
+    ToolResultMessage, Usage, UsageValue, VercelGatewayRouting, serialize_optional_js_f64,
 };
 use crate::utils::json_parse::parse_streaming_json;
-use crate::utils::pi_user_agent::get_pi_user_agent;
+use crate::utils::pi_user_agent::{get_pi_user_agent, openai_sdk_platform_headers};
 use crate::utils::provider_env::get_provider_env_value;
 use crate::utils::provider_retry::{
     ProviderRetryError, ProviderRetryOptions, retry_provider_request,
 };
 use crate::utils::sanitize_unicode::sanitize_surrogates;
-use futures::{StreamExt, stream::BoxStream};
+use futures::{FutureExt, StreamExt, stream::BoxStream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::panic::AssertUnwindSafe;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -444,7 +447,20 @@ async fn run_stream(
     options: OpenAICompletionsOptions,
 ) {
     let mut output = pending_message(&model);
-    let result = run_stream_inner(&sender, &model, &context, &options, &mut output).await;
+    let result = AssertUnwindSafe(run_stream_inner(
+        &sender,
+        &model,
+        &context,
+        &options,
+        &mut output,
+    ))
+    .catch_unwind()
+    .await
+    .unwrap_or_else(|panic| {
+        Err(CompletionError::new(
+            crate::utils::diagnostics::format_panic_payload(panic.as_ref()),
+        ))
+    });
     if let Err(error) = result {
         output.stop_reason = if options
             .stream
@@ -478,15 +494,6 @@ async fn run_stream_inner(
     options: &OpenAICompletionsOptions,
     output: &mut AssistantMessage,
 ) -> Result<(), CompletionError> {
-    if model
-        .compat
-        .as_ref()
-        .is_some_and(|compat| !matches!(compat, ModelCompat::OpenAICompletions(_)))
-    {
-        return Err(CompletionError::new(
-            "Model compat variant does not match openai-completions",
-        ));
-    }
     let api_key = get_client_api_key(
         model.provider.as_str(),
         options.stream.request.api_key.as_deref(),
@@ -512,6 +519,7 @@ async fn run_stream_inner(
         options.stream.request.headers.as_ref(),
         cache_session_id,
         &compat,
+        options.stream.request.timeout_ms,
     )?;
     let mut params = build_params(
         model,
@@ -721,12 +729,14 @@ fn create_headers(
     options_headers: Option<&ProviderHeaders>,
     session_id: Option<&str>,
     compat: &ResolvedCompat,
+    timeout_ms: Option<f64>,
 ) -> Result<BTreeMap<String, String>, CompletionError> {
     let mut headers = BTreeMap::from([
         ("Accept".to_owned(), "application/json".to_owned()),
         ("Content-Type".to_owned(), "application/json".to_owned()),
         ("User-Agent".to_owned(), get_pi_user_agent()),
     ]);
+    headers.extend(openai_sdk_platform_headers(timeout_ms));
     if let Some(model_headers) = &model.headers {
         headers.extend(model_headers.clone());
     }
@@ -930,39 +940,32 @@ struct RawCustomDelta {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct RawUsage {
-    #[serde(default, deserialize_with = "deserialize_nonnegative_u64")]
-    prompt_tokens: Option<u64>,
-    #[serde(default, deserialize_with = "deserialize_nonnegative_u64")]
-    completion_tokens: Option<u64>,
-    #[serde(default, deserialize_with = "deserialize_nonnegative_u64")]
-    cached_tokens: Option<u64>,
-    #[serde(default, deserialize_with = "deserialize_nonnegative_u64")]
-    prompt_cache_hit_tokens: Option<u64>,
+    #[serde(default)]
+    prompt_tokens: Option<UsageValue>,
+    #[serde(default)]
+    completion_tokens: Option<UsageValue>,
+    #[serde(default)]
+    cached_tokens: Option<UsageValue>,
+    #[serde(default)]
+    prompt_cache_hit_tokens: Option<UsageValue>,
     #[serde(default, deserialize_with = "deserialize_struct_or_none")]
     prompt_tokens_details: Option<RawPromptDetails>,
     #[serde(default, deserialize_with = "deserialize_struct_or_none")]
     completion_tokens_details: Option<RawCompletionDetails>,
 }
 
-fn deserialize_nonnegative_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(Value::deserialize(deserializer)?.as_u64())
-}
-
 #[derive(Debug, Clone, Default, Deserialize)]
 struct RawPromptDetails {
-    #[serde(default, deserialize_with = "deserialize_nonnegative_u64")]
-    cached_tokens: Option<u64>,
-    #[serde(default, deserialize_with = "deserialize_nonnegative_u64")]
-    cache_write_tokens: Option<u64>,
+    #[serde(default)]
+    cached_tokens: Option<UsageValue>,
+    #[serde(default)]
+    cache_write_tokens: Option<UsageValue>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct RawCompletionDetails {
-    #[serde(default, deserialize_with = "deserialize_nonnegative_u64")]
-    reasoning_tokens: Option<u64>,
+    #[serde(default)]
+    reasoning_tokens: Option<UsageValue>,
 }
 
 #[derive(Debug, Default)]
@@ -1374,37 +1377,42 @@ fn finish_blocks(
 }
 
 fn parse_chunk_usage(raw: &RawUsage, model: &Model) -> Usage {
-    let prompt_tokens = raw.prompt_tokens.unwrap_or(0);
+    let js_or_zero =
+        |value: Option<UsageValue>| value.filter(UsageValue::is_truthy).unwrap_or_default();
+    let prompt_tokens = js_or_zero(raw.prompt_tokens.clone());
     let cache_read = raw
         .prompt_tokens_details
         .as_ref()
-        .and_then(|details| details.cached_tokens)
-        .or(raw.prompt_cache_hit_tokens)
-        .or(raw.cached_tokens)
-        .unwrap_or(0);
-    let cache_write = raw
-        .prompt_tokens_details
-        .as_ref()
-        .and_then(|details| details.cache_write_tokens)
-        .unwrap_or(0);
-    let input = prompt_tokens.saturating_sub(cache_read.saturating_add(cache_write));
-    let output_tokens = raw.completion_tokens.unwrap_or(0);
+        .and_then(|details| details.cached_tokens.clone())
+        .or_else(|| raw.prompt_cache_hit_tokens.clone())
+        .or_else(|| raw.cached_tokens.clone())
+        .unwrap_or_default();
+    let cache_write = js_or_zero(
+        raw.prompt_tokens_details
+            .as_ref()
+            .and_then(|details| details.cache_write_tokens.clone()),
+    );
+    let input =
+        (prompt_tokens.as_number() - cache_read.as_number() - cache_write.as_number()).max(0.0);
+    let output_tokens = js_or_zero(raw.completion_tokens.clone());
+    let reasoning = js_or_zero(
+        raw.completion_tokens_details
+            .as_ref()
+            .and_then(|details| details.reasoning_tokens.clone()),
+    );
+    let input_value: UsageValue = input.into();
+    let total_tokens = input_value
+        .js_add(&output_tokens)
+        .js_add(&cache_read)
+        .js_add(&cache_write);
     let mut usage = Usage {
-        input,
+        input: input_value,
         output: output_tokens,
         cache_read,
         cache_write,
         cache_write_1h: None,
-        reasoning: Some(
-            raw.completion_tokens_details
-                .as_ref()
-                .and_then(|details| details.reasoning_tokens)
-                .unwrap_or(0),
-        ),
-        total_tokens: input
-            .saturating_add(output_tokens)
-            .saturating_add(cache_read)
-            .saturating_add(cache_write),
+        reasoning: Some(reasoning),
+        total_tokens,
         cost: Default::default(),
     };
     calculate_cost(model, &mut usage);
@@ -1559,7 +1567,7 @@ fn build_params(
     {
         request.dialect.insert(
             thinking_budget_field_name(field).to_owned(),
-            Value::from(thinking_budget),
+            crate::types::js_f64_value(thinking_budget),
         );
     }
     if let Some(routing) = &compat.open_router_routing {
@@ -1624,7 +1632,7 @@ fn resolve_clamped_thinking_budget(
     model: &Model,
     options: &OpenAICompletionsOptions,
     request: &WireRequest,
-) -> Option<u64> {
+) -> Option<f64> {
     let effort = options.reasoning_effort?;
     if !model.reasoning {
         return None;
@@ -1635,16 +1643,16 @@ fn resolve_clamped_thinking_budget(
         .unwrap_or(model.max_tokens);
     let budget = clamp_thinking_budget_to_answer_room(
         thinking_budget_for_level(effort, options.thinking_budgets.as_ref()),
-        ceiling,
+        ceiling as f64,
     );
-    (budget > 0).then_some(budget)
+    (budget > 0.0).then_some(budget)
 }
 
 fn apply_thinking_parameters(
     model: &Model,
     options: &OpenAICompletionsOptions,
     compat: &ResolvedCompat,
-    thinking_budget: Option<u64>,
+    thinking_budget: Option<f64>,
     dialect: &mut Map<String, Value>,
 ) -> Result<(), CompletionError> {
     if !model.reasoning {
@@ -1851,7 +1859,7 @@ fn build_chat_template_values(
     model: &Model,
     options: &OpenAICompletionsOptions,
     values: &BTreeMap<String, ChatTemplateKwargValue>,
-    thinking_budget: Option<u64>,
+    thinking_budget: Option<f64>,
 ) -> Result<Option<Map<String, Value>>, CompletionError> {
     let mut resolved = Map::new();
     for (key, value) in values {
@@ -1866,7 +1874,7 @@ fn resolve_chat_template_value(
     model: &Model,
     options: &OpenAICompletionsOptions,
     value: &ChatTemplateKwargValue,
-    thinking_budget: Option<u64>,
+    thinking_budget: Option<f64>,
 ) -> Result<Option<Value>, CompletionError> {
     match value {
         ChatTemplateKwargValue::String(value) => Ok(Some(Value::String(value.clone()))),
@@ -1884,7 +1892,7 @@ fn resolve_chat_template_value(
                 ThinkingVariable::Enabled => {
                     Ok(Some(Value::Bool(options.reasoning_effort.is_some())))
                 }
-                ThinkingVariable::Budget => Ok(thinking_budget.map(Value::from)),
+                ThinkingVariable::Budget => Ok(thinking_budget.map(crate::types::js_f64_value)),
                 ThinkingVariable::Effort => {
                     Ok(resolve_defined_effort(model, options.reasoning_effort)
                         .or_else(|| {
@@ -2574,10 +2582,14 @@ fn detect_compat(model: &Model) -> ResolvedCompat {
 
 fn get_compat(model: &Model) -> ResolvedCompat {
     let mut resolved = detect_compat(model);
-    let Some(ModelCompat::OpenAICompletions(compat)) = model.compat.as_ref() else {
+    let Some(compat) = model.compat.as_ref() else {
         return resolved;
     };
-    apply_compat(&mut resolved, compat);
+    let compat = serde_json::to_value(compat)
+        .ok()
+        .and_then(|value| serde_json::from_value::<OpenAICompletionsCompat>(value).ok())
+        .unwrap_or_default();
+    apply_compat(&mut resolved, &compat);
     resolved
 }
 
@@ -3008,6 +3020,24 @@ mod tests {
         events.result().await.unwrap()
     }
 
+    /// Pins pi `src/api/openai-completions.ts:663-683`: thrown provider work is
+    /// converted into an in-band terminal error.
+    #[tokio::test]
+    async fn provider_task_panic_is_terminal_in_band() {
+        let mut request_options = options();
+        request_options.stream.request.on_payload = Some(Arc::new(|_, _| {
+            Box::pin(async { panic!("payload hook panic") })
+        }));
+        let message = run_message(
+            &model("https://example.invalid/v1".to_owned()),
+            &context(),
+            request_options,
+        )
+        .await;
+        assert_eq!(message.stop_reason, StopReason::Error);
+        assert_eq!(message.error_message.as_deref(), Some("payload hook panic"));
+    }
+
     fn completions_compat(value: OpenAICompletionsCompat) -> Option<ModelCompat> {
         Some(ModelCompat::OpenAICompletions(Box::new(value)))
     }
@@ -3301,7 +3331,8 @@ mod tests {
             "call-1",
             "bootstrap",
             Map::new(),
-        ))];
+        ))]
+        .into();
         let tool_result = Message::ToolResult(Box::new(ToolResultMessage {
             role: ToolResultRole::ToolResult,
             tool_call_id: "call-1".to_owned(),
@@ -3343,7 +3374,7 @@ mod tests {
     }
 
     /// Pins pi `src/api/openai-completions.ts:539-566,1491-1509`: wrong-typed
-    /// content, reasoning, and usage fields are ignored during chunk decoding.
+    /// content is ignored while truthy usage values retain JavaScript semantics.
     #[test]
     fn raw_chunk_tolerance_matches_pi_source() {
         let chunk: RawChunk = serde_json::from_value(json!({
@@ -3360,16 +3391,34 @@ mod tests {
         }))
         .unwrap();
         let usage = chunk.usage.expect("usage object");
-        assert_eq!(usage.prompt_tokens, None);
-        assert_eq!(usage.completion_tokens, None);
+        assert_eq!(
+            serde_json::to_value(&usage.prompt_tokens).unwrap(),
+            json!(1.5)
+        );
+        assert_eq!(
+            serde_json::to_value(&usage.completion_tokens).unwrap(),
+            json!("2")
+        );
         assert!(usage.prompt_tokens_details.is_none());
         let choice = chunk.choices.first().expect("choice");
         let delta = choice.delta.as_ref().expect("delta object");
         assert_eq!(delta.content, None);
         assert_eq!(delta.reasoning, None);
         let usage = choice.usage.as_ref().expect("choice usage");
-        assert_eq!(usage.prompt_tokens, None);
-        assert_eq!(usage.completion_tokens, None);
+        assert_eq!(
+            serde_json::to_value(&usage.prompt_tokens).unwrap(),
+            json!(1.5)
+        );
+        assert_eq!(
+            serde_json::to_value(&usage.completion_tokens).unwrap(),
+            json!("2")
+        );
+        let parsed = parse_chunk_usage(usage, &model("https://example.invalid/v1".to_owned()));
+        let parsed = serde_json::to_value(parsed).expect("usage wire");
+        assert_eq!(parsed["input"], 1.5);
+        assert_eq!(parsed["output"], "2");
+        assert_eq!(parsed["reasoning"], 0);
+        assert_eq!(parsed["totalTokens"], "1.5200");
 
         let chunk: RawChunk = serde_json::from_value(json!({"choices":null,"usage":null})).unwrap();
         assert!(chunk.choices.is_empty());
@@ -3388,8 +3437,8 @@ mod tests {
         let mut request_options = options();
         request_options.reasoning_effort = Some(ThinkingLevel::Medium);
         request_options.thinking_budgets = Some(ThinkingBudgets {
-            medium: Some(4_096),
-            high: Some(8_192),
+            medium: Some(4_096.0),
+            high: Some(8_192.0),
             ..ThinkingBudgets::default()
         });
 
@@ -3503,7 +3552,7 @@ mod tests {
         assistant.reasoning_details = Some(vec![signed.clone()]);
         let mut call = ToolCall::new("call-1", "read", Map::new());
         call.thought_signature = Some(serde_json::to_string(&encrypted).unwrap());
-        assistant.content = vec![AssistantContent::ToolCall(call)];
+        assistant.content = vec![AssistantContent::ToolCall(call)].into();
         let replay_context = Context {
             system_prompt: None,
             messages: vec![Message::Assistant(Box::new(assistant.clone()))],
@@ -3528,7 +3577,8 @@ mod tests {
         let mut thinking_only =
             AssistantMessage::pending("openai-completions", "openrouter", "test-model", 3);
         thinking_only.stop_reason = StopReason::Stop;
-        thinking_only.content = vec![AssistantContent::Thinking(ThinkingContent::new("private"))];
+        thinking_only.content =
+            vec![AssistantContent::Thinking(ThinkingContent::new("private"))].into();
         let messages = convert_messages(
             &test_model,
             &Context {
@@ -3578,7 +3628,8 @@ mod tests {
             "call-1",
             "read",
             Map::new(),
-        ))];
+        ))]
+        .into();
         let messages = convert_messages(
             &test_model,
             &Context {
@@ -3658,15 +3709,15 @@ mod tests {
 
         let usage = parse_chunk_usage(
             &RawUsage {
-                prompt_tokens: Some(100),
-                completion_tokens: Some(30),
-                cached_tokens: Some(20),
+                prompt_tokens: Some(100.into()),
+                completion_tokens: Some(30.into()),
+                cached_tokens: Some(20.into()),
                 prompt_tokens_details: Some(RawPromptDetails {
-                    cached_tokens: Some(10),
-                    cache_write_tokens: Some(5),
+                    cached_tokens: Some(10.into()),
+                    cache_write_tokens: Some(5.into()),
                 }),
                 completion_tokens_details: Some(RawCompletionDetails {
-                    reasoning_tokens: Some(12),
+                    reasoning_tokens: Some(12.into()),
                 }),
                 ..RawUsage::default()
             },
@@ -3676,7 +3727,7 @@ mod tests {
         assert_eq!(usage.output, 30);
         assert_eq!(usage.cache_read, 10);
         assert_eq!(usage.cache_write, 5);
-        assert_eq!(usage.reasoning, Some(12));
+        assert_eq!(usage.reasoning, Some(12.into()));
         assert_eq!(usage.total_tokens, 130);
     }
 
@@ -3830,7 +3881,7 @@ mod tests {
         assert!(body.get("prompt_cache_retention").is_none());
 
         request_options.stream.cache_retention = None;
-        request_options.stream.request.env = Some(BTreeMap::from([(
+        request_options.stream.request.env = Some(ProviderEnv::from([(
             "PI_CACHE_RETENTION".to_owned(),
             "long".to_owned(),
         )]));
@@ -3924,7 +3975,8 @@ mod tests {
             "t1",
             "noop",
             Map::new(),
-        ))];
+        ))]
+        .into();
         let tool_history = Context {
             system_prompt: None,
             messages: vec![
@@ -4062,7 +4114,7 @@ mod tests {
         test_model.base_url.clone_from(&server.base_url);
         let mut request_options = options();
         request_options.stream.session_id = Some("generated".to_owned());
-        request_options.stream.request.headers = Some(BTreeMap::from([
+        request_options.stream.request.headers = Some(ProviderHeaders::from([
             ("session_id".to_owned(), Some("explicit-session".to_owned())),
             (
                 "x-client-request-id".to_owned(),
@@ -4137,7 +4189,8 @@ mod tests {
             "call_1",
             "read",
             Map::from_iter([("path".to_owned(), Value::String("README.md".to_owned()))]),
-        ))];
+        ))]
+        .into();
         let tool_context = Context {
             system_prompt: Some("System prompt".to_owned()),
             messages: vec![
@@ -4448,7 +4501,8 @@ mod tests {
         assistant.content = vec![
             AssistantContent::Thinking(ThinkingContent::new("internal reasoning")),
             AssistantContent::Text(TextContent::new("visible answer")),
-        ];
+        ]
+        .into();
         let test_context = Context {
             system_prompt: None,
             messages: vec![
@@ -4493,7 +4547,7 @@ mod tests {
         simple.stream.request.api_key = Some("test".to_owned());
         simple.reasoning = Some(ThinkingLevel::Medium);
         simple.thinking_budgets = Some(ThinkingBudgets {
-            medium: Some(4_096),
+            medium: Some(4_096.0),
             ..ThinkingBudgets::default()
         });
         let mut event_stream = stream_simple(&test_model, &context(), simple);
@@ -4564,7 +4618,8 @@ mod tests {
         assistant.content = vec![
             AssistantContent::ToolCall(ToolCall::new("tool-1", "read", Map::new())),
             AssistantContent::ToolCall(ToolCall::new("tool-2", "read", Map::new())),
-        ];
+        ]
+        .into();
         let tool_result = |id: &str, image: bool| {
             let mut content = vec![crate::types::UserContentBlock::Text(TextContent::new(
                 if image { "read image" } else { "" },
@@ -4654,7 +4709,7 @@ mod tests {
         assert_eq!(message.usage.output, 30);
         assert_eq!(message.usage.cache_read, 20);
         assert_eq!(message.usage.cache_write, 10);
-        assert_eq!(message.usage.reasoning, Some(12));
+        assert_eq!(message.usage.reasoning, Some(12.into()));
         assert_eq!(message.usage.total_tokens, 130);
 
         let server = start_server(
@@ -5044,7 +5099,7 @@ mod tests {
         )
         .await;
         let mut request_options = options();
-        request_options.stream.request.max_retries = Some(2);
+        request_options.stream.request.max_retries = Some(2.0);
         let mut event_stream = stream(&model(server.base_url.clone()), &context(), request_options);
         while event_stream.next().await.is_some() {}
         let message = event_stream.result().await.unwrap();
@@ -5065,7 +5120,7 @@ mod tests {
             .sampling_params
             .get_or_insert_with(Map::new)
             .insert("model".to_owned(), Value::String("caller-model".to_owned()));
-        request_options.stream.request.headers = Some(BTreeMap::from([(
+        request_options.stream.request.headers = Some(ProviderHeaders::from([(
             "Authorization".to_owned(),
             Some("Bearer upstream-token".to_owned()),
         )]));
@@ -5113,7 +5168,8 @@ mod tests {
             "call-1",
             "read",
             Map::new(),
-        ))];
+        ))]
+        .into();
         assistant.stop_reason = StopReason::ToolUse;
         let test_context = Context {
             system_prompt: None,
@@ -5167,7 +5223,7 @@ mod tests {
     async fn custom_authorization_is_sent_exactly_once() {
         let server = start_server(vec![Script::sse(vec![stop_chunk("test-model")])], false).await;
         let mut request_options = options();
-        request_options.stream.request.headers = Some(BTreeMap::from([(
+        request_options.stream.request.headers = Some(ProviderHeaders::from([(
             "authorization".to_owned(),
             Some("Bearer caller-token".to_owned()),
         )]));
@@ -5265,8 +5321,8 @@ mod tests {
             .insert("retry-after".to_owned(), "61".to_owned());
         let seconds_server = start_server(vec![seconds], false).await;
         let mut request_options = options();
-        request_options.stream.request.max_retries = Some(1);
-        request_options.stream.request.max_retry_delay_ms = Some(60_000);
+        request_options.stream.request.max_retries = Some(1.0);
+        request_options.stream.request.max_retry_delay_ms = Some(60_000.0);
         assert_eq!(
             run_message(
                 &model(seconds_server.base_url.clone()),
@@ -5290,7 +5346,7 @@ mod tests {
         )
         .await;
         let mut request_options = options();
-        request_options.stream.request.max_retries = Some(1);
+        request_options.stream.request.max_retries = Some(1.0);
         let started = std::time::Instant::now();
         let message = run_message(
             &model(delayed_server.base_url.clone()),
@@ -5311,7 +5367,7 @@ mod tests {
         )
         .await;
         let mut request_options = options();
-        request_options.stream.request.max_retries = Some(1);
+        request_options.stream.request.max_retries = Some(1.0);
         assert_eq!(
             run_message(
                 &model(forced_server.base_url.clone()),
@@ -5333,7 +5389,7 @@ mod tests {
         )
         .await;
         let mut request_options = options();
-        request_options.stream.request.max_retries = Some(1);
+        request_options.stream.request.max_retries = Some(1.0);
         assert_eq!(
             run_message(
                 &model(denied_server.base_url.clone()),
@@ -5352,8 +5408,8 @@ mod tests {
             .insert("retry-after-ms".to_owned(), "61000".to_owned());
         let capped_server = start_server(vec![capped], false).await;
         let mut request_options = options();
-        request_options.stream.request.max_retries = Some(1);
-        request_options.stream.request.max_retry_delay_ms = Some(60_000);
+        request_options.stream.request.max_retries = Some(1.0);
+        request_options.stream.request.max_retry_delay_ms = Some(60_000.0);
         let message = run_message(
             &model(capped_server.base_url.clone()),
             &context(),

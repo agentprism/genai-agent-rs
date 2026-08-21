@@ -1,6 +1,7 @@
 //! Abortable provider-request retries ⇐ pi `src/utils/provider-retry.ts`.
 
 use crate::types::AbortSignal;
+use crate::utils::sleep::duration_from_js_timeout;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
@@ -8,12 +9,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const DEFAULT_MAX_RETRY_DELAY_MS: u64 = 60_000;
+const DEFAULT_MAX_RETRY_DELAY_MS: f64 = 60_000.0;
 
 #[derive(Clone, Default)]
 pub struct ProviderRetryOptions {
-    pub max_retries: Option<u32>,
-    pub max_retry_delay_ms: Option<u64>,
+    pub max_retries: Option<f64>,
+    pub max_retry_delay_ms: Option<f64>,
     pub signal: Option<Arc<dyn AbortSignal>>,
 }
 
@@ -87,7 +88,7 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, E>>,
 {
-    let max_retries = options.max_retries.unwrap_or(0);
+    let max_retries = options.max_retries.unwrap_or(0.0);
     let mut retries_remaining = max_retries;
 
     loop {
@@ -105,12 +106,12 @@ where
                 let Some(metadata) = error.provider_error_metadata() else {
                     return Err(ProviderRetryError::Original(error));
                 };
-                if retries_remaining == 0 || !is_retryable_provider_error(metadata) {
+                if retries_remaining <= 0.0 || !is_retryable_provider_error(metadata) {
                     return Err(ProviderRetryError::Original(error));
                 }
 
                 let retry_index = max_retries - retries_remaining;
-                retries_remaining -= 1;
+                retries_remaining -= 1.0;
                 let delay = get_retry_delay(
                     metadata,
                     retry_index,
@@ -144,8 +145,8 @@ fn is_retryable_provider_error(metadata: &ProviderErrorMetadata) -> bool {
 
 fn get_retry_delay<E>(
     metadata: &ProviderErrorMetadata,
-    retry_index: u32,
-    max_retry_delay_ms: Option<u64>,
+    retry_index: f64,
+    max_retry_delay_ms: Option<f64>,
     provider_message: &str,
 ) -> Result<Duration, ProviderRetryError<E>> {
     if let Some(value) = header(metadata, "retry-after-ms").and_then(parse_js_float) {
@@ -155,32 +156,34 @@ fn get_retry_delay<E>(
     if let Some(value) = header(metadata, "retry-after").filter(|value| !value.is_empty()) {
         let delay_ms = parse_js_float(value).map_or_else(
             || {
-                httpdate::parse_http_date(value)
-                    .ok()
-                    .and_then(|date| date.duration_since(SystemTime::now()).ok())
-                    .map_or(0.0, |duration| duration.as_secs_f64() * 1_000.0)
+                parse_javascript_date_ms(value).map_or(0.0, |date| {
+                    date - SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs_f64()
+                        * 1_000.0
+                })
             },
             |seconds| seconds * 1_000.0,
         );
         return validate_server_retry_delay(delay_ms, max_retry_delay_ms, provider_message);
     }
 
-    let exponent = i32::try_from(retry_index).unwrap_or(i32::MAX);
-    let exponential_ms = (0.5 * 2_f64.powi(exponent)).min(8.0) * 1_000.0;
+    let exponential_ms = (0.5 * 2_f64.powf(retry_index)).min(8.0) * 1_000.0;
     let jitter = 1.0 - pseudo_random_fraction() * 0.25;
     Ok(duration_from_js_timeout(exponential_ms * jitter))
 }
 
 fn validate_server_retry_delay<E>(
     delay_ms: f64,
-    max_retry_delay_ms: Option<u64>,
+    max_retry_delay_ms: Option<f64>,
     provider_message: &str,
 ) -> Result<Duration, ProviderRetryError<E>> {
     let maximum = max_retry_delay_ms.unwrap_or(DEFAULT_MAX_RETRY_DELAY_MS);
-    if maximum > 0 && delay_ms > maximum as f64 {
+    if maximum > 0.0 && delay_ms > maximum {
         return Err(ProviderRetryError::ServerDelay {
             requested_seconds: ceil_seconds(delay_ms),
-            maximum_seconds: ceil_seconds(maximum as f64),
+            maximum_seconds: ceil_seconds(maximum),
             provider_message: provider_message.to_owned(),
         });
     }
@@ -197,18 +200,8 @@ fn ceil_seconds(milliseconds: f64) -> String {
     }
 }
 
-fn duration_from_js_timeout(milliseconds: f64) -> Duration {
-    if milliseconds == f64::INFINITY {
-        Duration::from_millis(1)
-    } else if !milliseconds.is_finite() || milliseconds <= 0.0 {
-        Duration::ZERO
-    } else {
-        Duration::from_secs_f64((milliseconds / 1_000.0).min(Duration::MAX.as_secs_f64()))
-    }
-}
-
 fn parse_js_float(value: &str) -> Option<f64> {
-    let trimmed = value.trim_start();
+    let trimmed = crate::utils::error_body::trim_javascript_whitespace(value);
     let bytes = trimmed.as_bytes();
     let mut end = 0;
     if matches!(bytes.first(), Some(b'+' | b'-')) {
@@ -251,6 +244,82 @@ fn parse_js_float(value: &str) -> Option<f64> {
         }
     }
     trimmed[..end].parse().ok()
+}
+
+pub(crate) fn parse_javascript_number(value: &str) -> Option<f64> {
+    let value = crate::utils::error_body::trim_javascript_whitespace(value);
+    if value.is_empty() {
+        return Some(0.0);
+    }
+    let radix = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .map(|digits| (16, digits))
+        .or_else(|| {
+            value
+                .strip_prefix("0b")
+                .or_else(|| value.strip_prefix("0B"))
+                .map(|digits| (2, digits))
+        })
+        .or_else(|| {
+            value
+                .strip_prefix("0o")
+                .or_else(|| value.strip_prefix("0O"))
+                .map(|digits| (8, digits))
+        });
+    if let Some((radix, digits)) = radix {
+        return Some(u128::from_str_radix(digits, radix).ok()? as f64);
+    }
+    match value {
+        "Infinity" | "+Infinity" => Some(f64::INFINITY),
+        "-Infinity" => Some(f64::NEG_INFINITY),
+        _ => value.parse().ok(),
+    }
+}
+
+pub(crate) fn parse_javascript_date_ms(value: &str) -> Option<f64> {
+    use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
+
+    if let Ok(date) = DateTime::parse_from_rfc2822(value) {
+        return Some(date.timestamp_millis() as f64);
+    }
+    if let Ok(date) = DateTime::parse_from_rfc3339(value) {
+        return Some(date.timestamp_millis() as f64);
+    }
+    if let Ok(date) = httpdate::parse_http_date(value) {
+        return date
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_secs_f64() * 1_000.0);
+    }
+    for format in [
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S",
+        "%m/%d/%Y %H:%M:%S",
+        "%B %d, %Y %H:%M:%S",
+    ] {
+        if let Ok(date) = NaiveDateTime::parse_from_str(value, format)
+            && let Some(date) = Local.from_local_datetime(&date).earliest()
+        {
+            return Some(date.timestamp_millis() as f64);
+        }
+    }
+    for format in ["%Y-%m-%d", "%m/%d/%Y", "%B %d, %Y"] {
+        if let Ok(date) = NaiveDate::parse_from_str(value, format)
+            && let Some(date) = date.and_hms_opt(0, 0, 0)
+        {
+            let date = if format == "%Y-%m-%d" {
+                Utc.from_utc_datetime(&date).timestamp_millis()
+            } else {
+                Local
+                    .from_local_datetime(&date)
+                    .earliest()?
+                    .timestamp_millis()
+            };
+            return Some(date as f64);
+        }
+    }
+    None
 }
 
 fn pseudo_random_fraction() -> f64 {
@@ -390,7 +459,7 @@ mod tests {
                     }
                 },
                 ProviderRetryOptions {
-                    max_retries: Some(1),
+                    max_retries: Some(1.0),
                     ..ProviderRetryOptions::default()
                 },
             )
@@ -414,7 +483,7 @@ mod tests {
                 async { Err::<(), _>(provider_error(Some(429), &[("x-should-retry", "false")])) }
             },
             ProviderRetryOptions {
-                max_retries: Some(2),
+                max_retries: Some(2.0),
                 ..ProviderRetryOptions::default()
             },
         )
@@ -442,15 +511,15 @@ mod tests {
             status: Some(429),
             headers: BTreeMap::new(),
         };
-        let first = get_retry_delay::<TestError>(&metadata, 0, None, "error").expect("delay");
+        let first = get_retry_delay::<TestError>(&metadata, 0.0, None, "error").expect("delay");
         assert!((Duration::from_millis(375)..=Duration::from_millis(500)).contains(&first));
         let empty_header = ProviderErrorMetadata {
             status: Some(429),
             headers: BTreeMap::from([("retry-after".to_owned(), String::new())]),
         };
-        let empty = get_retry_delay::<TestError>(&empty_header, 0, None, "error").expect("delay");
+        let empty = get_retry_delay::<TestError>(&empty_header, 0.0, None, "error").expect("delay");
         assert!((Duration::from_millis(375)..=Duration::from_millis(500)).contains(&empty));
-        let capped = get_retry_delay::<TestError>(&metadata, 10, None, "error").expect("delay");
+        let capped = get_retry_delay::<TestError>(&metadata, 10.0, None, "error").expect("delay");
         assert!((Duration::from_secs(6)..=Duration::from_secs(8)).contains(&capped));
     }
 
@@ -460,8 +529,8 @@ mod tests {
         let result = retry_provider_request(
             || async { Err::<(), _>(provider_error(Some(429), &[("retry-after", "277403")])) },
             ProviderRetryOptions {
-                max_retries: Some(1),
-                max_retry_delay_ms: Some(1_000),
+                max_retries: Some(1.0),
+                max_retry_delay_ms: Some(1_000.0),
                 signal: None,
             },
         )
@@ -490,8 +559,8 @@ mod tests {
                     }
                 },
                 ProviderRetryOptions {
-                    max_retries: Some(1),
-                    max_retry_delay_ms: Some(0),
+                    max_retries: Some(1.0),
+                    max_retry_delay_ms: Some(0.0),
                     signal: None,
                 },
             )
@@ -519,8 +588,8 @@ mod tests {
                     async { Err::<(), _>(provider_error(Some(429), &[("retry-after", "277403")])) }
                 },
                 ProviderRetryOptions {
-                    max_retries: Some(2),
-                    max_retry_delay_ms: Some(0),
+                    max_retries: Some(2.0),
+                    max_retry_delay_ms: Some(0.0),
                     signal: Some(request_signal),
                 },
             )
@@ -568,7 +637,7 @@ mod tests {
                 status: Some(429),
                 headers: BTreeMap::from([("retry-after".to_owned(), "not-a-date".to_owned())]),
             },
-            0,
+            0.0,
             None,
             "error",
         )
@@ -581,7 +650,7 @@ mod tests {
                 status: Some(429),
                 headers: BTreeMap::from([("retry-after".to_owned(), past)]),
             },
-            0,
+            0.0,
             None,
             "error",
         )
@@ -594,8 +663,8 @@ mod tests {
                 status: Some(429),
                 headers: BTreeMap::from([("retry-after".to_owned(), future)]),
             },
-            0,
-            Some(0),
+            0.0,
+            Some(0.0),
             "error",
         )
         .expect("future date");
@@ -606,7 +675,7 @@ mod tests {
                 status: Some(429),
                 headers: BTreeMap::from([("retry-after".to_owned(), "61".to_owned())]),
             },
-            0,
+            0.0,
             None,
             "error",
         )
@@ -621,7 +690,7 @@ mod tests {
                 status: Some(429),
                 headers: BTreeMap::from([("retry-after-ms".to_owned(), "Infinity".to_owned())]),
             },
-            0,
+            0.0,
             None,
             "error",
         )
@@ -630,5 +699,17 @@ mod tests {
             infinite.to_string(),
             "Server requested Infinitys retry delay (max: 60s). error"
         );
+
+        let uncapped_infinite = get_retry_delay::<TestError>(
+            &ProviderErrorMetadata {
+                status: Some(429),
+                headers: BTreeMap::from([("retry-after-ms".to_owned(), "Infinity".to_owned())]),
+            },
+            0.0,
+            Some(0.0),
+            "error",
+        )
+        .expect("zero disables the cap");
+        assert_eq!(uncapped_infinite, Duration::ZERO);
     }
 }

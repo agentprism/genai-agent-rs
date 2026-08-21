@@ -1,6 +1,7 @@
 //! Provider-neutral data contracts mirrored from pi `src/types.ts`.
 
 use futures::future::BoxFuture;
+use indexmap::IndexMap;
 use serde::de::Error as _;
 use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -136,6 +137,20 @@ where
     }
 }
 
+pub(crate) fn js_f64_value(value: f64) -> Value {
+    if value == 0.0 {
+        Value::from(0)
+    } else if value.is_finite()
+        && value.fract() == 0.0
+        && value >= i64::MIN as f64
+        && value <= i64::MAX as f64
+    {
+        Value::from(value as i64)
+    } else {
+        Number::from_f64(value).map_or(Value::Null, Value::Number)
+    }
+}
+
 fn serialize_text_signature_version<S>(version: &u8, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -242,16 +257,32 @@ pub enum ThinkingTokenBudgetField {
     ThinkingBudgetTokens,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ThinkingBudgets {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub minimal: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub low: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub medium: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub high: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_js_f64"
+    )]
+    pub minimal: Option<f64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_js_f64"
+    )]
+    pub low: Option<f64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_js_f64"
+    )]
+    pub medium: Option<f64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_js_f64"
+    )]
+    pub high: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -271,8 +302,8 @@ pub enum Transport {
     Auto,
 }
 
-pub type ProviderEnv = BTreeMap<String, String>;
-pub type ProviderHeaders = BTreeMap<String, Option<String>>;
+pub type ProviderEnv = IndexMap<String, String>;
+pub type ProviderHeaders = IndexMap<String, Option<String>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -291,6 +322,10 @@ pub struct ProviderResponse {
 pub trait AbortSignal: Send + Sync {
     fn is_aborted(&self) -> bool;
     fn cancelled(&self) -> BoxFuture<'_, ()>;
+
+    fn reason(&self) -> Option<crate::utils::abort::AbortReason> {
+        None
+    }
 }
 
 pub trait TelemetryContext: Send + Sync {}
@@ -359,11 +394,14 @@ pub struct ProviderRequestOptions<TModel = Model> {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<ProviderHeaders>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout_ms: Option<u64>,
+    #[serde(serialize_with = "serialize_optional_js_f64")]
+    pub timeout_ms: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_retries: Option<u32>,
+    #[serde(serialize_with = "serialize_optional_js_f64")]
+    pub max_retries: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_retry_delay_ms: Option<u64>,
+    #[serde(serialize_with = "serialize_optional_js_f64")]
+    pub max_retry_delay_ms: Option<f64>,
 }
 
 impl<TModel> Default for ProviderRequestOptions<TModel> {
@@ -425,7 +463,8 @@ pub struct StreamOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub websocket_connect_timeout_ms: Option<u64>,
+    #[serde(serialize_with = "serialize_optional_js_f64")]
+    pub websocket_connect_timeout_ms: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Map<String, Value>>,
 }
@@ -634,6 +673,80 @@ pub enum AssistantContent {
     ToolCall(ToolCall),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum AssistantMessageContent {
+    Null,
+    Blocks(Vec<AssistantContent>),
+}
+
+impl Default for AssistantMessageContent {
+    fn default() -> Self {
+        Self::Blocks(Vec::new())
+    }
+}
+
+impl From<Vec<AssistantContent>> for AssistantMessageContent {
+    fn from(value: Vec<AssistantContent>) -> Self {
+        Self::Blocks(value)
+    }
+}
+
+impl std::ops::Deref for AssistantMessageContent {
+    type Target = Vec<AssistantContent>;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Null => &EMPTY_ASSISTANT_CONTENT,
+            Self::Blocks(blocks) => blocks,
+        }
+    }
+}
+
+static EMPTY_ASSISTANT_CONTENT: Vec<AssistantContent> = Vec::new();
+
+impl std::ops::DerefMut for AssistantMessageContent {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        if matches!(self, Self::Null) {
+            *self = Self::default();
+        }
+        match self {
+            Self::Blocks(blocks) => blocks,
+            Self::Null => unreachable!("null was normalized for mutation"),
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a AssistantMessageContent {
+    type Item = &'a AssistantContent;
+    type IntoIter = std::slice::Iter<'a, AssistantContent>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl Serialize for AssistantMessageContent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Null => serializer.serialize_none(),
+            Self::Blocks(blocks) => blocks.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AssistantMessageContent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::<Vec<AssistantContent>>::deserialize(deserializer)
+            .map(|value| value.map_or(Self::Null, Self::Blocks))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum UserContentBlock {
@@ -761,18 +874,194 @@ pub struct UsageCost {
     pub total: f64,
 }
 
+#[derive(Debug, Clone)]
+pub struct UsageValue(UsageValueRepr);
+
+#[derive(Debug, Clone)]
+enum UsageValueRepr {
+    Number(f64),
+    Other(Value),
+}
+
+impl Default for UsageValue {
+    fn default() -> Self {
+        Self(UsageValueRepr::Number(0.0))
+    }
+}
+
+impl PartialEq for UsageValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (UsageValueRepr::Number(left), UsageValueRepr::Number(right)) => left == right,
+            (UsageValueRepr::Other(left), UsageValueRepr::Other(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
+macro_rules! usage_value_from_number {
+    ($($kind:ty),+ $(,)?) => {
+        $(
+            impl From<$kind> for UsageValue {
+                fn from(value: $kind) -> Self {
+                    Self(UsageValueRepr::Number(value as f64))
+                }
+            }
+
+            impl PartialEq<$kind> for UsageValue {
+                fn eq(&self, other: &$kind) -> bool {
+                    matches!(&self.0, UsageValueRepr::Number(value) if *value == *other as f64)
+                }
+            }
+        )+
+    };
+}
+
+usage_value_from_number!(i32, i64, u32, u64, usize, f32, f64);
+
+impl From<Value> for UsageValue {
+    fn from(value: Value) -> Self {
+        match value {
+            Value::Number(value) => {
+                Self(UsageValueRepr::Number(value.as_f64().unwrap_or(f64::NAN)))
+            }
+            value => Self(UsageValueRepr::Other(value)),
+        }
+    }
+}
+
+impl Serialize for UsageValue {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match &self.0 {
+            UsageValueRepr::Number(value) => serialize_js_f64(value, serializer),
+            UsageValueRepr::Other(value) => value.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for UsageValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Value::deserialize(deserializer).map(Self::from)
+    }
+}
+
+impl UsageValue {
+    pub fn as_number(&self) -> f64 {
+        match &self.0 {
+            UsageValueRepr::Number(value) => *value,
+            UsageValueRepr::Other(Value::Null) => 0.0,
+            UsageValueRepr::Other(Value::Bool(value)) => f64::from(u8::from(*value)),
+            UsageValueRepr::Other(Value::String(value)) => javascript_number(value),
+            UsageValueRepr::Other(Value::Array(values)) => match values.as_slice() {
+                [] => 0.0,
+                [value] => UsageValue::from(value.clone()).as_number(),
+                _ => f64::NAN,
+            },
+            UsageValueRepr::Other(Value::Object(_)) => f64::NAN,
+            UsageValueRepr::Other(Value::Number(_)) => unreachable!("numbers use Number"),
+        }
+    }
+
+    pub fn is_truthy(&self) -> bool {
+        match &self.0 {
+            UsageValueRepr::Number(value) => *value != 0.0 && !value.is_nan(),
+            UsageValueRepr::Other(Value::Null) => false,
+            UsageValueRepr::Other(Value::Bool(value)) => *value,
+            UsageValueRepr::Other(Value::String(value)) => !value.is_empty(),
+            UsageValueRepr::Other(Value::Array(_) | Value::Object(_)) => true,
+            UsageValueRepr::Other(Value::Number(_)) => unreachable!("numbers use Number"),
+        }
+    }
+
+    pub(crate) fn js_add(&self, other: &Self) -> Self {
+        match (self.string_primitive(), other.string_primitive()) {
+            (Some(left), Some(right)) => Value::String(left + &right).into(),
+            (Some(left), None) => Value::String(left + &other.non_string_primitive()).into(),
+            (None, Some(right)) => Value::String(self.non_string_primitive() + &right).into(),
+            (None, None) => (self.as_number() + other.as_number()).into(),
+        }
+    }
+
+    fn string_primitive(&self) -> Option<String> {
+        match &self.0 {
+            UsageValueRepr::Other(Value::String(value)) => Some(value.clone()),
+            UsageValueRepr::Other(Value::Array(values)) => Some(
+                values
+                    .iter()
+                    .map(|value| match value {
+                        Value::Null => String::new(),
+                        Value::String(value) => value.clone(),
+                        value => UsageValue::from(value.clone()).non_string_primitive(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+            UsageValueRepr::Other(Value::Object(_)) => Some("[object Object]".to_owned()),
+            _ => None,
+        }
+    }
+
+    fn non_string_primitive(&self) -> String {
+        match &self.0 {
+            UsageValueRepr::Number(value) => javascript_number_string(*value),
+            UsageValueRepr::Other(Value::Null) => "null".to_owned(),
+            UsageValueRepr::Other(Value::Bool(value)) => value.to_string(),
+            UsageValueRepr::Other(Value::String(value)) => value.clone(),
+            UsageValueRepr::Other(Value::Array(_) | Value::Object(_)) => {
+                self.string_primitive().unwrap_or_default()
+            }
+            UsageValueRepr::Other(Value::Number(_)) => unreachable!("numbers use Number"),
+        }
+    }
+}
+
+fn javascript_number(value: &str) -> f64 {
+    let value = crate::utils::error_body::trim_javascript_whitespace(value);
+    if value.is_empty() {
+        return 0.0;
+    }
+    match value {
+        "Infinity" | "+Infinity" => return f64::INFINITY,
+        "-Infinity" => return f64::NEG_INFINITY,
+        _ => {}
+    }
+    for (prefixes, radix) in [(["0x", "0X"], 16), (["0b", "0B"], 2), (["0o", "0O"], 8)] {
+        if let Some(digits) = value
+            .strip_prefix(prefixes[0])
+            .or_else(|| value.strip_prefix(prefixes[1]))
+        {
+            return u128::from_str_radix(digits, radix).map_or(f64::NAN, |number| number as f64);
+        }
+    }
+    value
+        .parse()
+        .ok()
+        .filter(|number: &f64| number.is_finite())
+        .unwrap_or(f64::NAN)
+}
+
+fn javascript_number_string(value: f64) -> String {
+    crate::utils::error_body::js_f64_string(value)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Usage {
-    pub input: u64,
-    pub output: u64,
-    pub cache_read: u64,
-    pub cache_write: u64,
+    pub input: UsageValue,
+    pub output: UsageValue,
+    pub cache_read: UsageValue,
+    pub cache_write: UsageValue,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_write_1h: Option<u64>,
+    pub cache_write_1h: Option<UsageValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning: Option<u64>,
-    pub total_tokens: u64,
+    pub reasoning: Option<UsageValue>,
+    pub total_tokens: UsageValue,
     pub cost: UsageCost,
 }
 
@@ -828,8 +1117,8 @@ pub struct DeferredHandle {
 #[serde(rename_all = "camelCase")]
 pub struct AssistantMessage {
     pub role: AssistantRole,
-    #[serde(default, deserialize_with = "deserialize_null_as_default")]
-    pub content: Vec<AssistantContent>,
+    #[serde(default)]
+    pub content: AssistantMessageContent,
     pub api: Api,
     pub provider: ProviderId,
     pub model: String,
@@ -863,7 +1152,7 @@ impl AssistantMessage {
     ) -> Self {
         Self {
             role: AssistantRole::Assistant,
-            content: Vec::new(),
+            content: AssistantMessageContent::default(),
             api: api.into(),
             provider: provider.into(),
             model: model.into(),
@@ -1150,64 +1439,194 @@ pub enum RoutingSort {
     Options(RoutingSortOptions),
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+fn serialize_ordered_object<S>(
+    mut fields: Map<String, Value>,
+    field_order: &[String],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut ordered = Map::new();
+    for key in field_order {
+        if let Some(value) = fields.remove(key) {
+            ordered.insert(key.clone(), value);
+        }
+    }
+    ordered.extend(fields);
+    ordered.serialize(serializer)
+}
+
+fn deserialize_field<T>(fields: &mut Map<String, Value>, name: &str) -> Result<Option<T>, String>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    fields
+        .remove(name)
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| error.to_string())
+}
+
+macro_rules! insert_optional_field {
+    ($fields:expr, $name:literal, $value:expr) => {
+        if let Some(value) = $value {
+            $fields.insert(
+                $name.to_owned(),
+                serde_json::to_value(value).map_err(S::Error::custom)?,
+            );
+        }
+    };
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct RoutingSortOptions {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_present_option"
-    )]
     pub partition: Option<Option<String>>,
-    #[serde(default, flatten)]
     pub extra: Map<String, Value>,
+    #[doc(hidden)]
+    pub __field_order: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+impl Serialize for RoutingSortOptions {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut fields = self.extra.clone();
+        insert_optional_field!(fields, "by", self.by.as_ref());
+        if let Some(partition) = &self.partition {
+            fields.insert(
+                "partition".to_owned(),
+                partition.clone().map_or(Value::Null, Value::String),
+            );
+        }
+        serialize_ordered_object(fields, &self.__field_order, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for RoutingSortOptions {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut fields = Map::<String, Value>::deserialize(deserializer)?;
+        let field_order = fields.keys().cloned().collect();
+        let by = deserialize_field(&mut fields, "by").map_err(D::Error::custom)?;
+        let partition = fields
+            .remove("partition")
+            .map(|value| {
+                if value.is_null() {
+                    Ok(None)
+                } else {
+                    serde_json::from_value(value)
+                        .map(Some)
+                        .map_err(D::Error::custom)
+                }
+            })
+            .transpose()?;
+        Ok(Self {
+            by,
+            partition,
+            extra: fields,
+            __field_order: field_order,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct OpenRouterMaxPrice {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<NumberOrString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion: Option<NumberOrString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<NumberOrString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<NumberOrString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<NumberOrString>,
-    #[serde(default, flatten)]
     pub extra: Map<String, Value>,
+    #[doc(hidden)]
+    pub __field_order: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+impl Serialize for OpenRouterMaxPrice {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut fields = self.extra.clone();
+        insert_optional_field!(fields, "prompt", self.prompt.as_ref());
+        insert_optional_field!(fields, "completion", self.completion.as_ref());
+        insert_optional_field!(fields, "image", self.image.as_ref());
+        insert_optional_field!(fields, "audio", self.audio.as_ref());
+        insert_optional_field!(fields, "request", self.request.as_ref());
+        serialize_ordered_object(fields, &self.__field_order, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for OpenRouterMaxPrice {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut fields = Map::<String, Value>::deserialize(deserializer)?;
+        let field_order = fields.keys().cloned().collect();
+        Ok(Self {
+            prompt: deserialize_field(&mut fields, "prompt").map_err(D::Error::custom)?,
+            completion: deserialize_field(&mut fields, "completion").map_err(D::Error::custom)?,
+            image: deserialize_field(&mut fields, "image").map_err(D::Error::custom)?,
+            audio: deserialize_field(&mut fields, "audio").map_err(D::Error::custom)?,
+            request: deserialize_field(&mut fields, "request").map_err(D::Error::custom)?,
+            extra: fields,
+            __field_order: field_order,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct PercentileThresholds {
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_optional_js_f64"
-    )]
     pub p50: Option<f64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_optional_js_f64"
-    )]
     pub p75: Option<f64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_optional_js_f64"
-    )]
     pub p90: Option<f64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_optional_js_f64"
-    )]
     pub p99: Option<f64>,
-    #[serde(default, flatten)]
     pub extra: Map<String, Value>,
+    #[doc(hidden)]
+    pub __field_order: Vec<String>,
+}
+
+impl Serialize for PercentileThresholds {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut fields = self.extra.clone();
+        for (name, value) in [
+            ("p50", self.p50),
+            ("p75", self.p75),
+            ("p90", self.p90),
+            ("p99", self.p99),
+        ] {
+            if let Some(value) = value {
+                fields.insert(name.to_owned(), js_f64_value(value));
+            }
+        }
+        serialize_ordered_object(fields, &self.__field_order, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PercentileThresholds {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut fields = Map::<String, Value>::deserialize(deserializer)?;
+        let field_order = fields.keys().cloned().collect();
+        Ok(Self {
+            p50: deserialize_field(&mut fields, "p50").map_err(D::Error::custom)?,
+            p75: deserialize_field(&mut fields, "p75").map_err(D::Error::custom)?,
+            p90: deserialize_field(&mut fields, "p90").map_err(D::Error::custom)?,
+            p99: deserialize_field(&mut fields, "p99").map_err(D::Error::custom)?,
+            extra: fields,
+            __field_order: field_order,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -1229,36 +1648,93 @@ impl Serialize for RoutingThreshold {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct OpenRouterRouting {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_fallbacks: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_parameters: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_collection: Option<DataCollection>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zdr: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enforce_distillable_text: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub only: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ignore: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quantizations: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort: Option<RoutingSort>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_price: Option<OpenRouterMaxPrice>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_min_throughput: Option<RoutingThreshold>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_max_latency: Option<RoutingThreshold>,
-    #[serde(default, flatten)]
     pub extra: Map<String, Value>,
+    #[doc(hidden)]
+    pub __field_order: Vec<String>,
+}
+
+impl Serialize for OpenRouterRouting {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut fields = self.extra.clone();
+        insert_optional_field!(fields, "allow_fallbacks", self.allow_fallbacks);
+        insert_optional_field!(fields, "require_parameters", self.require_parameters);
+        insert_optional_field!(fields, "data_collection", self.data_collection);
+        insert_optional_field!(fields, "zdr", self.zdr);
+        insert_optional_field!(
+            fields,
+            "enforce_distillable_text",
+            self.enforce_distillable_text
+        );
+        insert_optional_field!(fields, "order", self.order.as_ref());
+        insert_optional_field!(fields, "only", self.only.as_ref());
+        insert_optional_field!(fields, "ignore", self.ignore.as_ref());
+        insert_optional_field!(fields, "quantizations", self.quantizations.as_ref());
+        insert_optional_field!(fields, "sort", self.sort.as_ref());
+        insert_optional_field!(fields, "max_price", self.max_price.as_ref());
+        insert_optional_field!(
+            fields,
+            "preferred_min_throughput",
+            self.preferred_min_throughput.as_ref()
+        );
+        insert_optional_field!(
+            fields,
+            "preferred_max_latency",
+            self.preferred_max_latency.as_ref()
+        );
+        serialize_ordered_object(fields, &self.__field_order, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for OpenRouterRouting {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut fields = Map::<String, Value>::deserialize(deserializer)?;
+        let field_order = fields.keys().cloned().collect();
+        Ok(Self {
+            allow_fallbacks: deserialize_field(&mut fields, "allow_fallbacks")
+                .map_err(D::Error::custom)?,
+            require_parameters: deserialize_field(&mut fields, "require_parameters")
+                .map_err(D::Error::custom)?,
+            data_collection: deserialize_field(&mut fields, "data_collection")
+                .map_err(D::Error::custom)?,
+            zdr: deserialize_field(&mut fields, "zdr").map_err(D::Error::custom)?,
+            enforce_distillable_text: deserialize_field(&mut fields, "enforce_distillable_text")
+                .map_err(D::Error::custom)?,
+            order: deserialize_field(&mut fields, "order").map_err(D::Error::custom)?,
+            only: deserialize_field(&mut fields, "only").map_err(D::Error::custom)?,
+            ignore: deserialize_field(&mut fields, "ignore").map_err(D::Error::custom)?,
+            quantizations: deserialize_field(&mut fields, "quantizations")
+                .map_err(D::Error::custom)?,
+            sort: deserialize_field(&mut fields, "sort").map_err(D::Error::custom)?,
+            max_price: deserialize_field(&mut fields, "max_price").map_err(D::Error::custom)?,
+            preferred_min_throughput: deserialize_field(&mut fields, "preferred_min_throughput")
+                .map_err(D::Error::custom)?,
+            preferred_max_latency: deserialize_field(&mut fields, "preferred_max_latency")
+                .map_err(D::Error::custom)?,
+            extra: fields,
+            __field_order: field_order,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1268,14 +1744,41 @@ pub enum DataCollection {
     Allow,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct VercelGatewayRouting {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub only: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<Vec<String>>,
-    #[serde(default, flatten)]
     pub extra: Map<String, Value>,
+    #[doc(hidden)]
+    pub __field_order: Vec<String>,
+}
+
+impl Serialize for VercelGatewayRouting {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut fields = self.extra.clone();
+        insert_optional_field!(fields, "only", self.only.as_ref());
+        insert_optional_field!(fields, "order", self.order.as_ref());
+        serialize_ordered_object(fields, &self.__field_order, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for VercelGatewayRouting {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut fields = Map::<String, Value>::deserialize(deserializer)?;
+        let field_order = fields.keys().cloned().collect();
+        Ok(Self {
+            only: deserialize_field(&mut fields, "only").map_err(D::Error::custom)?,
+            order: deserialize_field(&mut fields, "order").map_err(D::Error::custom)?,
+            extra: fields,
+            __field_order: field_order,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1420,7 +1923,7 @@ pub struct Model {
     pub context_window: u64,
     pub max_tokens: u64,
     pub sampling_params: Option<Map<String, Value>>,
-    pub headers: Option<BTreeMap<String, String>>,
+    pub headers: Option<IndexMap<String, String>>,
     pub compat: Option<ModelCompat>,
 }
 
@@ -1442,7 +1945,7 @@ struct ModelWireRef<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     sampling_params: &'a Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    headers: &'a Option<BTreeMap<String, String>>,
+    headers: &'a Option<IndexMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     compat: &'a Option<ModelCompat>,
 }
@@ -1465,7 +1968,7 @@ struct ModelWireOwned {
     #[serde(default)]
     sampling_params: Option<Map<String, Value>>,
     #[serde(default)]
-    headers: Option<BTreeMap<String, String>>,
+    headers: Option<IndexMap<String, String>>,
     #[serde(default)]
     compat: Option<Value>,
 }
@@ -1501,25 +2004,7 @@ impl<'de> Deserialize<'de> for Model {
         D: Deserializer<'de>,
     {
         let wire = ModelWireOwned::deserialize(deserializer)?;
-        let compat = match (wire.api.as_str(), wire.compat) {
-            (_, None) => None,
-            ("openai-completions", Some(value)) => Some(ModelCompat::OpenAICompletions(Box::new(
-                serde_json::from_value(value).map_err(D::Error::custom)?,
-            ))),
-            (
-                "openai-responses" | "azure-openai-responses" | "openai-codex-responses",
-                Some(value),
-            ) => Some(ModelCompat::OpenAIResponses(
-                serde_json::from_value(value).map_err(D::Error::custom)?,
-            )),
-            ("anthropic-messages", Some(value)) => Some(ModelCompat::AnthropicMessages(
-                serde_json::from_value(value).map_err(D::Error::custom)?,
-            )),
-            ("bedrock-converse-stream", Some(value)) => Some(ModelCompat::Bedrock(
-                serde_json::from_value(value).map_err(D::Error::custom)?,
-            )),
-            (_, Some(value)) => Some(ModelCompat::Custom(value)),
-        };
+        let compat = wire.compat.map(ModelCompat::Custom);
         Ok(Self {
             id: wire.id,
             name: wire.name,
@@ -1614,13 +2099,13 @@ mod tests {
 
     fn full_usage() -> Usage {
         Usage {
-            input: 11,
-            output: 7,
-            cache_read: 3,
-            cache_write: 5,
-            cache_write_1h: Some(0),
-            reasoning: Some(0),
-            total_tokens: 18,
+            input: 11.into(),
+            output: 7.into(),
+            cache_read: 3.into(),
+            cache_write: 5.into(),
+            cache_write_1h: Some(0.into()),
+            reasoning: Some(0.into()),
+            total_tokens: 18.into(),
             cost: UsageCost {
                 input: 0.1,
                 output: 0.2,
@@ -1779,7 +2264,8 @@ mod tests {
                     thought_signature: Some("thought-sig".into()),
                     ..ToolCall::new("c", "t", Map::new())
                 }),
-            ],
+            ]
+            .into(),
             api: Api::from("openai-responses"),
             provider: ProviderId::from("custom-provider"),
             model: "requested".into(),
@@ -1930,11 +2416,11 @@ mod tests {
         );
 
         let options: ProviderRequestOptions<Model> = ProviderRequestOptions {
-            headers: Some(BTreeMap::from([
+            headers: Some(IndexMap::from([
                 ("x-default".into(), None),
                 ("x-empty".into(), Some(String::new())),
             ])),
-            max_retry_delay_ms: Some(0),
+            max_retry_delay_ms: Some(0.0),
             ..ProviderRequestOptions::default()
         };
         assert_eq!(
@@ -1967,6 +2453,52 @@ mod tests {
         );
     }
 
+    /// Pins pi `types.ts:100-105,163-177,382-404` JavaScript-number fields.
+    #[test]
+    fn request_budgets_and_usage_accept_signed_fractional_numbers() {
+        let options: ProviderRequestOptions<Model> = serde_json::from_value(json!({
+            "timeoutMs":-1.5,
+            "maxRetries":0.5,
+            "maxRetryDelayMs":-2.25
+        }))
+        .unwrap();
+        assert_eq!(options.timeout_ms, Some(-1.5));
+        assert_eq!(options.max_retries, Some(0.5));
+        assert_eq!(options.max_retry_delay_ms, Some(-2.25));
+
+        let budgets: ThinkingBudgets = serde_json::from_value(json!({
+            "minimal":-1.25,
+            "high":8192.5
+        }))
+        .unwrap();
+        assert_eq!(budgets.minimal, Some(-1.25));
+        assert_eq!(budgets.high, Some(8192.5));
+
+        let usage: Usage = serde_json::from_value(json!({
+            "input":-1.25,
+            "output":0.5,
+            "cacheRead":"2",
+            "cacheWrite":0,
+            "reasoning":-0.5,
+            "totalTokens":"1.250",
+            "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}
+        }))
+        .unwrap();
+        let wire = serde_json::to_value(usage).unwrap();
+        assert_eq!(wire["input"], -1.25);
+        assert_eq!(wire["output"], 0.5);
+        assert_eq!(wire["cacheRead"], "2");
+        assert_eq!(wire["reasoning"], -0.5);
+        assert_eq!(wire["totalTokens"], "1.250");
+        assert!(UsageValue::from(json!("inf")).as_number().is_nan());
+        assert_eq!(
+            UsageValue::from(json!("Infinity")).as_number(),
+            f64::INFINITY
+        );
+        assert_eq!(UsageValue::from(json!("\u{feff}1")).as_number(), 1.0);
+        assert!(UsageValue::from(json!("\u{0085}1")).as_number().is_nan());
+    }
+
     /// Pins pi `types.ts:225,297-305`: provider option intersections retain custom JSON keys.
     #[test]
     fn provider_option_records_round_trip_extension_keys() {
@@ -1992,7 +2524,7 @@ mod tests {
         assert_eq!(serde_json::to_value(images).unwrap(), images_json);
     }
 
-    /// Pins pi `types.ts:558-715,821-850`: compat wire objects are selected by `model.api`.
+    /// Pins pi `types.ts:821-850`: compat is runtime JSON and preserves original key order.
     #[test]
     fn model_compat_is_api_discriminated_without_wire_tag() {
         let anthropic_json = json!({
@@ -2003,10 +2535,7 @@ mod tests {
             "compat":{"supportsTemperature":false,"allowEmptySignature":true}
         });
         let model: Model = serde_json::from_value(anthropic_json.clone()).unwrap();
-        assert!(matches!(
-            model.compat,
-            Some(ModelCompat::AnthropicMessages(_))
-        ));
+        assert!(matches!(model.compat, Some(ModelCompat::Custom(_))));
         assert_eq!(serde_json::to_value(model).unwrap(), anthropic_json);
 
         let cases = [
@@ -2026,7 +2555,7 @@ mod tests {
                 "bedrock",
             ),
         ];
-        for (api, compat, family) in cases {
+        for (api, compat, _family) in cases {
             let wire = json!({
                 "id":"m","name":"M","api":api,"provider":"custom",
                 "baseUrl":"https://example.test","reasoning":false,"input":["text"],
@@ -2035,13 +2564,7 @@ mod tests {
             });
             let model: Model = serde_json::from_value(wire.clone()).unwrap();
             assert!(
-                matches!(
-                    (&model.compat, family),
-                    (Some(ModelCompat::OpenAICompletions(_)), "completions")
-                        | (Some(ModelCompat::OpenAIResponses(_)), "responses")
-                        | (Some(ModelCompat::Bedrock(_)), "bedrock")
-                ),
-                "wrong compat family for {api}"
+                matches!(&model.compat, Some(ModelCompat::Custom(value)) if value == &wire["compat"])
             );
             assert_eq!(serde_json::to_value(model).unwrap(), wire);
         }
@@ -2051,7 +2574,7 @@ mod tests {
     /// data, so unknown keys survive load and serialization.
     #[test]
     fn routing_sort_options_preserve_unknown_keys() {
-        let wire = json!({"by":"latency","partition":null,"futureSort":{"window":5}});
+        let wire = json!({"before":1,"by":"latency","middle":2,"partition":null,"after":3});
         let decoded: RoutingSortOptions = serde_json::from_value(wire.clone()).unwrap();
         assert_round_trip(&decoded, wire);
     }
@@ -2060,7 +2583,7 @@ mod tests {
     /// data, including custom nested price dimensions.
     #[test]
     fn open_router_max_price_preserves_unknown_keys() {
-        let wire = json!({"prompt":1,"completion":"2.5","video":{"unit":"second","price":3}});
+        let wire = json!({"before":0,"prompt":1,"middle":2,"completion":"2.5","video":{"unit":"second","price":3}});
         let decoded: OpenRouterMaxPrice = serde_json::from_value(wire.clone()).unwrap();
         assert_round_trip(&decoded, wire);
     }
@@ -2069,7 +2592,7 @@ mod tests {
     /// percentile keys exactly as loaded.
     #[test]
     fn percentile_thresholds_preserve_unknown_keys() {
-        let wire = json!({"p50":10,"p99":20,"p99_9":25});
+        let wire = json!({"before":5,"p50":10,"middle":15,"p99":20,"p99_9":25});
         let decoded: PercentileThresholds = serde_json::from_value(wire.clone()).unwrap();
         assert_round_trip(&decoded, wire);
     }
@@ -2079,7 +2602,10 @@ mod tests {
     #[test]
     fn open_router_routing_preserves_unknown_keys() {
         let wire = json!({
+            "before": 1,
             "only":["provider-a"],
+            "middle": 2,
+            "order":["provider-b"],
             "custom_router":{"region":"west","weights":[1,2]}
         });
         let decoded: OpenRouterRouting = serde_json::from_value(wire.clone()).unwrap();
@@ -2090,7 +2616,7 @@ mod tests {
     /// data, so future gateway keys round-trip unchanged.
     #[test]
     fn vercel_gateway_routing_preserves_unknown_keys() {
-        let wire = json!({"order":["anthropic"],"customGateway":{"region":"iad1"}});
+        let wire = json!({"before":1,"order":["anthropic"],"middle":2,"only":["openai"],"after":3});
         let decoded: VercelGatewayRouting = serde_json::from_value(wire.clone()).unwrap();
         assert_round_trip(&decoded, wire);
     }
@@ -2226,6 +2752,7 @@ mod tests {
                 p90: Some(2.5),
                 p99: None,
                 extra: Map::new(),
+                __field_order: Vec::new(),
             }))
             .unwrap(),
             r#"{"p50":1,"p90":2.5}"#

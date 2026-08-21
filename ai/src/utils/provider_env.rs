@@ -12,18 +12,18 @@ pub fn get_provider_env_value(name: &str, env: Option<&ProviderEnv>) -> Option<S
 #[cfg(test)]
 mod tests {
     use super::get_provider_env_value;
-    use std::collections::BTreeMap;
+    use crate::types::ProviderEnv;
 
     /// Derived from pi `src/utils/provider-env.ts:41-51`.
     #[test]
     fn scoped_nonempty_values_precede_process_values() {
-        let env = BTreeMap::from([("PATH".to_owned(), "scoped".to_owned())]);
+        let env = ProviderEnv::from([("PATH".to_owned(), "scoped".to_owned())]);
         assert_eq!(
             get_provider_env_value("PATH", Some(&env)).as_deref(),
             Some("scoped")
         );
 
-        let empty = BTreeMap::from([("PATH".to_owned(), String::new())]);
+        let empty = ProviderEnv::from([("PATH".to_owned(), String::new())]);
         assert_eq!(
             get_provider_env_value("PATH", Some(&empty)),
             std::env::var("PATH").ok().filter(|value| !value.is_empty())

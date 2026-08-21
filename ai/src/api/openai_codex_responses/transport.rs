@@ -5,6 +5,7 @@ use futures::SinkExt;
 use futures::future::pending;
 use futures::stream::{BoxStream, StreamExt};
 use http::{HeaderMap, HeaderName, HeaderValue};
+use indexmap::IndexMap;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -236,7 +237,7 @@ fn remove_header(headers: &mut HeaderMap, name: &str) {
 }
 
 fn base_headers(
-    model_headers: Option<&BTreeMap<String, String>>,
+    model_headers: Option<&IndexMap<String, String>>,
     additional_headers: Option<&ProviderHeaders>,
     account_id: &str,
     token: &str,
@@ -261,7 +262,7 @@ fn base_headers(
 }
 
 pub(super) fn build_sse_headers(
-    model_headers: Option<&BTreeMap<String, String>>,
+    model_headers: Option<&IndexMap<String, String>>,
     additional_headers: Option<&ProviderHeaders>,
     account_id: &str,
     token: &str,
@@ -286,7 +287,7 @@ pub(super) fn build_sse_headers(
 }
 
 pub(super) fn build_websocket_headers(
-    model_headers: Option<&BTreeMap<String, String>>,
+    model_headers: Option<&IndexMap<String, String>>,
     additional_headers: Option<&ProviderHeaders>,
     account_id: &str,
     token: &str,

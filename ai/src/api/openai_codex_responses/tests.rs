@@ -292,6 +292,27 @@ fn token(account_id: &str) -> String {
     format!("aaa.{payload}.bbb")
 }
 
+/// Pins pi `src/api/openai-codex-responses.ts:1578-1587`: `atob` produces
+/// a binary string before `JSON.parse`, and the claim is only truthiness-checked.
+#[test]
+fn account_id_uses_atob_binary_string_and_javascript_string_coercion() {
+    let payload = STANDARD.encode(
+        serde_json::to_vec(&json!({JWT_CLAIM_PATH: {"chatgpt_account_id": "é"}})).expect("payload"),
+    );
+    assert_eq!(
+        extract_account_id(&format!("aaa.{payload}.bbb")).expect("account id"),
+        "Ã©"
+    );
+
+    let numeric = STANDARD.encode(
+        serde_json::to_vec(&json!({JWT_CLAIM_PATH: {"chatgpt_account_id": 7}})).expect("payload"),
+    );
+    assert_eq!(
+        extract_account_id(&format!("aaa.{numeric}.bbb")).expect("account id"),
+        "7"
+    );
+}
+
 fn model(id: &str) -> Model {
     Model {
         id: id.to_owned(),
@@ -471,7 +492,7 @@ async fn sse_header_wait_uses_timeout_ms() {
     let mut options = OpenAICodexResponsesOptions::default();
     options.stream.request.api_key = Some(token("acc_test"));
     options.stream.request.fetch = Some(fetch.clone());
-    options.stream.request.timeout_ms = Some(50);
+    options.stream.request.timeout_ms = Some(50.0);
     options.stream.transport = Some(Transport::Sse);
     let started = tokio::time::Instant::now();
     let result = stream(&model("gpt-5.1-codex"), &context("hello"), options)
@@ -498,7 +519,7 @@ async fn sse_header_wait_uses_timeout_ms() {
 
     let completed = QueueFetch::new([ResponseSpec::sse(terminal_payload("completed", None))]);
     let mut completed_options = sse_options(completed.clone());
-    completed_options.stream.request.timeout_ms = Some(50);
+    completed_options.stream.request.timeout_ms = Some(50.0);
     stream(
         &model("gpt-5.1-codex"),
         &context("hello"),
@@ -962,7 +983,7 @@ async fn sse_retries_honor_retry_after_ms_seconds_and_http_date() {
             ResponseSpec::sse(terminal_payload("completed", None)),
         ]);
         let mut options = sse_options(fetch.clone());
-        options.stream.request.max_retries = Some(1);
+        options.stream.request.max_retries = Some(1.0);
         let started = tokio::time::Instant::now();
         let result = stream(&model("gpt-5.1-codex"), &context("hello"), options)
             .result()
@@ -992,8 +1013,8 @@ async fn sse_retry_delay_over_limit_fails_without_another_request() {
         )
         .with_headers([("retry-after".to_owned(), "2".to_owned())])]);
         let mut options = sse_options(fetch.clone());
-        options.stream.request.max_retries = Some(3);
-        options.stream.request.max_retry_delay_ms = Some(1_000);
+        options.stream.request.max_retries = Some(3.0);
+        options.stream.request.max_retry_delay_ms = Some(1_000.0);
         let result = stream(&model("gpt-5.1-codex"), &context("hello"), options)
             .result()
             .await
@@ -1023,7 +1044,7 @@ async fn sse_retries_use_exponential_backoff_without_retry_headers() {
         ResponseSpec::sse(terminal_payload("completed", None)),
     ]);
     let mut options = sse_options(fetch.clone());
-    options.stream.request.max_retries = Some(3);
+    options.stream.request.max_retries = Some(3.0);
     let started = tokio::time::Instant::now();
     let result = stream(&model("gpt-5.1-codex"), &context("hello"), options)
         .result()
@@ -1061,7 +1082,7 @@ async fn sse_retry_default_and_text_classification_match_pi() {
         ResponseSpec::sse(terminal_payload("completed", None)),
     ]);
     let mut options = sse_options(classified.clone());
-    options.stream.request.max_retries = Some(1);
+    options.stream.request.max_retries = Some(1.0);
     let result = stream(&model("gpt-5.1-codex"), &context("hello"), options)
         .result()
         .await
@@ -1073,7 +1094,7 @@ async fn sse_retry_default_and_text_classification_match_pi() {
     let mut network_options = OpenAICodexResponsesOptions::default();
     network_options.stream.request.api_key = Some(token("acc_test"));
     network_options.stream.request.fetch = Some(network.clone());
-    network_options.stream.request.max_retries = Some(1);
+    network_options.stream.request.max_retries = Some(1.0);
     network_options.stream.transport = Some(Transport::Sse);
     let started = tokio::time::Instant::now();
     let result = stream(&model("gpt-5.1-codex"), &context("hello"), network_options)
@@ -1927,8 +1948,8 @@ async fn websocket_connect_timeout_falls_back_to_sse() {
     let mut current = model("gpt-5.1-codex");
     current.base_url = server.base_url();
     let mut options = websocket_options(Some("ws-connect-timeout"), Transport::Auto);
-    options.stream.request.timeout_ms = Some(300_000);
-    options.stream.websocket_connect_timeout_ms = Some(25);
+    options.stream.request.timeout_ms = Some(300_000.0);
+    options.stream.websocket_connect_timeout_ms = Some(25.0);
     let result = stream(&current, &context("hello"), options)
         .result()
         .await
@@ -1984,7 +2005,7 @@ async fn websocket_idle_before_first_event_falls_back_to_sse() {
     let mut current = model("gpt-5.1-codex");
     current.base_url = server.base_url();
     let mut options = websocket_options(Some("ws-idle-before-start"), Transport::Auto);
-    options.stream.request.timeout_ms = Some(25);
+    options.stream.request.timeout_ms = Some(25.0);
     let result = stream(&current, &context("hello"), options)
         .result()
         .await
@@ -2014,7 +2035,7 @@ async fn websocket_idle_after_start_is_terminal_without_sse_replay() {
     let mut current = model("gpt-5.1-codex");
     current.base_url = server.base_url();
     let mut options = websocket_options(None, Transport::Auto);
-    options.stream.request.timeout_ms = Some(25);
+    options.stream.request.timeout_ms = Some(25.0);
     let (kinds, result) = collect_event_kinds(stream(&current, &context("hello"), options)).await;
     assert_eq!(result.stop_reason, StopReason::Error);
     assert_eq!(
@@ -2092,7 +2113,7 @@ async fn cached_websocket_idle_ttl_evicts_the_connection() {
     current.base_url = server.base_url();
     let idle_ttl_options = || {
         let mut options = websocket_options(Some("idle-ttl-session"), Transport::WebsocketCached);
-        options.stream.websocket_connect_timeout_ms = Some(0);
+        options.stream.websocket_connect_timeout_ms = Some(0.0);
         options
     };
     stream(&current, &context("hello"), idle_ttl_options())

@@ -318,9 +318,7 @@ impl MessageBuilder {
 
 fn parse_proxy_streaming_arguments(raw: &str) -> Value {
     match parse_streaming_json(Some(raw)) {
-        Value::Null | Value::Bool(false) => Value::Object(Default::default()),
-        Value::Number(number) if number.as_f64() == Some(0.0) => Value::Object(Default::default()),
-        Value::String(value) if value.is_empty() => Value::Object(Default::default()),
+        Value::Null => Value::Object(Default::default()),
         value => value,
     }
 }
@@ -335,7 +333,6 @@ pub enum StreamProtocolError {
 enum StreamResultState {
     Pending,
     Terminal(Box<AssistantMessage>),
-    MissingTerminal,
 }
 
 #[derive(Clone)]
@@ -349,14 +346,10 @@ impl AssistantMessageResult {
             match self.receiver.borrow().clone() {
                 StreamResultState::Pending => {}
                 StreamResultState::Terminal(message) => return Ok(*message),
-                StreamResultState::MissingTerminal => {
-                    return Err(StreamProtocolError::MissingTerminalEvent);
-                }
             }
-            self.receiver
-                .changed()
-                .await
-                .map_err(|_| StreamProtocolError::MissingTerminalEvent)?;
+            if self.receiver.changed().await.is_err() {
+                futures::future::pending::<()>().await;
+            }
         }
     }
 }
@@ -367,16 +360,6 @@ fn publish_first_terminal(sender: &watch::Sender<StreamResultState>, message: As
             return false;
         }
         *state = StreamResultState::Terminal(Box::new(message));
-        true
-    });
-}
-
-fn publish_missing_terminal(sender: &watch::Sender<StreamResultState>) {
-    sender.send_if_modified(|state| {
-        if !matches!(state, StreamResultState::Pending) {
-            return false;
-        }
-        *state = StreamResultState::MissingTerminal;
         true
     });
 }
@@ -461,9 +444,7 @@ impl AssistantMessageEventStream {
 
 impl Drop for AssistantMessageEventStream {
     fn drop(&mut self) {
-        if let Some(sender) = self.terminal_sender.take() {
-            publish_missing_terminal(&sender);
-        }
+        self.terminal_sender.take();
     }
 }
 
@@ -486,9 +467,7 @@ impl Stream for AssistantMessageEventStream {
                 Poll::Ready(Some(event))
             }
             Poll::Ready(None) => {
-                if let Some(sender) = self.terminal_sender.take() {
-                    publish_missing_terminal(&sender);
-                }
+                self.terminal_sender.take();
                 self.terminated = true;
                 Poll::Ready(None)
             }
@@ -572,7 +551,6 @@ impl Drop for AssistantStreamSender {
         state.senders -= 1;
         if state.senders == 0 && !state.completed {
             state.completed = true;
-            publish_missing_terminal(&self.terminal_sender);
         }
     }
 }
@@ -588,7 +566,7 @@ mod tests {
     fn message(reason: StopReason, label: &str) -> AssistantMessage {
         let mut message = AssistantMessage::pending("test-api", "test-provider", "test-model", 1);
         message.stop_reason = reason;
-        message.content = vec![AssistantContent::Text(TextContent::new(label))];
+        message.content = vec![AssistantContent::Text(TextContent::new(label))].into();
         message
     }
 
@@ -672,23 +650,24 @@ mod tests {
         assert_eq!(stream.next().await, None);
     }
 
-    /// Pins the seam-#5 terminal requirement over pi `utils/event-stream.ts:47-55`'s unresolved case.
+    /// Ports pi `utils/event-stream.ts:47-55`: close without a terminal leaves result pending.
     #[tokio::test]
-    async fn close_without_terminal_is_a_protocol_error() {
+    async fn close_without_terminal_leaves_result_pending() {
         let mut stream =
             AssistantMessageEventStream::from_events(vec![AssistantMessageEvent::Start]);
         let result = stream.result_handle();
         assert_eq!(stream.next().await, Some(AssistantMessageEvent::Start));
         assert_eq!(stream.next().await, None);
-        assert_eq!(
-            result.get().await,
-            Err(StreamProtocolError::MissingTerminalEvent)
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), result.get())
+                .await
+                .is_err()
         );
     }
 
-    /// Pins the seam-#5 terminal requirement for an unconsumed channel whose producers disappear.
+    /// Ports pi `utils/event-stream.ts:47-55` for an unconsumed channel whose producers disappear.
     #[tokio::test]
-    async fn last_channel_producer_drop_reports_missing_terminal_without_iteration() {
+    async fn last_channel_producer_drop_leaves_result_pending_without_iteration() {
         let (sender, stream) = AssistantMessageEventStream::channel();
         let second = sender.clone();
         let result = stream.result();
@@ -697,7 +676,11 @@ mod tests {
         let right = tokio::spawn(async move { drop(second) });
         left.await.unwrap();
         right.await.unwrap();
-        assert_eq!(result.await, Err(StreamProtocolError::MissingTerminalEvent));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), result)
+                .await
+                .is_err()
+        );
     }
 
     /// Pins pi `utils/event-stream.ts:31-36,47-64`: channel events preserve order and settle unpolled results.
@@ -863,7 +846,7 @@ mod tests {
         for (raw, expected) in [
             ("[1,2", json!([1, 2])),
             ("true", json!(true)),
-            ("false", json!({})),
+            ("false", json!(false)),
             ("12", json!(12)),
         ] {
             let mut builder =

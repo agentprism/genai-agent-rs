@@ -13,23 +13,29 @@ const EXTENDED_THINKING_LEVELS: [ModelThinkingLevel; 7] = [
 ];
 
 pub fn calculate_cost<'a>(model: &Model, usage: &'a mut Usage) -> &'a UsageCost {
-    let input_tokens =
-        u128::from(usage.input) + u128::from(usage.cache_read) + u128::from(usage.cache_write);
+    let input_tokens = usage
+        .input
+        .js_add(&usage.cache_read)
+        .js_add(&usage.cache_write)
+        .as_number();
     let mut rates = &model.cost.rates;
     let mut matched_threshold = None;
     for tier in model.cost.tiers.iter().flatten() {
-        let threshold = u128::from(tier.input_tokens_above);
+        let threshold = tier.input_tokens_above as f64;
         if input_tokens > threshold && matched_threshold.is_none_or(|matched| threshold > matched) {
             rates = &tier.rates;
             matched_threshold = Some(threshold);
         }
     }
 
-    let long_write = usage.cache_write_1h.unwrap_or(0) as f64;
-    let short_write = usage.cache_write as f64 - long_write;
-    usage.cost.input = rates.input / 1_000_000.0 * usage.input as f64;
-    usage.cost.output = rates.output / 1_000_000.0 * usage.output as f64;
-    usage.cost.cache_read = rates.cache_read / 1_000_000.0 * usage.cache_read as f64;
+    let long_write = usage
+        .cache_write_1h
+        .as_ref()
+        .map_or(0.0, crate::types::UsageValue::as_number);
+    let short_write = usage.cache_write.as_number() - long_write;
+    usage.cost.input = rates.input / 1_000_000.0 * usage.input.as_number();
+    usage.cost.output = rates.output / 1_000_000.0 * usage.output.as_number();
+    usage.cost.cache_read = rates.cache_read / 1_000_000.0 * usage.cache_read.as_number();
     usage.cost.cache_write =
         (rates.cache_write * short_write + rates.input * 2.0 * long_write) / 1_000_000.0;
     usage.cost.total =
@@ -144,14 +150,14 @@ mod tests {
                 input_tokens_above: 272_000,
             }]),
         };
-        let usage = |cache_write| Usage {
-            input: 200_000,
-            output: 100_000,
-            cache_read: 72_000,
-            cache_write,
+        let usage = |cache_write: i32| Usage {
+            input: 200_000.into(),
+            output: 100_000.into(),
+            cache_read: 72_000.into(),
+            cache_write: cache_write.into(),
             cache_write_1h: None,
             reasoning: None,
-            total_tokens: 372_000 + cache_write,
+            total_tokens: (372_000 + cache_write).into(),
             cost: UsageCost::default(),
         };
         let mut short = usage(0);
@@ -180,8 +186,8 @@ mod tests {
             cache_write: 6.25,
         };
         let mut usage = Usage {
-            cache_write: 100,
-            cache_write_1h: Some(40),
+            cache_write: 100.into(),
+            cache_write_1h: Some(40.into()),
             ..Usage::default()
         };
         assert_eq!(calculate_cost(&model, &mut usage).cache_write, 0.000_775);
