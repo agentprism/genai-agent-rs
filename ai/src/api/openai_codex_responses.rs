@@ -455,7 +455,9 @@ async fn run_stream_inner(
         &grammar_properties,
     )?;
     if let Some(on_payload) = &options.stream.request.on_payload
-        && let Some(replacement) = on_payload(body.clone(), model).await
+        && let Some(replacement) = on_payload(body.clone(), model)
+            .await
+            .map_err(CodexRunError::new)?
     {
         body = replacement;
     }
@@ -1436,7 +1438,8 @@ async fn acquire_sse_response(
                         },
                         model,
                     )
-                    .await;
+                    .await
+                    .map_err(CodexRunError::new)?;
                 }
                 if (200..300).contains(&response.status) {
                     return Ok(response);

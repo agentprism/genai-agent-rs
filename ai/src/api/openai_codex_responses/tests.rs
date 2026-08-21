@@ -550,7 +550,7 @@ async fn preaborted_codex_preserves_key_and_payload_ordering_without_a_request()
     options.stream.request.signal = Some(signal.clone());
     options.stream.request.on_payload = Some(Arc::new(move |_, _| {
         callback_calls.fetch_add(1, Ordering::Relaxed);
-        Box::pin(async { None })
+        Box::pin(async { Ok(None) })
     }));
 
     let mut events = stream(&model("gpt-5.1-codex"), &context("hello"), options);

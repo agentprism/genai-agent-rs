@@ -23,8 +23,8 @@ httpdate = "1"
 hyper = { version = "1", features = ["http1"] }
 indexmap = { version = "2", features = ["serde"] }
 jsonschema = { version = "0.49", default-features = false }
-# Ruled 2026-08-19: the OpenAI client for the openai-completions/openai-responses API
-# implementations — plays the role pi's `openai` SDK plays (transport + SSE framing).
+# Ruled 2026-08-19: the selected OpenAI SDK. The fidelity layer owns raw HTTP/SSE because
+# openai-oxide's public stream API collapses response hooks and is not byte-correct across chunks.
 openai-oxide = "0.16"
 reqwest = { version = "0.13", default-features = false, features = ["stream", "rustls"] }
 regex = "1"
@@ -44,3 +44,4 @@ bytes = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["server"] }
 hyper-util = { version = "0.1", features = ["tokio", "http1"] }
+sha2 = "0.10"

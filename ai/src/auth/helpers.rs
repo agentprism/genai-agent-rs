@@ -134,6 +134,36 @@ mod tests {
     use serde_json::Map;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[derive(Clone, Default)]
+    struct TestContext(crate::types::ProviderEnv);
+
+    impl AuthContext for TestContext {
+        fn env(&self, name: String) -> AuthFuture<Option<String>> {
+            let value = self.0.get(&name).cloned();
+            Box::pin(async move { Ok(value) })
+        }
+
+        fn file_exists(&self, _path: String) -> AuthFuture<bool> {
+            Box::pin(async { Ok(false) })
+        }
+    }
+
+    #[derive(Clone)]
+    struct TestInteraction;
+
+    impl AuthInteraction for TestInteraction {
+        fn signal(&self) -> Option<Arc<dyn crate::types::AbortSignal>> {
+            None
+        }
+
+        fn prompt(&self, prompt: AuthPrompt) -> AuthFuture<String> {
+            assert!(matches!(prompt, AuthPrompt::Secret { .. }));
+            Box::pin(async { Ok("entered-key".to_owned()) })
+        }
+
+        fn notify(&self, _event: AuthEvent) {}
+    }
+
     fn oauth_credential() -> OAuthCredential {
         OAuthCredential {
             kind: OAuthCredentialType::OAuth,
@@ -165,6 +195,33 @@ mod tests {
         assert_eq!(result.auth.api_key.as_deref(), Some("stored"));
         assert_eq!(result.env, Some(credential_env));
         assert_eq!(result.source.as_deref(), Some("stored credential"));
+    }
+
+    /// Ports pi `test/providers.test.ts:283-317`.
+    #[tokio::test]
+    async fn env_key_fallback_order_and_secret_login_match_provider_contract() {
+        let auth = env_api_key_auth(
+            "Test key",
+            vec!["FIRST_KEY".to_owned(), "SECOND_KEY".to_owned()],
+        );
+        let resolved = (auth.resolve)(ApiKeyResolveInput {
+            ctx: Arc::new(TestContext(crate::types::ProviderEnv::from([(
+                "SECOND_KEY".to_owned(),
+                "second".to_owned(),
+            )]))),
+            credential: None,
+            signal: AbortController::new().signal(),
+        })
+        .await
+        .expect("resolve")
+        .expect("configured");
+        assert_eq!(resolved.auth.api_key.as_deref(), Some("second"));
+        assert_eq!(resolved.source.as_deref(), Some("SECOND_KEY"));
+        let login = auth.login.expect("login");
+        let credential = login(normalize_interaction(Arc::new(TestInteraction)))
+            .await
+            .expect("credential");
+        assert_eq!(credential.key.as_deref(), Some("entered-key"));
     }
 
     /// Pins pi `src/auth/helpers.ts:45-64` single lazy-load promise.

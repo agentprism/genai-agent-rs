@@ -42,6 +42,12 @@ pub fn flatten_model_catalog<T: Clone>(
         .collect()
 }
 
+pub fn parse_embedded_model_catalog(provider: &str, json: &str) -> ModelCatalog {
+    let groups: ModelGroups = serde_json::from_str(json)
+        .unwrap_or_else(|error| panic!("invalid embedded model catalog for {provider}: {error}"));
+    flatten_model_catalog(provider, &groups)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

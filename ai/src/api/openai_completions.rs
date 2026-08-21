@@ -530,7 +530,9 @@ async fn run_stream_inner(
         &grammar_tool_input_properties,
     )?;
     if let Some(on_payload) = &options.stream.request.on_payload
-        && let Some(replacement) = on_payload(params.clone(), model).await
+        && let Some(replacement) = on_payload(params.clone(), model)
+            .await
+            .map_err(CompletionError::new)?
     {
         params = replacement;
     }
@@ -553,7 +555,9 @@ async fn run_stream_inner(
         .map_err(format_retry_error)?;
 
     if let Some(on_response) = &options.stream.request.on_response {
-        on_response(acquired.response.clone(), model).await;
+        on_response(acquired.response.clone(), model)
+            .await
+            .map_err(CompletionError::new)?;
     }
 
     sender
@@ -3038,6 +3042,27 @@ mod tests {
         assert_eq!(message.error_message.as_deref(), Some("payload hook panic"));
     }
 
+    /// Pins pi `src/api/openai-completions.ts:315,663-683`: a rejected hook
+    /// becomes the same in-band error as a synchronously thrown hook.
+    #[tokio::test]
+    async fn rejected_payload_hook_is_terminal_in_band() {
+        let mut request_options = options();
+        request_options.stream.request.on_payload = Some(Arc::new(|_, _| {
+            Box::pin(async { Err("payload hook rejected".to_owned()) })
+        }));
+        let message = run_message(
+            &model("https://example.invalid/v1".to_owned()),
+            &context(),
+            request_options,
+        )
+        .await;
+        assert_eq!(message.stop_reason, StopReason::Error);
+        assert_eq!(
+            message.error_message.as_deref(),
+            Some("payload hook rejected")
+        );
+    }
+
     fn completions_compat(value: OpenAICompletionsCompat) -> Option<ModelCompat> {
         Some(ModelCompat::OpenAICompletions(Box::new(value)))
     }
@@ -4970,7 +4995,7 @@ mod tests {
         request_options.stream.request.fetch = Some(fetch.clone());
         request_options.stream.request.on_payload = Some(Arc::new(move |_, _| {
             callback_calls.fetch_add(1, Ordering::Relaxed);
-            Box::pin(async { None })
+            Box::pin(async { Ok(None) })
         }));
 
         let message = run_message(
@@ -5260,6 +5285,7 @@ mod tests {
             let callback = callback.clone();
             Box::pin(async move {
                 *callback.lock().unwrap_or_else(PoisonError::into_inner) = Some(response);
+                Ok(())
             })
         }));
         let message =

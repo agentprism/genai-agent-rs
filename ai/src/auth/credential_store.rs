@@ -268,4 +268,54 @@ mod tests {
             Some(credential("first"))
         );
     }
+
+    /// Ports pi `test/models-runtime.test.ts:110-124`.
+    #[tokio::test]
+    async fn list_exposes_only_provider_and_credential_kind_in_insertion_order() {
+        let store = InMemoryCredentialStore::default();
+        store
+            .modify(
+                "api-provider".to_owned(),
+                Box::new(|_| Box::pin(async { Ok(Some(credential("secret"))) })),
+                AuthOperationOptions::default(),
+            )
+            .await
+            .expect("api credential");
+        store
+            .modify(
+                "oauth-provider".to_owned(),
+                Box::new(|_| {
+                    Box::pin(async {
+                        Ok(Some(Credential::OAuth(
+                            crate::auth::types::OAuthCredential {
+                                kind: Default::default(),
+                                access: "access".to_owned(),
+                                refresh: "refresh".to_owned(),
+                                expires: 1.0,
+                                extra: Default::default(),
+                            },
+                        )))
+                    })
+                }),
+                AuthOperationOptions::default(),
+            )
+            .await
+            .expect("oauth credential");
+        assert_eq!(
+            store
+                .list(AuthOperationOptions::default())
+                .await
+                .expect("metadata"),
+            [
+                CredentialInfo {
+                    provider_id: "api-provider".to_owned(),
+                    kind: crate::auth::types::AuthType::ApiKey,
+                },
+                CredentialInfo {
+                    provider_id: "oauth-provider".to_owned(),
+                    kind: crate::auth::types::AuthType::OAuth,
+                },
+            ]
+        );
+    }
 }

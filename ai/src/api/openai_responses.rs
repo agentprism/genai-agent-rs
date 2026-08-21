@@ -344,7 +344,9 @@ async fn run_stream_inner(
         &grammar_tool_input_properties,
     )?;
     if let Some(on_payload) = &options.stream.request.on_payload
-        && let Some(replacement) = on_payload(params.clone(), model).await
+        && let Some(replacement) = on_payload(params.clone(), model)
+            .await
+            .map_err(ResponsesRunError::new)?
     {
         params = replacement;
     }
@@ -368,7 +370,9 @@ async fn run_stream_inner(
     let mut sdk_stream = response_stream(acquired.stream);
 
     if let Some(on_response) = &options.stream.request.on_response {
-        on_response(acquired.response.clone(), model).await;
+        on_response(acquired.response.clone(), model)
+            .await
+            .map_err(ResponsesRunError::new)?;
     }
     sender
         .send(AssistantMessageEvent::Start)
@@ -1662,7 +1666,7 @@ mod tests {
         request_options.stream.request.fetch = Some(fetch.clone());
         request_options.stream.request.on_payload = Some(Arc::new(move |_, _| {
             callback_calls.fetch_add(1, Ordering::Relaxed);
-            Box::pin(async { None })
+            Box::pin(async { Ok(None) })
         }));
 
         let mut events = stream(
@@ -1859,13 +1863,14 @@ mod tests {
                 body.as_object_mut()
                     .expect("request object")
                     .insert("hook_field".to_owned(), json!("present"));
-                Some(body)
+                Ok(Some(body))
             })
         }));
         request_options.stream.request.on_response = Some(Arc::new(move |response, _| {
             let observed = hook_response.clone();
             Box::pin(async move {
                 *observed.lock().unwrap_or_else(PoisonError::into_inner) = Some(response);
+                Ok(())
             })
         }));
         let model = base_model(server.base_url.clone(), "gpt-5.4");

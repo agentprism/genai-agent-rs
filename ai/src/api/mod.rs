@@ -78,6 +78,34 @@ pub trait ProviderStreams: Send + Sync {
     fn deferred(&self) -> Option<&dyn DeferredStreams> {
         None
     }
+
+    fn supports_fetch_deferred(&self) -> bool {
+        self.deferred().is_some()
+    }
+
+    fn fetch_deferred(
+        &self,
+        model: &Model,
+        handle: &DeferredHandle,
+        options: DeferredFetchOptions,
+    ) -> Option<AssistantMessageEventStream> {
+        self.deferred()
+            .map(|deferred| deferred.fetch_deferred(model, handle, options))
+    }
+
+    fn supports_cancel_deferred(&self) -> bool {
+        self.deferred().is_some()
+    }
+
+    fn cancel_deferred<'a>(
+        &'a self,
+        model: &'a Model,
+        handle: &'a DeferredHandle,
+        options: DeferredCancelOptions,
+    ) -> Option<BoxFuture<'a, Result<(), crate::types::AssistantMessage>>> {
+        self.deferred()
+            .map(|deferred| deferred.cancel_deferred(model, handle, options))
+    }
 }
 
 /// pi's optional deferred-response surface (`fetchDeferred`/`cancelDeferred`).

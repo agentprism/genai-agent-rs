@@ -369,10 +369,18 @@ pub trait FetchFunction: Send + Sync {
     ) -> BoxFuture<'_, Result<ProviderHttpResponse, String>>;
 }
 
-pub type OnPayload<TModel = Model> =
-    Arc<dyn for<'a> Fn(Value, &'a TModel) -> BoxFuture<'a, Option<Value>> + Send + Sync + 'static>;
-pub type OnResponse<TModel = Model> =
-    Arc<dyn for<'a> Fn(ProviderResponse, &'a TModel) -> BoxFuture<'a, ()> + Send + Sync + 'static>;
+pub type OnPayload<TModel = Model> = Arc<
+    dyn for<'a> Fn(Value, &'a TModel) -> BoxFuture<'a, Result<Option<Value>, String>>
+        + Send
+        + Sync
+        + 'static,
+>;
+pub type OnResponse<TModel = Model> = Arc<
+    dyn for<'a> Fn(ProviderResponse, &'a TModel) -> BoxFuture<'a, Result<(), String>>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", bound(serialize = "", deserialize = ""))]
@@ -1781,122 +1789,111 @@ impl<'de> Deserialize<'de> for VercelGatewayRouting {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OpenAICompletionsCompat {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_store: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_developer_role: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_reasoning_effort: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_usage_in_streaming: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_finish_reason: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_tokens_field: Option<MaxTokensField>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requires_tool_result_name: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requires_assistant_after_tool_result: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requires_thinking_as_text: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requires_reasoning_content_on_assistant_messages: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking_format: Option<ThinkingFormat>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chat_template_kwargs: Option<BTreeMap<String, ChatTemplateKwargValue>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chat_template_args: Option<BTreeMap<String, ChatTemplateKwargValue>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub open_router_routing: Option<OpenRouterRouting>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vercel_gateway_routing: Option<VercelGatewayRouting>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub zai_tool_stream: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking_token_budget_field: Option<ThinkingTokenBudgetField>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_thinking_token_budget: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "supportsOpenAIGrammarTools")]
-    pub supports_open_ai_grammar_tools: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_strict_mode: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_control_format: Option<CacheControlFormat>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub send_session_affinity_headers: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deferred_tools_mode: Option<DeferredToolsMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_affinity_format: Option<SessionAffinityFormat>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_long_cache_retention: Option<bool>,
-    #[serde(default, flatten)]
-    pub extra: Map<String, Value>,
+macro_rules! ordered_compat_object {
+    (
+        pub struct $name:ident {
+            $(pub $field:ident: $ty:ty => $wire_name:literal,)*
+        }
+    ) => {
+        #[derive(Debug, Clone, Default, PartialEq)]
+        pub struct $name {
+            $(pub $field: Option<$ty>,)*
+            pub extra: Map<String, Value>,
+            #[doc(hidden)]
+            pub __field_order: Vec<String>,
+        }
+
+        impl Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                let mut fields = self.extra.clone();
+                $(insert_optional_field!(fields, $wire_name, self.$field.as_ref());)*
+                serialize_ordered_object(fields, &self.__field_order, serializer)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                let mut fields = Map::<String, Value>::deserialize(deserializer)?;
+                let field_order = fields.keys().cloned().collect();
+                Ok(Self {
+                    $($field: deserialize_field(&mut fields, $wire_name)
+                        .map_err(D::Error::custom)?,)*
+                    extra: fields,
+                    __field_order: field_order,
+                })
+            }
+        }
+    };
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OpenAIResponsesCompat {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_developer_role: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_affinity_format: Option<SessionAffinityFormat>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_long_cache_retention: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_strict_mode: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "supportsOpenAIGrammarTools")]
-    pub supports_open_ai_grammar_tools: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_additional_tools: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_tool_search: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_explicit_prompt_cache_mode: Option<bool>,
-    #[serde(default, flatten)]
-    pub extra: Map<String, Value>,
+ordered_compat_object! {
+    pub struct OpenAICompletionsCompat {
+        pub supports_store: bool => "supportsStore",
+        pub supports_developer_role: bool => "supportsDeveloperRole",
+        pub supports_reasoning_effort: bool => "supportsReasoningEffort",
+        pub supports_usage_in_streaming: bool => "supportsUsageInStreaming",
+        pub supports_finish_reason: bool => "supportsFinishReason",
+        pub max_tokens_field: MaxTokensField => "maxTokensField",
+        pub requires_tool_result_name: bool => "requiresToolResultName",
+        pub requires_assistant_after_tool_result: bool => "requiresAssistantAfterToolResult",
+        pub requires_thinking_as_text: bool => "requiresThinkingAsText",
+        pub requires_reasoning_content_on_assistant_messages: bool => "requiresReasoningContentOnAssistantMessages",
+        pub thinking_format: ThinkingFormat => "thinkingFormat",
+        pub chat_template_kwargs: BTreeMap<String, ChatTemplateKwargValue> => "chatTemplateKwargs",
+        pub chat_template_args: BTreeMap<String, ChatTemplateKwargValue> => "chatTemplateArgs",
+        pub open_router_routing: OpenRouterRouting => "openRouterRouting",
+        pub vercel_gateway_routing: VercelGatewayRouting => "vercelGatewayRouting",
+        pub zai_tool_stream: bool => "zaiToolStream",
+        pub thinking_token_budget_field: ThinkingTokenBudgetField => "thinkingTokenBudgetField",
+        pub supports_thinking_token_budget: bool => "supportsThinkingTokenBudget",
+        pub supports_open_ai_grammar_tools: bool => "supportsOpenAIGrammarTools",
+        pub supports_strict_mode: bool => "supportsStrictMode",
+        pub cache_control_format: CacheControlFormat => "cacheControlFormat",
+        pub send_session_affinity_headers: bool => "sendSessionAffinityHeaders",
+        pub deferred_tools_mode: DeferredToolsMode => "deferredToolsMode",
+        pub session_affinity_format: SessionAffinityFormat => "sessionAffinityFormat",
+        pub supports_long_cache_retention: bool => "supportsLongCacheRetention",
+    }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AnthropicMessagesCompat {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_eager_tool_input_streaming: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_long_cache_retention: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub send_session_affinity_headers: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_cache_control_on_tools: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_temperature: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub force_adaptive_thinking: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allow_empty_signature: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_strict_tools: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allowed_fallback_models: Option<Vec<AnthropicAllowedFallbackModel>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_tool_references: Option<bool>,
-    #[serde(default, flatten)]
-    pub extra: Map<String, Value>,
+ordered_compat_object! {
+    pub struct OpenAIResponsesCompat {
+        pub supports_developer_role: bool => "supportsDeveloperRole",
+        pub session_affinity_format: SessionAffinityFormat => "sessionAffinityFormat",
+        pub supports_long_cache_retention: bool => "supportsLongCacheRetention",
+        pub supports_strict_mode: bool => "supportsStrictMode",
+        pub supports_open_ai_grammar_tools: bool => "supportsOpenAIGrammarTools",
+        pub supports_additional_tools: bool => "supportsAdditionalTools",
+        pub supports_tool_search: bool => "supportsToolSearch",
+        pub supports_explicit_prompt_cache_mode: bool => "supportsExplicitPromptCacheMode",
+    }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BedrockCompat {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_strict_mode: Option<bool>,
-    #[serde(default, flatten)]
-    pub extra: Map<String, Value>,
+ordered_compat_object! {
+    pub struct AnthropicMessagesCompat {
+        pub supports_eager_tool_input_streaming: bool => "supportsEagerToolInputStreaming",
+        pub supports_long_cache_retention: bool => "supportsLongCacheRetention",
+        pub send_session_affinity_headers: bool => "sendSessionAffinityHeaders",
+        pub supports_cache_control_on_tools: bool => "supportsCacheControlOnTools",
+        pub supports_temperature: bool => "supportsTemperature",
+        pub force_adaptive_thinking: bool => "forceAdaptiveThinking",
+        pub allow_empty_signature: bool => "allowEmptySignature",
+        pub supports_strict_tools: bool => "supportsStrictTools",
+        pub allowed_fallback_models: Vec<AnthropicAllowedFallbackModel> => "allowedFallbackModels",
+        pub supports_tool_references: bool => "supportsToolReferences",
+    }
+}
+
+ordered_compat_object! {
+    pub struct BedrockCompat {
+        pub supports_strict_mode: bool => "supportsStrictMode",
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -2629,6 +2626,7 @@ mod tests {
             (
                 "openai-completions",
                 json!({
+                    "beforeCompletionsFlag": 1,
                     "supportsStore": false,
                     "futureCompletionsFlag": {"mode":"new","value":1}
                 }),
@@ -2636,6 +2634,7 @@ mod tests {
             (
                 "openai-responses",
                 json!({
+                    "beforeResponsesFlag": 1,
                     "supportsDeveloperRole": true,
                     "futureResponsesFlag": [1, null, "x"]
                 }),
@@ -2643,6 +2642,7 @@ mod tests {
             (
                 "anthropic-messages",
                 json!({
+                    "beforeAnthropicFlag": 1,
                     "supportsTemperature": false,
                     "futureAnthropicFlag": 0
                 }),
@@ -2650,6 +2650,7 @@ mod tests {
             (
                 "bedrock-converse-stream",
                 json!({
+                    "beforeBedrockFlag": 1,
                     "supportsStrictMode": true,
                     "futureBedrockFlag": null
                 }),
