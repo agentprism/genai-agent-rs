@@ -1,6 +1,6 @@
 //! Provider-neutral data contracts mirrored from pi `src/types.ts`.
 
-use futures::future::BoxFuture;
+use futures::{StreamExt, future::BoxFuture};
 use indexmap::IndexMap;
 use serde::de::Error as _;
 use serde::ser::Error as _;
@@ -367,6 +367,85 @@ pub trait FetchFunction: Send + Sync {
         &self,
         request: ProviderHttpRequest,
     ) -> BoxFuture<'_, Result<ProviderHttpResponse, String>>;
+}
+
+struct DefaultFetch;
+
+impl FetchFunction for DefaultFetch {
+    fn fetch(
+        &self,
+        request: ProviderHttpRequest,
+    ) -> BoxFuture<'_, Result<ProviderHttpResponse, String>> {
+        Box::pin(async move {
+            if request
+                .signal
+                .as_ref()
+                .is_some_and(|signal| signal.is_aborted())
+            {
+                return Err("Request was aborted".to_owned());
+            }
+            let method = reqwest::Method::from_bytes(request.method.as_bytes())
+                .map_err(|error| error.to_string())?;
+            let mut headers = reqwest::header::HeaderMap::new();
+            for (name, value) in request.headers {
+                headers.insert(
+                    reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                        .map_err(|error| error.to_string())?,
+                    reqwest::header::HeaderValue::from_str(&value)
+                        .map_err(|error| error.to_string())?,
+                );
+            }
+            static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+            let send = CLIENT
+                .get_or_init(reqwest::Client::new)
+                .request(method, request.url)
+                .headers(headers)
+                .body(request.body)
+                .send();
+            let response = if let Some(signal) = request.signal.as_ref() {
+                tokio::select! {
+                    biased;
+                    _ = signal.cancelled() => return Err("Request was aborted".to_owned()),
+                    response = send => response,
+                }
+            } else {
+                send.await
+            }
+            .map_err(|error| error.to_string())?;
+            let status = response.status();
+            let status_text = status.canonical_reason().unwrap_or_default().to_owned();
+            let headers = response
+                .headers()
+                .iter()
+                .filter_map(|(name, value)| {
+                    value
+                        .to_str()
+                        .ok()
+                        .map(|value| (name.as_str().to_owned(), value.to_owned()))
+                })
+                .collect();
+            let body = response.bytes_stream().map(|chunk| {
+                chunk
+                    .map(|bytes| bytes.to_vec())
+                    .map_err(|error| error.to_string())
+            });
+            Ok(ProviderHttpResponse {
+                status: status.as_u16(),
+                status_text,
+                headers,
+                body: Some(Box::pin(body)),
+            })
+        })
+    }
+}
+
+pub fn default_fetch() -> Arc<dyn FetchFunction> {
+    static FETCH: std::sync::OnceLock<Arc<dyn FetchFunction>> = std::sync::OnceLock::new();
+    FETCH.get_or_init(|| Arc::new(DefaultFetch)).clone()
+}
+
+pub fn is_default_fetch(fetch: &Arc<dyn FetchFunction>) -> bool {
+    Arc::ptr_eq(fetch, &default_fetch())
 }
 
 pub type OnPayload<TModel = Model> = Arc<

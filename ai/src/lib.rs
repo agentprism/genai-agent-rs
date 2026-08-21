@@ -27,6 +27,11 @@ pub mod utils;
 pub use api::anthropic_messages::{
     AnthropicEffort, AnthropicMessagesClient, AnthropicOptions, AnthropicThinkingDisplay,
 };
+pub use api::google_generative_ai::{
+    GoogleGenerativeAIApi, GoogleOptions, GoogleThinkingOptions, GoogleToolChoice,
+};
+pub use api::google_shared::{GoogleApiThinkingLevel, ResolvedGoogleThinkingLevel};
+pub use api::google_vertex::{GoogleVertexApi, GoogleVertexOptions};
 pub use auth::{context::*, credential_store::*, helpers::*, types::*};
 pub use event_stream::*;
 pub use models::*;

@@ -157,6 +157,8 @@ impl ProviderStreams for OpenAICodexResponsesApi {
             ApiStreamOptions::AnthropicMessages(_)
             | ApiStreamOptions::OpenAICompletions(_)
             | ApiStreamOptions::OpenAIResponses(_)
+            | ApiStreamOptions::GoogleGenerativeAI(_)
+            | ApiStreamOptions::GoogleVertex(_)
             | ApiStreamOptions::Custom { .. } => terminal_setup_error(
                 model,
                 "API options variant does not match openai-codex-responses",

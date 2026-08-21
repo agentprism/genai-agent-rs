@@ -1,6 +1,7 @@
 use super::opencode_models::OPENCODE_MODELS;
 use crate::api::ProviderStreams;
 use crate::api::anthropic_messages::anthropic_messages_api;
+use crate::api::google_generative_ai::google_generative_ai_api;
 use crate::api::openai_completions::open_ai_completions_api;
 use crate::api::openai_responses::open_ai_responses_api;
 use crate::auth::{ProviderAuth, env_api_key_auth};
@@ -12,6 +13,7 @@ use std::sync::Arc;
 pub fn opencode_provider() -> ProviderRef {
     let anthropic: Arc<dyn ProviderStreams> = Arc::new(anthropic_messages_api());
     let completions: Arc<dyn ProviderStreams> = Arc::new(open_ai_completions_api());
+    let google: Arc<dyn ProviderStreams> = Arc::new(google_generative_ai_api());
     let responses: Arc<dyn ProviderStreams> = Arc::new(open_ai_responses_api());
     create_provider(CreateProviderOptions {
         id: "opencode".to_owned(),
@@ -30,6 +32,7 @@ pub fn opencode_provider() -> ProviderRef {
         filter_models: None,
         api: ProviderApi::ByApi(IndexMap::from([
             (Api::from("anthropic-messages"), anthropic),
+            (Api::from("google-generative-ai"), google),
             (Api::from("openai-completions"), completions),
             (Api::from("openai-responses"), responses),
         ])),

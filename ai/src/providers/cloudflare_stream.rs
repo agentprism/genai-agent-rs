@@ -42,6 +42,8 @@ impl ProviderStreams for CloudflareStreams {
             ApiStreamOptions::OpenAICompletions(options) => options.stream.request.env.as_ref(),
             ApiStreamOptions::OpenAIResponses(options) => options.stream.request.env.as_ref(),
             ApiStreamOptions::OpenAICodexResponses(options) => options.stream.request.env.as_ref(),
+            ApiStreamOptions::GoogleGenerativeAI(options) => options.stream.request.env.as_ref(),
+            ApiStreamOptions::GoogleVertex(options) => options.stream.request.env.as_ref(),
             ApiStreamOptions::Custom { base, .. } => base.request.env.as_ref(),
         };
         self.inner

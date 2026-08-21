@@ -1604,6 +1604,8 @@ impl RequestOptionsAccess for ApiStreamOptions {
             Self::OpenAICompletions(options) => &options.stream.request,
             Self::OpenAIResponses(options) => &options.stream.request,
             Self::OpenAICodexResponses(options) => &options.stream.request,
+            Self::GoogleGenerativeAI(options) => &options.stream.request,
+            Self::GoogleVertex(options) => &options.stream.request,
             Self::Custom { base, .. } => &base.request,
         }
     }
@@ -1615,6 +1617,8 @@ impl RequestOptionsAccess for ApiStreamOptions {
             Self::OpenAICompletions(options) => &mut options.stream.request,
             Self::OpenAIResponses(options) => &mut options.stream.request,
             Self::OpenAICodexResponses(options) => &mut options.stream.request,
+            Self::GoogleGenerativeAI(options) => &mut options.stream.request,
+            Self::GoogleVertex(options) => &mut options.stream.request,
             Self::Custom { base, .. } => &mut base.request,
         }
     }

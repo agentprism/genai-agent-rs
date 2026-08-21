@@ -25,6 +25,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "adk-core"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "177227011b93af832e592bbe8577b8284104a2d095fda3040bb27ed8cfc9814d"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "adk-gemini"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a0a343f7cb43da47ae7060a88d74e2ef1e6cb68f4b9e599fda0c0db6403fcc7"
+dependencies = [
+ "adk-core",
+ "async-stream",
+ "async-trait",
+ "base64 0.22.1",
+ "eventsource-stream",
+ "futures",
+ "futures-util",
+ "google-cloud-aiplatform-v1",
+ "google-cloud-auth",
+ "google-cloud-gax",
+ "mime",
+ "mime_guess",
+ "reqwest 0.12.28",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "snafu",
+ "strum",
+ "strum_macros",
+ "time",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -35,11 +83,14 @@ name = "agentprism-ai"
 version = "0.0.1"
 dependencies = [
  "adk-anthropic",
+ "adk-gemini",
  "base64 0.23.1",
  "bytes",
  "chrono",
+ "eventsource-stream",
  "futures",
  "getrandom 0.3.4",
+ "google-cloud-auth",
  "http 1.5.0",
  "http-body-util",
  "httpdate",
@@ -49,6 +100,7 @@ dependencies = [
  "jsonschema",
  "openai-oxide",
  "regex",
+ "reqwest 0.12.28",
  "reqwest 0.13.4",
  "rustix",
  "serde",
@@ -746,6 +798,9 @@ name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "bytes-utils"
@@ -1645,6 +1700,229 @@ dependencies = [
 ]
 
 [[package]]
+name = "google-cloud-aiplatform-v1"
+version = "1.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af392dd3f316edca5dd8ca54d8004c76553e4287c8787f8d23564d22a776db58"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "google-cloud-api",
+ "google-cloud-gax",
+ "google-cloud-gax-internal",
+ "google-cloud-iam-v1",
+ "google-cloud-location",
+ "google-cloud-longrunning",
+ "google-cloud-lro",
+ "google-cloud-rpc",
+ "google-cloud-type",
+ "google-cloud-wkt",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "tracing",
+]
+
+[[package]]
+name = "google-cloud-api"
+version = "1.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19dd5722ba4d24fbc19f6a44b88c335852c9a98d058bc0d6073c9a730c026cad"
+dependencies = [
+ "bytes",
+ "google-cloud-wkt",
+ "serde",
+ "serde_json",
+ "serde_with",
+]
+
+[[package]]
+name = "google-cloud-auth"
+version = "1.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27e658fc9f8b6bdf9a5c816ebca6dd6bcd32f8550e5c6580652b2c0eac1980f6"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "google-cloud-gax",
+ "hex",
+ "hmac 0.12.1",
+ "http 1.5.0",
+ "reqwest 0.13.4",
+ "rustc_version",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror",
+ "time",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "google-cloud-gax"
+version = "1.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9a46dd0fd026bbc4a5d84e6ab0c941cee6e3b057976a0bb107fdb5238ce598f"
+dependencies = [
+ "bytes",
+ "futures",
+ "google-cloud-rpc",
+ "google-cloud-wkt",
+ "http 1.5.0",
+ "pin-project",
+ "rand 0.10.2",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "google-cloud-gax-internal"
+version = "0.7.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65d462b4fcee5f495bfb58edbf4a9250c230a1079d410bdcb8505bc5f713dcee"
+dependencies = [
+ "bytes",
+ "futures",
+ "google-cloud-auth",
+ "google-cloud-gax",
+ "google-cloud-rpc",
+ "http 1.5.0",
+ "http-body-util",
+ "hyper",
+ "lazy_static",
+ "opentelemetry",
+ "opentelemetry-semantic-conventions",
+ "opentelemetry_sdk",
+ "percent-encoding",
+ "pin-project",
+ "reqwest 0.13.4",
+ "rustc_version",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tonic",
+ "tracing",
+ "tracing-opentelemetry",
+]
+
+[[package]]
+name = "google-cloud-iam-v1"
+version = "1.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30ce870ac18f3e0a474000cd57eab8bf3c64af8b5ed820468df8612182709c9a"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "google-cloud-gax",
+ "google-cloud-gax-internal",
+ "google-cloud-type",
+ "google-cloud-wkt",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "tracing",
+]
+
+[[package]]
+name = "google-cloud-location"
+version = "1.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9929c1cec55461f86983fde945f08ec35d2a2fbb19fa239a7a9a1fe8d131f10e"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "google-cloud-gax",
+ "google-cloud-gax-internal",
+ "google-cloud-wkt",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "tracing",
+]
+
+[[package]]
+name = "google-cloud-longrunning"
+version = "1.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebab215997c51f786852840fec8c76174b8a4af96d08e5fc1569742805baab09"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "google-cloud-gax",
+ "google-cloud-gax-internal",
+ "google-cloud-rpc",
+ "google-cloud-wkt",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "tracing",
+]
+
+[[package]]
+name = "google-cloud-lro"
+version = "1.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82a4f93a1ec8e6e5448899877ea6021e0f5d06e6b08ccd9b0bd99bc837ca357b"
+dependencies = [
+ "google-cloud-gax",
+ "google-cloud-longrunning",
+ "google-cloud-rpc",
+ "google-cloud-wkt",
+ "serde",
+ "tokio",
+]
+
+[[package]]
+name = "google-cloud-rpc"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e2162c08a89118130979ba261080e960e44cdcb2d6e2ab8ca9b1da245285d353"
+dependencies = [
+ "bytes",
+ "google-cloud-wkt",
+ "serde",
+ "serde_json",
+ "serde_with",
+]
+
+[[package]]
+name = "google-cloud-type"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63acc3a92a85f96bab021c3a3e29b53bbacc97651e1b524d4c2991960a63eb82"
+dependencies = [
+ "bytes",
+ "google-cloud-wkt",
+ "serde",
+ "serde_json",
+ "serde_with",
+]
+
+[[package]]
+name = "google-cloud-wkt"
+version = "1.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7fccf98cfd5481a5f5a285181ab0c62123d7d47cd2bb7299448440649349e4e7"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "thiserror",
+ "time",
+ "url",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1821,6 +2099,20 @@ dependencies = [
  "rustls-native-certs",
  "tokio",
  "tokio-rustls",
+ "tower-service",
+ "webpki-roots 1.0.9",
+]
+
+[[package]]
+name = "hyper-timeout"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b90d566bffbce6a75bd8b09a05aa8c2cb1fabb6cb348f8840c9e4c90a0d83b0"
+dependencies = [
+ "hyper",
+ "hyper-util",
+ "pin-project-lite",
+ "tokio",
  "tower-service",
 ]
 
@@ -2643,6 +2935,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "opentelemetry"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b84bcd6ae87133e903af7ef497404dda70c60d0ea14895fc8a5e6722754fc2a0"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+ "js-sys",
+ "pin-project-lite",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "opentelemetry-semantic-conventions"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e62e29dfe041afb8ed2a6c9737ab57db4907285d999ef8ad3a59092a36bdc846"
+
+[[package]]
+name = "opentelemetry_sdk"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e14ae4f5991976fd48df6d843de219ca6d31b01daaab2dad5af2badeded372bd"
+dependencies = [
+ "futures-channel",
+ "futures-executor",
+ "futures-util",
+ "opentelemetry",
+ "percent-encoding",
+ "rand 0.9.5",
+ "thiserror",
+]
+
+[[package]]
 name = "outref"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3018,8 +3345,10 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "encoding_rs",
  "futures-core",
  "futures-util",
+ "h2",
  "http 1.5.0",
  "http-body 1.1.0",
  "http-body-util",
@@ -3028,6 +3357,7 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "log",
+ "mime",
  "mime_guess",
  "percent-encoding",
  "pin-project-lite",
@@ -3050,6 +3380,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.4.2",
  "web-sys",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -3166,6 +3497,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -3620,6 +3952,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8e2fb0f499abb4d162f2bedad68f5ef91a1682b5a03596ddb67efd37768d100"
 
 [[package]]
+name = "snafu"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e84b3f4eacbf3a1ce05eac6763b4d629d60cbc94d632e4092c54ade71f1e1a2"
+dependencies = [
+ "snafu-derive",
+]
+
+[[package]]
+name = "snafu-derive"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1c97747dbf44bb1ca44a561ece23508e99cb592e862f22222dcf42f51d1e451"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "socket2"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3997,6 +4350,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
+name = "tonic"
+version = "0.14.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac2a5518c70fa84342385732db33fb3f44bc4cc748936eb5833d2df34d6445ef"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "http 1.5.0",
+ "http-body 1.1.0",
+ "http-body-util",
+ "hyper",
+ "hyper-timeout",
+ "hyper-util",
+ "percent-encoding",
+ "pin-project",
+ "rustls-native-certs",
+ "sync_wrapper",
+ "tokio",
+ "tokio-rustls",
+ "tokio-stream",
+ "tower",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
 name = "tower"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4004,11 +4384,15 @@ checksum = "ebe5ef63511595f1344e2d5cfa636d973292adc0eec1f0ad45fae9f0851ab1d4"
 dependencies = [
  "futures-core",
  "futures-util",
+ "indexmap 2.14.0",
  "pin-project-lite",
+ "slab",
  "sync_wrapper",
  "tokio",
+ "tokio-util",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -4097,6 +4481,20 @@ dependencies = [
  "log",
  "once_cell",
  "tracing-core",
+]
+
+[[package]]
+name = "tracing-opentelemetry"
+version = "0.32.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ac28f2d093c6c477eaa76b23525478f38de514fa9aeb1285738d4b97a9552fc"
+dependencies = [
+ "js-sys",
+ "opentelemetry",
+ "tracing",
+ "tracing-core",
+ "tracing-subscriber",
+ "web-time",
 ]
 
 [[package]]
@@ -4351,6 +4749,7 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+ "serde_derive",
 ]
 
 [[package]]
@@ -4379,6 +4778,7 @@ checksum = "bf3923a6f5c4c6382e0b653c4117f48d631ea17f38ed86e2a828e6f7412f5239"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 

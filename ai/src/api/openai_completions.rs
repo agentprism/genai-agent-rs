@@ -131,6 +131,8 @@ impl ProviderStreams for OpenAICompletionsApi {
             ApiStreamOptions::AnthropicMessages(_)
             | ApiStreamOptions::OpenAIResponses(_)
             | ApiStreamOptions::OpenAICodexResponses(_)
+            | ApiStreamOptions::GoogleGenerativeAI(_)
+            | ApiStreamOptions::GoogleVertex(_)
             | ApiStreamOptions::Custom { .. } => terminal_setup_error(
                 model,
                 "API options variant does not match openai-completions",

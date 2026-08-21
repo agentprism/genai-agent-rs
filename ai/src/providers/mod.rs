@@ -11,6 +11,8 @@ pub mod deepseek;
 pub mod faux;
 pub mod fireworks;
 pub mod github_copilot;
+pub mod google;
+pub mod google_vertex;
 pub mod groq;
 pub mod huggingface;
 pub mod kimi_coding;
@@ -125,6 +127,11 @@ mod tests {
             (deepseek::deepseek_provider(), "https://api.deepseek.com"),
             (groq::groq_provider(), "https://api.groq.com/openai/v1"),
             (
+                google::google_provider(),
+                "https://generativelanguage.googleapis.com/v1beta",
+            ),
+            (google_vertex::google_vertex_provider(), ""),
+            (
                 fireworks::fireworks_provider(),
                 "https://api.fireworks.ai/inference",
             ),
@@ -218,6 +225,8 @@ mod tests {
                 "cloudflare-ai-gateway" => "Cloudflare AI Gateway",
                 "deepseek" => "DeepSeek",
                 "groq" => "Groq",
+                "google" => "Google",
+                "google-vertex" => "Google Vertex AI",
                 "fireworks" => "Fireworks",
                 "github-copilot" => "GitHub Copilot",
                 "huggingface" => "Hugging Face",

@@ -205,6 +205,8 @@ impl ProviderStreams for AnthropicMessagesApi {
             ApiStreamOptions::OpenAICompletions(_)
             | ApiStreamOptions::OpenAIResponses(_)
             | ApiStreamOptions::OpenAICodexResponses(_)
+            | ApiStreamOptions::GoogleGenerativeAI(_)
+            | ApiStreamOptions::GoogleVertex(_)
             | ApiStreamOptions::Custom { .. } => terminal_setup_error(
                 model,
                 "API options variant does not match anthropic-messages",

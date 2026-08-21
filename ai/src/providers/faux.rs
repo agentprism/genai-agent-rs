@@ -825,6 +825,8 @@ impl ProviderStreams for FauxCore {
             ApiStreamOptions::OpenAICompletions(options) => options.stream,
             ApiStreamOptions::OpenAIResponses(options) => options.stream,
             ApiStreamOptions::OpenAICodexResponses(options) => options.stream,
+            ApiStreamOptions::GoogleGenerativeAI(options) => options.stream,
+            ApiStreamOptions::GoogleVertex(options) => options.stream,
             ApiStreamOptions::Custom { base, .. } => base,
         };
         self.stream_response(

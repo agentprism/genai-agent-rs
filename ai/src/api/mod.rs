@@ -24,6 +24,9 @@
 pub mod anthropic_messages;
 pub mod constrained_sampling;
 pub mod github_copilot_headers;
+pub mod google_generative_ai;
+pub mod google_shared;
+pub mod google_vertex;
 pub mod openai_codex_responses;
 pub mod openai_completions;
 pub mod openai_prompt_cache;
@@ -50,6 +53,8 @@ use futures::future::BoxFuture;
 pub enum ApiStreamOptions {
     Base(StreamOptions),
     AnthropicMessages(anthropic_messages::AnthropicOptions),
+    GoogleGenerativeAI(google_generative_ai::GoogleOptions),
+    GoogleVertex(google_vertex::GoogleVertexOptions),
     OpenAICompletions(openai_completions::OpenAICompletionsOptions),
     OpenAIResponses(openai_responses::OpenAIResponsesOptions),
     OpenAICodexResponses(openai_codex_responses::OpenAICodexResponsesOptions),
