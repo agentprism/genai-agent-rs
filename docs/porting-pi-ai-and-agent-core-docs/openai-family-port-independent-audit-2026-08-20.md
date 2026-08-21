@@ -95,3 +95,33 @@ Every remaining delta was re-enumerated with its pi counterpart verified by dire
 ## F. Coverage map — the forest (2026-08-20)
 
 The five-phase port and its repairs covered pi-ai's openai family plus substrate (~7,700 of 23,576 pi lines). Owner rulings exclude ~3,200 (lazy loading, azure, mistral, pi-messages, image generation, the agent proxy protocol). The remaining ~12,500 in-scope lines — including pi-ai's core `models.ts` (Models/Provider/createProvider/createModels/dispatch/refresh), the catalog, provider factories, `compat`, `cli`, anthropic, google, bedrock, the auth layer and OAuth flows, and a third of `utils/` — were never scheduled. Earlier "port complete" statements referred to the openai family only and overstated completeness; the compat-variant guard (E-table #17) was excused by pointing at this unported layer, which was wrong. Workflow `workflows/pi-ai-full-port.workflow.js` ports the remainder in seven gated phases (Q1–Q7), each reporting any genuinely unpreservable behavior as a four-column row for owner visibility, with the reviewer rejecting any row Rust can in fact achieve.
+
+**R5 re-audit (93762b1):** E1(a/b/c) and E2 all RESOLVED against pi/SDK source, each pinned (incl. explicit no-wire-request and missing-key-beats-abort assertions); gates green in isolation (203 tests). Two corrections to the record: (1) R5 *did* fix codex ordering (`openai_codex_responses.rs:413-418` early abort removed) — my reading of a truncated commit stat was wrong; (2) the E1(b) scope paraphrase for responses was wrong: pi's `processResponsesStream` throws `"OpenAI Responses stream ended before a terminal response event"` (`openai-responses-shared.ts:758`) before the `signal.aborted` check at `openai-responses.ts:168` is reachable; the implementer followed pi over the scope text, correctly.
+
+---
+
+## G. Observed deltas still open (neutral record — pi decides the resolution)
+
+Each row is an observed difference between this crate and pi at the pin, in already-ported code, as of `93762b1`. No classification is attached: the implementer restores pi's behavior or reports the row in the owner's four-column table, and the reviewer judges each such row on its own.
+
+| # | Observed delta | pi counterpart |
+|---|----------------|----------------|
+| G1 | `result()` on a stream that closes without a terminal event resolves to an error; pi's `result()` promise never settles. | `utils/event-stream.ts:16-17,64` |
+| G2 | A panic inside a provider's spawned task ends the stream with `MissingTerminalEvent`; pi's `catch` turns any thrown error into an in-band error event. | `api/openai-completions.ts:663-683` |
+| G3 | `ProviderHeaders` / `ProviderEnv` serialize and iterate in sorted key order; pi keeps insertion order. | `types.ts` (`ProviderHeaders`, `ProviderEnv`), `utils/headers.ts` |
+| G4 | Re-serializing compat/routing objects with preserved unknown keys emits known keys first (serde `flatten`); pi keeps original interleaving. | `types.ts:822-850`, `types.ts:718-800` |
+| G5 | `timeoutMs`, `maxRetries`, `maxRetryDelayMs`, thinking budgets and usage counts are unsigned integers and reject negative/fractional JSON numbers; pi's fields are `number`. | `types.ts:163,168,176`; `Usage` |
+| G6 | Off-spec usage token values (strings/floats) coerce to 0; pi's `x \|\| 0` keeps a truthy string or float. | `api/openai-completions.ts:1491-1494` |
+| G7 | `diagnostics[].error.stack` is always absent; pi populates `error.stack`. | `utils/diagnostics.ts:27` |
+| G8 | Malformed-JSON detail text after `"Invalid Codex SSE JSON: "` / `"…WebSocket JSON: "` is serde's message; pi's is V8's `SyntaxError` text. | `api/openai-codex-responses.ts:803,1304` |
+| G9 | `Retry-After` parsing accepts RFC 7231 dates and plain decimals only; pi's `Date.parse`/`Number` accept more forms. | `utils/provider-retry.ts:61`; `api/openai-codex-responses.ts:132-157` |
+| G10 | Truncation that lands inside a surrogate pair stops one character earlier; pi's `.slice` can keep a lone high surrogate. | `utils/error-body.ts:139`; `api/openai-completions.ts:1168` |
+| G11 | `retry-after-ms: "Infinity"` with the delay cap disabled sleeps 1 ms; pi's `setTimeout(Infinity)` fires immediately. | `utils/provider-retry.ts:86` |
+| G12 | `X-Stainless-*` request headers are not sent; pi's SDK sends them. | OpenAI SDK `client.js:612-627` |
+| G13 | A truthy non-string `phase` is not carried into `textSignature`; pi `JSON.stringify`s whatever value is present. | `api/openai-responses-shared.ts:49-53,700` |
+| G14 | A numeric `error.metadata.raw` is appended with serde's number formatting; pi appends `String(raw)`. | `api/openai-completions.ts:679-680` |
+| G15 | completions/responses reject a `Model` whose compat enum variant is not the module's family; pi reads `model.compat` structurally and never rejects. | `api/openai-completions.ts:276` and compat getters |
+| G16 | `content: null` is normalized to `[]` at deserialization, so deserialize→reserialize changes the bytes; pi normalizes only inside `transformMessages`. | `api/transform-messages.ts:73` |
+| G17 | `utils/estimate.ts` is inlined privately into `simple_options.rs`; pi exports it as a module. | `utils/estimate.ts` |
+| G18 | Codex JWT `chatgpt_account_id` must be a non-empty string; pi accepts any truthy value. | `api/openai-codex-responses.ts:1585-1586` |
+| G19 | User-Agent falls back to `"unknown"` for the OS release where `uname -r` is unavailable; pi uses `os.release()`. (Windows is excluded by owner ruling.) | `utils/pi-user-agent.ts:18` |
