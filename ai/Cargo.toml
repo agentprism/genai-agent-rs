@@ -48,8 +48,9 @@ regex = "1"
 rustix = { version = "1", features = ["system"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
 thiserror = "2"
-tokio = { version = "1", features = ["sync", "time", "rt-multi-thread", "macros", "test-util", "net"] }
+tokio = { version = "1", features = ["sync", "time", "rt-multi-thread", "macros", "test-util", "net", "io-util"] }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 uuid = { version = "1", features = ["v7"] }
 url = "2"
@@ -60,4 +61,3 @@ zstd = "0.13"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["server"] }
 hyper-util = { version = "0.1", features = ["tokio", "http1"] }
-sha2 = "0.10"

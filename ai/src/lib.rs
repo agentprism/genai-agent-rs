@@ -14,12 +14,15 @@
 pub mod api;
 pub mod auth;
 pub mod bedrock_provider;
+pub mod bun_oauth;
+pub mod compat;
 pub mod env_api_keys;
 pub mod event_stream;
 pub mod model_catalog;
 pub mod models;
 pub mod models_generated;
 pub mod models_store;
+pub mod oauth;
 pub mod providers;
 pub mod session_resources;
 pub mod types;
@@ -35,6 +38,10 @@ pub use api::google_generative_ai::{
 pub use api::google_shared::{GoogleApiThinkingLevel, ResolvedGoogleThinkingLevel};
 pub use api::google_vertex::{GoogleVertexApi, GoogleVertexOptions};
 pub use auth::{context::*, credential_store::*, helpers::*, types::*};
+pub use compat::extension_oauth_types::{
+    OAuthAuthInfo, OAuthDeviceCodeInfo, OAuthLoginCallbacks, OAuthPrompt, OAuthSelectOption,
+    OAuthSelectPrompt,
+};
 pub use event_stream::*;
 pub use models::*;
 pub use models_store::*;
