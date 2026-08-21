@@ -129,7 +129,7 @@ fn truncate_http_body(body: &str) -> String {
     }
 }
 
-async fn load_radius_gateway_config_with(
+pub(crate) async fn load_radius_gateway_config_with(
     fetch: Arc<dyn FetchFunction>,
     gateway: &str,
     api_key: Option<&str>,

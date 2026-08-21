@@ -50,13 +50,15 @@ pub fn build_base_options(
 
 pub const MIN_ANSWER_TOKENS: f64 = 1_024.0;
 
+pub const DEFAULT_THINKING_BUDGETS: ThinkingBudgets = ThinkingBudgets {
+    minimal: Some(1_024.0),
+    low: Some(2_048.0),
+    medium: Some(8_192.0),
+    high: Some(16_384.0),
+};
+
 pub fn default_thinking_budgets() -> ThinkingBudgets {
-    ThinkingBudgets {
-        minimal: Some(1_024.0),
-        low: Some(2_048.0),
-        medium: Some(8_192.0),
-        high: Some(16_384.0),
-    }
+    DEFAULT_THINKING_BUDGETS.clone()
 }
 
 pub fn clamp_reasoning(effort: Option<ThinkingLevel>) -> Option<ThinkingLevel> {

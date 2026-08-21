@@ -18,6 +18,7 @@ pub mod bun_oauth;
 pub mod compat;
 pub mod env_api_keys;
 pub mod event_stream;
+pub mod legacy_api_aliases;
 pub mod model_catalog;
 pub mod models;
 pub mod models_generated;
@@ -37,6 +38,11 @@ pub use api::google_generative_ai::{
 };
 pub use api::google_shared::{GoogleApiThinkingLevel, ResolvedGoogleThinkingLevel};
 pub use api::google_vertex::{GoogleVertexApi, GoogleVertexOptions};
+pub use api::openai_codex_responses::{
+    OpenAICodexResponsesOptions, OpenAICodexWebSocketDebugStats,
+};
+pub use api::openai_completions::OpenAICompletionsOptions;
+pub use api::openai_responses::OpenAIResponsesOptions;
 pub use auth::{context::*, credential_store::*, helpers::*, types::*};
 pub use compat::extension_oauth_types::{
     OAuthAuthInfo, OAuthDeviceCodeInfo, OAuthLoginCallbacks, OAuthPrompt, OAuthSelectOption,
@@ -46,6 +52,7 @@ pub use event_stream::*;
 pub use models::*;
 pub use models_store::*;
 pub use providers::faux::*;
+pub use session_resources::*;
 pub use types::*;
 pub use utils::diagnostics::*;
 pub use utils::json_parse::*;

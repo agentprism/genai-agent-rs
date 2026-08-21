@@ -1,27 +1,33 @@
 use crate::api::{ApiStreamOptions, ProviderStreams};
 use crate::event_stream::AssistantMessageEventStream;
 use crate::types::{Context, Model, ProviderEnv, SimpleStreamOptions};
+use std::borrow::Cow;
 use std::sync::Arc;
 
 const CLOUDFLARE_ACCOUNT_ID: &str = "CLOUDFLARE_ACCOUNT_ID";
 const CLOUDFLARE_GATEWAY_ID: &str = "CLOUDFLARE_GATEWAY_ID";
 
-pub fn resolve_cloudflare_model(model: &Model, env: Option<&ProviderEnv>) -> Model {
+pub fn resolve_cloudflare_model<'a>(model: &'a Model, env: Option<&ProviderEnv>) -> Cow<'a, Model> {
     let Some(env) = env else {
-        return model.clone();
+        return Cow::Borrowed(model);
     };
-    let mut resolved = model.clone();
-    resolved.base_url = resolved.base_url.replace(
+    let base_url = model.base_url.replace(
         "{CLOUDFLARE_ACCOUNT_ID}",
         env.get(CLOUDFLARE_ACCOUNT_ID)
             .map_or("{CLOUDFLARE_ACCOUNT_ID}", String::as_str),
     );
-    resolved.base_url = resolved.base_url.replace(
+    let base_url = base_url.replace(
         "{CLOUDFLARE_GATEWAY_ID}",
         env.get(CLOUDFLARE_GATEWAY_ID)
             .map_or("{CLOUDFLARE_GATEWAY_ID}", String::as_str),
     );
-    resolved
+    if base_url == model.base_url {
+        Cow::Borrowed(model)
+    } else {
+        let mut resolved = model.clone();
+        resolved.base_url = base_url;
+        Cow::Owned(resolved)
+    }
 }
 
 #[derive(Clone)]
@@ -47,8 +53,8 @@ impl ProviderStreams for CloudflareStreams {
             ApiStreamOptions::GoogleVertex(options) => options.stream.request.env.as_ref(),
             ApiStreamOptions::Custom { base, .. } => base.request.env.as_ref(),
         };
-        self.inner
-            .stream(&resolve_cloudflare_model(model, env), context, options)
+        let resolved = resolve_cloudflare_model(model, env);
+        self.inner.stream(resolved.as_ref(), context, options)
     }
 
     fn stream_simple(
@@ -58,7 +64,8 @@ impl ProviderStreams for CloudflareStreams {
         options: SimpleStreamOptions,
     ) -> AssistantMessageEventStream {
         let resolved = resolve_cloudflare_model(model, options.stream.request.env.as_ref());
-        self.inner.stream_simple(&resolved, context, options)
+        self.inner
+            .stream_simple(resolved.as_ref(), context, options)
     }
 }
 
@@ -126,6 +133,10 @@ mod tests {
             model.base_url,
             "https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/v1"
         );
+        assert!(matches!(
+            resolve_cloudflare_model(model, None),
+            Cow::Borrowed(_)
+        ));
     }
 
     /// Ports pi `test/cloudflare-stream.test.ts:22-55`.

@@ -633,7 +633,10 @@ mod tests {
         let request_body = Arc::new(Mutex::new(None::<Value>));
         let captured = request_body.clone();
         let fetcher = fetch(move |request| {
-            *captured.lock().expect("body") = serde_json::from_slice(&request.body).ok();
+            *captured.lock().expect("body") = request
+                .body
+                .as_deref()
+                .and_then(|body| serde_json::from_slice(body).ok());
             Ok(response(
                 200,
                 r#"{"access_token":"access","refresh_token":"refresh","expires_in":3600}"#,
@@ -675,7 +678,10 @@ mod tests {
         let request_body = Arc::new(Mutex::new(None::<Value>));
         let captured = request_body.clone();
         let fetcher = fetch(move |request| {
-            *captured.lock().expect("body") = serde_json::from_slice(&request.body).ok();
+            *captured.lock().expect("body") = request
+                .body
+                .as_deref()
+                .and_then(|body| serde_json::from_slice(body).ok());
             Ok(response(
                 200,
                 r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}"#,

@@ -809,7 +809,7 @@ mod tests {
         let request = seen.lock().expect("request").take().expect("request");
         assert_eq!(request.url, "https://radius.example/v1/oauth/token");
         assert!(
-            String::from_utf8(request.body)
+            String::from_utf8(request.body.expect("request body"))
                 .expect("form")
                 .contains("grant_type=refresh_token")
         );

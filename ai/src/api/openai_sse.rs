@@ -230,7 +230,7 @@ async fn send_request(request: &OpenAiSseRequest) -> Result<ProviderHttpResponse
                     method: "POST".to_owned(),
                     url: request.url.clone(),
                     headers: request.headers.clone(),
-                    body: request.body.clone(),
+                    body: Some(request.body.clone()),
                     signal: request.signal.clone(),
                 })
                 .await

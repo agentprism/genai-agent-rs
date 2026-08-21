@@ -958,7 +958,8 @@ mod tests {
                 "https://api.individual.githubcopilot.com/models",
             ]
         );
-        let device = url::form_urlencoded::parse(&requests[0].body).collect::<BTreeMap<_, _>>();
+        let device = url::form_urlencoded::parse(requests[0].body.as_deref().expect("device body"))
+            .collect::<BTreeMap<_, _>>();
         assert_eq!(
             device.get("client_id").map(|value| value.as_ref()),
             Some(CLIENT_ID)
@@ -967,7 +968,8 @@ mod tests {
             device.get("scope").map(|value| value.as_ref()),
             Some("read:user")
         );
-        let token = url::form_urlencoded::parse(&requests[1].body).collect::<BTreeMap<_, _>>();
+        let token = url::form_urlencoded::parse(requests[1].body.as_deref().expect("token body"))
+            .collect::<BTreeMap<_, _>>();
         assert_eq!(
             token.get("client_id").map(|value| value.as_ref()),
             Some(CLIENT_ID)

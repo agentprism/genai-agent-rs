@@ -1017,14 +1017,22 @@ mod tests {
             ]
         );
         assert_eq!(
-            serde_json::from_slice::<Value>(&requests[0].body).expect("device request"),
+            serde_json::from_slice::<Value>(
+                requests[0].body.as_deref().expect("device request body"),
+            )
+            .expect("device request"),
             json!({ "client_id": CLIENT_ID })
         );
         assert_eq!(
-            serde_json::from_slice::<Value>(&requests[1].body).expect("poll request"),
+            serde_json::from_slice::<Value>(
+                requests[1].body.as_deref().expect("poll request body"),
+            )
+            .expect("poll request"),
             json!({ "device_auth_id": "device-auth-id", "user_code": "ABCD-1234" })
         );
-        let exchange = url::form_urlencoded::parse(&requests[3].body).collect::<HashMap<_, _>>();
+        let exchange =
+            url::form_urlencoded::parse(requests[3].body.as_deref().expect("exchange body"))
+                .collect::<HashMap<_, _>>();
         assert_eq!(
             exchange.get("code").map(|value| value.as_ref()),
             Some("oauth-code")

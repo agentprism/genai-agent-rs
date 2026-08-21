@@ -1454,7 +1454,7 @@ async fn send_request(
                     method: "POST".to_owned(),
                     url: request.url.clone(),
                     headers: request.headers.clone(),
-                    body: request.body.clone(),
+                    body: Some(request.body.clone()),
                     signal: request.signal.clone(),
                 })
                 .await
@@ -2620,7 +2620,9 @@ mod tests {
         ));
         let requests = requests.lock().unwrap_or_else(PoisonError::into_inner);
         assert_eq!(requests.len(), 1);
-        let body: Value = serde_json::from_slice(&requests[0].body).expect("request body");
+        let body: Value =
+            serde_json::from_slice(requests[0].body.as_deref().expect("request body"))
+                .expect("request body");
         assert_eq!(body["hook_field"], "present");
         let response = observed_response
             .lock()
@@ -2931,7 +2933,9 @@ mod tests {
         assert!((message.usage.cost.cache_write - 0.0001575).abs() < f64::EPSILON);
         let requests = requests.lock().unwrap_or_else(PoisonError::into_inner);
         assert!(requests[0].headers["anthropic-beta"].contains(SERVER_SIDE_FALLBACK_BETA));
-        let payload: Value = serde_json::from_slice(&requests[0].body).expect("payload");
+        let payload: Value =
+            serde_json::from_slice(requests[0].body.as_deref().expect("payload body"))
+                .expect("payload");
         assert_eq!(payload["fallbacks"], json!([{"model":"claude-fallback"}]));
     }
 

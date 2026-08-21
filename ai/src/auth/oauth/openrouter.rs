@@ -647,7 +647,10 @@ mod tests {
             let captured = Arc::new(Mutex::new(None::<Value>));
             let body = captured.clone();
             let fetcher = fetch(move |request| {
-                *body.lock().expect("body") = serde_json::from_slice(&request.body).ok();
+                *body.lock().expect("body") = request
+                    .body
+                    .as_deref()
+                    .and_then(|body| serde_json::from_slice(body).ok());
                 Ok(response(200, r#"{"key":"sk-or-manual"}"#))
             });
             let interaction = Arc::new(ManualInteraction {

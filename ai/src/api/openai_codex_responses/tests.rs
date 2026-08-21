@@ -391,9 +391,10 @@ fn sse_options(fetch: Arc<QueueFetch>) -> OpenAICodexResponsesOptions {
 
 fn decode_request(request: &ProviderHttpRequest) -> Value {
     let bytes = if request.headers.get("content-encoding").map(String::as_str) == Some("zstd") {
-        zstd::stream::decode_all(Cursor::new(&request.body)).expect("zstd body")
+        zstd::stream::decode_all(Cursor::new(request.body.as_deref().expect("request body")))
+            .expect("zstd body")
     } else {
-        request.body.clone()
+        request.body.clone().expect("request body")
     };
     serde_json::from_slice(&bytes).expect("request JSON")
 }

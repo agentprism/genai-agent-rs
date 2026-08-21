@@ -136,7 +136,7 @@ pub(crate) fn request(
             .into_iter()
             .map(|(name, value)| (name.into(), value.into()))
             .collect(),
-        body: body.into(),
+        body: Some(body.into()),
         signal: Some(signal),
     }
 }

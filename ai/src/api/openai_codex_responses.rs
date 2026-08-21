@@ -1296,7 +1296,7 @@ async fn send_sse_request(
                 method: "POST".to_owned(),
                 url,
                 headers: wire_headers(&headers),
-                body,
+                body: Some(body),
                 signal,
             })
             .await

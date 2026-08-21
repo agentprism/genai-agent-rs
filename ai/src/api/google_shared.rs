@@ -501,6 +501,26 @@ pub fn map_stop_reason_string(reason: &str) -> StopReason {
     }
 }
 
+pub fn map_stop_reason(reason: &adk_gemini::FinishReason) -> StopReason {
+    match reason {
+        adk_gemini::FinishReason::Stop => StopReason::Stop,
+        adk_gemini::FinishReason::MaxTokens => StopReason::Length,
+        adk_gemini::FinishReason::FinishReasonUnspecified
+        | adk_gemini::FinishReason::Safety
+        | adk_gemini::FinishReason::Recitation
+        | adk_gemini::FinishReason::Language
+        | adk_gemini::FinishReason::Other
+        | adk_gemini::FinishReason::Blocklist
+        | adk_gemini::FinishReason::ProhibitedContent
+        | adk_gemini::FinishReason::Spii
+        | adk_gemini::FinishReason::MalformedFunctionCall
+        | adk_gemini::FinishReason::ModelArmor
+        | adk_gemini::FinishReason::ImageSafety
+        | adk_gemini::FinishReason::UnexpectedToolCall
+        | adk_gemini::FinishReason::TooManyToolCalls => StopReason::Error,
+    }
+}
+
 #[derive(Debug)]
 pub struct GoogleSdkError {
     source: Option<adk_gemini::ClientError>,

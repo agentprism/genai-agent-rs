@@ -338,7 +338,7 @@ pub struct ProviderHttpRequest {
     pub method: String,
     pub url: String,
     pub headers: BTreeMap<String, String>,
-    pub body: Vec<u8>,
+    pub body: Option<Vec<u8>>,
     pub signal: Option<Arc<dyn AbortSignal>>,
 }
 
@@ -349,7 +349,7 @@ impl fmt::Debug for ProviderHttpRequest {
             .field("method", &self.method)
             .field("url", &self.url)
             .field("headers", &self.headers)
-            .field("body_len", &self.body.len())
+            .field("body_len", &self.body.as_ref().map(Vec::len))
             .field("signal", &self.signal.is_some())
             .finish()
     }
@@ -396,12 +396,15 @@ impl FetchFunction for DefaultFetch {
                 );
             }
             static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-            let send = CLIENT
+            let builder = CLIENT
                 .get_or_init(reqwest::Client::new)
                 .request(method, request.url)
-                .headers(headers)
-                .body(request.body)
-                .send();
+                .headers(headers);
+            let builder = match request.body {
+                Some(body) => builder.body(body),
+                None => builder,
+            };
+            let send = builder.send();
             let response = if let Some(signal) = request.signal.as_ref() {
                 tokio::select! {
                     biased;

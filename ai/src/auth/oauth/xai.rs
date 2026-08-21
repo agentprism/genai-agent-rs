@@ -380,7 +380,7 @@ mod tests {
     }
 
     fn body(request: &ProviderHttpRequest) -> String {
-        String::from_utf8(request.body.clone()).expect("form")
+        String::from_utf8(request.body.clone().expect("request body")).expect("form")
     }
 
     /// Ports pi `test/xai-oauth.test.ts:85`.

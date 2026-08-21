@@ -100,6 +100,11 @@ pub struct OpenAICompletionsOptions {
     pub thinking_budgets: Option<ThinkingBudgets>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConvertCompletionsMessagesOptions {
+    pub grammar_tool_input_properties: Option<BTreeMap<String, String>>,
+}
+
 impl From<StreamOptions> for OpenAICompletionsOptions {
     fn from(stream: StreamOptions) -> Self {
         Self {

@@ -1,3 +1,4 @@
+pub mod all;
 pub mod amazon_bedrock;
 pub mod ant_ling;
 pub mod anthropic;
@@ -27,6 +28,7 @@ pub mod opencode_go;
 pub mod qwen_token_plan;
 pub mod qwen_token_plan_cn;
 pub mod qwen_token_plan_individual;
+pub mod radius;
 pub mod radius_config;
 pub mod together;
 pub mod vercel_ai_gateway;
