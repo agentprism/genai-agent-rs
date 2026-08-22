@@ -345,7 +345,7 @@ const audits = (
     )
   )
 ).filter(Boolean);
-const failedScopes = SCOPES.filter((scope) => !audits.some((audit) => audit.area === scope.key)).map((scope) => scope.key);
+const failedScopes = SCOPES.filter((scope) => !audits.some((audit) => audit.area === scope.key || audit.area === "audit:" + scope.key)).map((scope) => scope.key);
 if (failedScopes.length) log("⚠ auditors returned nothing for: " + failedScopes.join(", "));
 
 let counter = 0;
