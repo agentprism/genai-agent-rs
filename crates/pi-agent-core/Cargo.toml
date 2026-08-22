@@ -10,8 +10,15 @@ publish = false
 
 [dependencies]
 async-stream = "0.3.6"
+futures-channel = "0.3.31"
 futures-util = { version = "0.3.31", default-features = false, features = ["alloc", "std"] }
+indexmap = "2.11.4"
+jsonschema = { version = "0.50.1", default-features = false }
+num-bigint = "0.4.8"
+num-traits = "0.2.19"
 pi-ai = { path = "../pi-ai" }
+ryu-js = { version = "1.0.3", features = ["small"] }
+schemars = "1.2.2"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = { version = "1.0.145", features = ["raw_value"] }
 

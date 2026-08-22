@@ -1072,9 +1072,14 @@ milestone = "M6"
 
 [[mapping]]
 source = "packages/ai/test/validation.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = [
+  "tool_validation_coerces_pi_primitive_and_union_inputs",
+  "tool_validation_matches_javascript_number_semantics",
+  "tool_validation_normalizes_optional_nulls_like_pi",
+  "tool_validation_rejects_invalid_pi_coercions",
+  "typed_tool_uses_pi_normalized_arguments_before_policy_and_serde",
+]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/xai-oauth.test.ts"
@@ -1150,9 +1155,35 @@ rust = [
   "queue_steering_polled_after_completed_turn",
   "queue_steering_polled_after_prepare_next_turn",
   "queue_steering_polled_at_run_start",
+  "tool_after_hook_can_change_error_state",
+  "tool_after_hook_can_replace_content",
+  "tool_after_hook_can_replace_details",
+  "tool_after_hook_can_replace_usage",
+  "tool_after_hook_can_terminate",
+  "tool_after_hook_precedes_tool_finished",
+  "tool_any_sequential_tool_forces_sequential_batch",
+  "tool_batch_terminates_only_when_all_results_terminate",
+  "tool_before_hook_can_block",
+  "tool_before_hook_can_terminate",
+  "tool_cancellation_joins_running_parallel_calls",
+  "tool_cancellation_stops_new_sequential_calls",
+  "tool_execution_error_becomes_error_result",
+  "tool_late_updates_are_ignored",
+  "tool_length_truncated_calls_are_never_executed",
+  "tool_length_truncated_calls_each_receive_error_result",
+  "tool_no_process_or_file_mutation_after_run_finished",
+  "tool_parallel_completion_events_are_completion_order",
+  "tool_parallel_preflight_is_source_order",
+  "tool_parallel_result_messages_are_source_order",
+  "tool_parallel_turn_results_are_source_order",
+  "tool_prepare_arguments_precedes_validation",
+  "tool_synthesized_failures_include_pi_empty_details",
+  "tool_unknown_name_becomes_error_result",
+  "tool_updates_precede_tool_finished",
+  "tool_validation_precedes_before_hook",
 ]
 status = "planned"
-milestone = "M2.3"
+milestone = "M2.4"
 
 [[mapping]]
 source = "packages/agent/test/agent.test.ts"
@@ -1185,6 +1216,7 @@ rust = [
   "agent_retry_last_turn_reuses_last_valid_request_boundary",
   "agent_snapshot_round_trips",
   "agent_wait_for_idle_includes_run_finished_sinks",
+  "tool_registration_order_is_preserved_for_model_exposure",
   "queue_all_mode_drains_all",
   "queue_clear_all",
   "queue_clear_followup",
@@ -1194,7 +1226,7 @@ rust = [
   "queue_one_mode_drains_one",
 ]
 status = "planned"
-milestone = "M2.3"
+milestone = "M2.4"
 
 [[mapping]]
 source = "packages/agent/test/e2e.test.ts"

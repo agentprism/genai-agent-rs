@@ -5,26 +5,22 @@
 use crate::{
     AgentControl, AgentError, AgentEvent, AgentRecord, AgentState, AgentStateView, CompletedTurn,
     ContextError, ContextPolicy, DefaultContextPolicy, DefaultTurnPolicy, LocalAgent,
-    LocalContextPolicy, LocalToolRegistry, LocalTurnPolicy, MessageRole, NextTurn, QueueKind,
-    RunOutcome, ToolExecutionMode, ToolOutput, ToolRegistry, ToolUpdate, ToolUpdateError,
-    ToolUpdateSink, TurnOutcome, TurnPolicy,
+    LocalContextPolicy, LocalToolPolicy, LocalToolRegistry, LocalToolScheduler, LocalTurnPolicy,
+    MessageRole, NextTurn, QueueKind, RunOutcome, ToolBatchRequest, ToolBatchStreamEvent,
+    ToolCallOutcome, ToolExecutionMode, ToolPolicy, ToolRegistry, ToolScheduler, TurnOutcome,
+    TurnPolicy,
 };
-use futures_util::{StreamExt, stream::FuturesUnordered};
+use futures_util::StreamExt;
 use pi_ai::{
     ApiId, AssistantAssembler, AssistantEvent, AssistantFinish, AssistantFinishReason,
     AssistantMessage, AssistantMessageSnapshot, CancellationReason, CancellationToken,
-    ContentBlock, ContentBlockId, LocalBoxFuture, LocalBoxStream, Message, MessageId, ModelRequest,
-    ModelRuntime, PublicError, ReplayCompleteness, ReplayEnvelope, ReplayScope, RequestStartError,
-    RequestStartErrorKind, RunId, SendBoxFuture, SendBoxStream, SimpleGenerationOptions, Timestamp,
-    ToolCall, ToolCallId, ToolResultContent, ToolResultMessage, ToolSpec, Usage, UsageSource,
-    UserMessage, VersionedExtension,
+    ContentBlock, ContentBlockId, LocalBoxStream, Message, MessageId, ModelRequest, ModelRuntime,
+    PublicError, ReplayCompleteness, ReplayEnvelope, ReplayScope, RequestStartError,
+    RequestStartErrorKind, RunId, SendBoxStream, SimpleGenerationOptions, Timestamp, ToolCallId,
+    ToolResultMessage, ToolSpec, Usage, UsageSource, UserMessage, VersionedExtension,
 };
 use serde::{Deserialize, Serialize};
-use std::{
-    cell::RefCell,
-    rc::Rc,
-    sync::{Arc, Mutex, MutexGuard},
-};
+use std::{rc::Rc, sync::Arc};
 
 /// Explicit state-machine phases. Queue receivers are polled only in the
 /// phases whose names say so.
@@ -162,6 +158,7 @@ impl crate::Agent {
             last_error: None,
             options: SimpleGenerationOptions::default(),
             tool_execution: ToolExecutionMode::Parallel,
+            tool_scheduler: ToolScheduler::default(),
             context_policy: Arc::new(DefaultContextPolicy),
             turn_policy: Arc::new(DefaultTurnPolicy),
             defaults,
@@ -262,6 +259,13 @@ impl crate::Agent {
         Ok(())
     }
 
+    /// Replaces deterministic tool authorization and finalization policy.
+    pub fn set_tool_policy(&mut self, policy: Arc<dyn ToolPolicy>) -> Result<(), AgentError> {
+        self.require_idle()?;
+        self.tool_scheduler = ToolScheduler::new(policy);
+        Ok(())
+    }
+
     /// Starts one prompt run. The returned stream borrows the agent and applies
     /// backpressure at every emitted event.
     pub fn run<'a>(
@@ -350,6 +354,7 @@ impl crate::Agent {
         self.tools = self.defaults.tools.clone();
         self.options = SimpleGenerationOptions::default();
         self.tool_execution = ToolExecutionMode::Parallel;
+        self.tool_scheduler = ToolScheduler::default();
         self.control.set_steering_mode(crate::QueueDrainMode::One);
         self.control.set_follow_up_mode(crate::QueueDrainMode::One);
         self.context_policy = Arc::new(DefaultContextPolicy);
@@ -458,6 +463,7 @@ impl LocalAgent {
             last_error: None,
             options: SimpleGenerationOptions::default(),
             tool_execution: ToolExecutionMode::Parallel,
+            tool_scheduler: LocalToolScheduler::default(),
             context_policy: Rc::new(DefaultContextPolicy),
             turn_policy: Rc::new(DefaultTurnPolicy),
             defaults,
@@ -541,6 +547,13 @@ impl LocalAgent {
     pub fn set_tool_execution_mode(&mut self, mode: ToolExecutionMode) -> Result<(), AgentError> {
         self.require_idle()?;
         self.tool_execution = mode;
+        Ok(())
+    }
+
+    /// Replaces local deterministic tool authorization and finalization policy.
+    pub fn set_tool_policy(&mut self, policy: Rc<dyn LocalToolPolicy>) -> Result<(), AgentError> {
+        self.require_idle()?;
+        self.tool_scheduler = LocalToolScheduler::new(policy);
         Ok(())
     }
 
@@ -644,6 +657,7 @@ impl LocalAgent {
         self.tools = self.defaults.tools.clone();
         self.options = SimpleGenerationOptions::default();
         self.tool_execution = ToolExecutionMode::Parallel;
+        self.tool_scheduler = LocalToolScheduler::default();
         self.control.set_steering_mode(crate::QueueDrainMode::One);
         self.control.set_follow_up_mode(crate::QueueDrainMode::One);
         self.context_policy = Rc::new(DefaultContextPolicy);
@@ -1114,65 +1128,114 @@ macro_rules! agent_run_stream {
 
                 if !tool_calls.is_empty() {
                     $guard.agent.phase = Some(AgentPhase::PrepareToolBatch);
-                    $guard.agent.pending_tool_calls = tool_calls
-                        .iter()
-                        .map(|call| call.id.clone())
-                        .collect::<Vec<_>>()
-                        .into();
-                    for call in &tool_calls {
-                        $guard.agent.bump_event_sequence();
-                        yield AgentEvent::ToolExecutionStarted { call: call.clone() };
-                    }
-
-                    $guard.agent.phase = Some(AgentPhase::ExecuteToolBatch);
-                    let batch = $execute_tools(
-                        &$guard.agent.tools,
-                        &assistant,
-                        &tool_calls,
-                        $guard.agent.tool_execution,
-                        assistant.finish.reason == AssistantFinishReason::Length,
-                        $guard.cancellation.clone(),
-                    ).await;
-                    terminate_batch = batch.terminate;
-
-                    for completed in &batch.completion_order {
-                        remove_pending_call(
-                            &mut $guard.agent.pending_tool_calls,
-                            &completed.call.id,
-                        );
-                        for update in &completed.updates {
-                            $guard.agent.bump_event_sequence();
-                            yield AgentEvent::ToolExecutionUpdated {
-                                call_id: completed.call.id.clone(),
-                                update: update.clone(),
-                            };
-                        }
-                        $guard.agent.bump_event_sequence();
-                        yield AgentEvent::ToolExecutionFinished {
-                            call_id: completed.call.id.clone(),
-                            result: completed.output.clone(),
-                            is_error: completed.is_error,
+                    $guard.agent.pending_tool_calls = Arc::from([]);
+                    // Clone capabilities before opening the scheduler stream so
+                    // live lifecycle polling does not immutably borrow Agent
+                    // while event sequence and pending-call state are updated.
+                    let tool_scheduler = $guard.agent.tool_scheduler.clone();
+                    let tool_registry = $guard.agent.tools.clone();
+                    let tool_records = context_records.clone();
+                    let mut batch_events = $execute_tools(
+                        &tool_scheduler,
+                        &tool_registry,
+                        ToolBatchRequest {
+                            assistant: &assistant,
+                            calls: &tool_calls,
+                            records: &tool_records,
+                            configured_mode: $guard.agent.tool_execution,
+                            cancellation: $guard.cancellation.clone(),
+                        },
+                    );
+                    let mut batch_plan = None;
+                    let batch = loop {
+                        let Some(event) = batch_events.next().await else {
+                            panic!("tool scheduler ended without a joined batch outcome");
                         };
-                    }
+                        match event {
+                            ToolBatchStreamEvent::BatchStarted { plan } => {
+                                batch_plan = Some(plan);
+                            }
+                            ToolBatchStreamEvent::CallStarted { call, .. } => {
+                                $guard.agent.phase = Some(AgentPhase::PrepareToolBatch);
+                                add_pending_call(
+                                    &mut $guard.agent.pending_tool_calls,
+                                    call.id.clone(),
+                                );
+                                $guard.agent.bump_event_sequence();
+                                yield AgentEvent::ToolExecutionStarted { call };
+                            }
+                            ToolBatchStreamEvent::CallUpdated { call_id, update, .. } => {
+                                $guard.agent.phase = Some(AgentPhase::ExecuteToolBatch);
+                                $guard.agent.bump_event_sequence();
+                                yield AgentEvent::ToolExecutionUpdated { call_id, update };
+                            }
+                            ToolBatchStreamEvent::CallFinished { outcome } => {
+                                let outcome = *outcome;
+                                let commit_immediately = matches!(
+                                    batch_plan,
+                                    Some($crate::ToolExecutionPlan::SequentialBatch)
+                                );
+                                let message = commit_immediately
+                                    .then(|| tool_result_message(&assistant, &outcome));
+                                $guard.agent.phase = Some(AgentPhase::ExecuteToolBatch);
+                                remove_pending_call(
+                                    &mut $guard.agent.pending_tool_calls,
+                                    &outcome.call.id,
+                                );
+                                $guard.agent.bump_event_sequence();
+                                yield AgentEvent::ToolExecutionFinished {
+                                    call_id: outcome.call.id.clone(),
+                                    result: outcome.output.clone(),
+                                    is_error: outcome.is_error,
+                                };
+                                if let Some(message) = message {
+                                    // Pinned Pi commits sequential and
+                                    // truncation-synthesis results before the
+                                    // next call lifecycle begins. Parallel
+                                    // results remain deferred until the joined
+                                    // batch completes.
+                                    $guard.agent.phase = Some(AgentPhase::CommitToolResults);
+                                    $guard.agent.bump_event_sequence();
+                                    yield AgentEvent::MessageStarted {
+                                        message_id: message.id.clone(),
+                                        role: MessageRole::ToolResult,
+                                    };
+                                    $guard.agent.state.transcript.push(AgentRecord::Llm(Message::ToolResult(message.clone())));
+                                    context_records.push(AgentRecord::Llm(Message::ToolResult(message.clone())));
+                                    $guard.agent.bump_event_sequence();
+                                    yield AgentEvent::MessageCommitted {
+                                        message: AgentRecord::Llm(Message::ToolResult(message.clone())),
+                                    };
+                                    tool_messages.push(message);
+                                }
+                            }
+                            ToolBatchStreamEvent::BatchFinished { outcome } => break *outcome,
+                        }
+                    };
+                    terminate_batch = batch.terminate;
                     // Every launched future has settled and cancellation may
                     // have skipped later sequential calls. None remain pending.
                     $guard.agent.pending_tool_calls = Arc::from([]);
 
-                    $guard.agent.phase = Some(AgentPhase::CommitToolResults);
-                    for completed in batch.source_order.into_iter().flatten() {
-                        let message = tool_result_message(&assistant, &completed);
-                        $guard.agent.bump_event_sequence();
-                        yield AgentEvent::MessageStarted {
-                            message_id: message.id.clone(),
-                            role: MessageRole::ToolResult,
-                        };
-                        $guard.agent.state.transcript.push(AgentRecord::Llm(Message::ToolResult(message.clone())));
-                        context_records.push(AgentRecord::Llm(Message::ToolResult(message.clone())));
-                        $guard.agent.bump_event_sequence();
-                        yield AgentEvent::MessageCommitted {
-                            message: AgentRecord::Llm(Message::ToolResult(message.clone())),
-                        };
-                        tool_messages.push(message);
+                    if batch.plan == $crate::ToolExecutionPlan::ParallelBatch {
+                        $guard.agent.phase = Some(AgentPhase::CommitToolResults);
+                        for completed in batch.source_order {
+                            let message = tool_result_message(&assistant, &completed);
+                            $guard.agent.bump_event_sequence();
+                            yield AgentEvent::MessageStarted {
+                                message_id: message.id.clone(),
+                                role: MessageRole::ToolResult,
+                            };
+                            $guard.agent.state.transcript.push(AgentRecord::Llm(Message::ToolResult(message.clone())));
+                            context_records.push(AgentRecord::Llm(Message::ToolResult(message.clone())));
+                            $guard.agent.bump_event_sequence();
+                            yield AgentEvent::MessageCommitted {
+                                message: AgentRecord::Llm(Message::ToolResult(message.clone())),
+                            };
+                            tool_messages.push(message);
+                        }
+                    } else {
+                        debug_assert_eq!(tool_messages.len(), batch.source_order.len());
                     }
                 }
 
@@ -1388,336 +1451,31 @@ impl Drop for LocalAgent {
     }
 }
 
-#[derive(Clone)]
-struct CompletedTool {
-    source_index: usize,
-    call: ToolCall,
-    output: ToolOutput,
-    is_error: bool,
-    updates: Vec<ToolUpdate>,
+fn execute_send_tool_batch<'a>(
+    scheduler: &'a ToolScheduler,
+    tools: &'a ToolRegistry,
+    request: ToolBatchRequest<'a>,
+) -> SendBoxStream<'a, ToolBatchStreamEvent> {
+    scheduler.execute_batch_events(tools, request)
 }
 
-struct ExecutedBatch {
-    completion_order: Vec<CompletedTool>,
-    source_order: Vec<Option<CompletedTool>>,
-    terminate: bool,
-}
-
-async fn execute_send_tool_batch(
-    tools: &ToolRegistry,
-    assistant: &AssistantMessage,
-    calls: &[ToolCall],
-    configured_mode: ToolExecutionMode,
-    truncated: bool,
-    cancellation: CancellationToken,
-) -> ExecutedBatch {
-    let sequential = configured_mode == ToolExecutionMode::Sequential
-        || calls.iter().any(|call| {
-            tools
-                .get(&call.name)
-                .is_some_and(|tool| tool.execution_mode() == ToolExecutionMode::Sequential)
-        });
-    if sequential {
-        let mut completion_order = Vec::new();
-        for (source_index, call) in calls.iter().cloned().enumerate() {
-            if cancellation.is_cancelled() && !completion_order.is_empty() {
-                break;
-            }
-            completion_order.push(
-                execute_one_send(
-                    tools,
-                    assistant,
-                    source_index,
-                    call,
-                    truncated,
-                    cancellation.clone(),
-                )
-                .await,
-            );
-        }
-        return finish_batch(calls.len(), completion_order);
-    }
-
-    let mut running: FuturesUnordered<SendBoxFuture<'static, CompletedTool>> =
-        FuturesUnordered::new();
-    for (source_index, call) in calls.iter().cloned().enumerate() {
-        let tool = tools.get(&call.name).cloned();
-        let assistant_id = assistant.id.clone();
-        let cancellation = cancellation.clone();
-        running.push(Box::pin(async move {
-            execute_one_send_owned(
-                tool,
-                assistant_id,
-                source_index,
-                call,
-                truncated,
-                cancellation,
-            )
-            .await
-        }));
-    }
-    let mut completion_order = Vec::new();
-    while let Some(completed) = running.next().await {
-        completion_order.push(completed);
-    }
-    finish_batch(calls.len(), completion_order)
-}
-
-async fn execute_one_send(
-    tools: &ToolRegistry,
-    assistant: &AssistantMessage,
-    source_index: usize,
-    call: ToolCall,
-    truncated: bool,
-    cancellation: CancellationToken,
-) -> CompletedTool {
-    execute_one_send_owned(
-        tools.get(&call.name).cloned(),
-        assistant.id.clone(),
-        source_index,
-        call,
-        truncated,
-        cancellation,
-    )
-    .await
-}
-
-async fn execute_one_send_owned(
-    tool: Option<Arc<dyn crate::Tool>>,
-    assistant_id: MessageId,
-    source_index: usize,
-    call: ToolCall,
-    truncated: bool,
-    cancellation: CancellationToken,
-) -> CompletedTool {
-    if truncated {
-        return immediate_tool_error(
-            source_index,
-            call,
-            "Tool call was not executed: the response hit the output token limit, so its arguments may be truncated.",
-        );
-    }
-    let Some(tool) = tool else {
-        let message = format!("Tool {} not found", call.name);
-        return immediate_tool_error(source_index, call, &message);
-    };
-    let updates = Arc::new(SendUpdateCollector::default());
-    let result = tool
-        .execute(
-            crate::ToolCallContext {
-                assistant_message_id: assistant_id,
-                call: call.clone(),
-            },
-            updates.clone(),
-            cancellation,
-        )
-        .await;
-    match result {
-        Ok(output) => CompletedTool {
-            source_index,
-            call,
-            output,
-            is_error: false,
-            updates: updates.take(),
-        },
-        Err(error) => CompletedTool {
-            source_index,
-            call,
-            output: error_tool_output(&error.message, source_index),
-            is_error: true,
-            updates: updates.take(),
-        },
-    }
-}
-
-async fn execute_local_tool_batch(
-    tools: &LocalToolRegistry,
-    assistant: &AssistantMessage,
-    calls: &[ToolCall],
-    configured_mode: ToolExecutionMode,
-    truncated: bool,
-    cancellation: CancellationToken,
-) -> ExecutedBatch {
-    let sequential = configured_mode == ToolExecutionMode::Sequential
-        || calls.iter().any(|call| {
-            tools
-                .get(&call.name)
-                .is_some_and(|tool| tool.execution_mode() == ToolExecutionMode::Sequential)
-        });
-    if sequential {
-        let mut completion_order = Vec::new();
-        for (source_index, call) in calls.iter().cloned().enumerate() {
-            if cancellation.is_cancelled() && !completion_order.is_empty() {
-                break;
-            }
-            completion_order.push(
-                execute_one_local(
-                    tools.get(&call.name).cloned(),
-                    assistant.id.clone(),
-                    source_index,
-                    call,
-                    truncated,
-                    cancellation.clone(),
-                )
-                .await,
-            );
-        }
-        return finish_batch(calls.len(), completion_order);
-    }
-
-    let mut running: FuturesUnordered<LocalBoxFuture<'static, CompletedTool>> =
-        FuturesUnordered::new();
-    for (source_index, call) in calls.iter().cloned().enumerate() {
-        let tool = tools.get(&call.name).cloned();
-        let assistant_id = assistant.id.clone();
-        let cancellation = cancellation.clone();
-        running.push(Box::pin(async move {
-            execute_one_local(
-                tool,
-                assistant_id,
-                source_index,
-                call,
-                truncated,
-                cancellation,
-            )
-            .await
-        }));
-    }
-    let mut completion_order = Vec::new();
-    while let Some(completed) = running.next().await {
-        completion_order.push(completed);
-    }
-    finish_batch(calls.len(), completion_order)
-}
-
-async fn execute_one_local(
-    tool: Option<Rc<dyn crate::LocalTool>>,
-    assistant_id: MessageId,
-    source_index: usize,
-    call: ToolCall,
-    truncated: bool,
-    cancellation: CancellationToken,
-) -> CompletedTool {
-    if truncated {
-        return immediate_tool_error(
-            source_index,
-            call,
-            "Tool call was not executed: the response hit the output token limit, so its arguments may be truncated.",
-        );
-    }
-    let Some(tool) = tool else {
-        let message = format!("Tool {} not found", call.name);
-        return immediate_tool_error(source_index, call, &message);
-    };
-    let updates = Rc::new(LocalUpdateCollector::default());
-    let result = tool
-        .execute(
-            crate::ToolCallContext {
-                assistant_message_id: assistant_id,
-                call: call.clone(),
-            },
-            updates.clone(),
-            cancellation,
-        )
-        .await;
-    match result {
-        Ok(output) => CompletedTool {
-            source_index,
-            call,
-            output,
-            is_error: false,
-            updates: updates.take(),
-        },
-        Err(error) => CompletedTool {
-            source_index,
-            call,
-            output: error_tool_output(&error.message, source_index),
-            is_error: true,
-            updates: updates.take(),
-        },
-    }
-}
-
-fn finish_batch(call_count: usize, completion_order: Vec<CompletedTool>) -> ExecutedBatch {
-    let mut source_order = vec![None; call_count];
-    for completed in &completion_order {
-        source_order[completed.source_index] = Some(completed.clone());
-    }
-    let completed_count = completion_order.len();
-    let terminate = completed_count > 0
-        && completed_count == call_count
-        && completion_order
-            .iter()
-            .all(|completed| completed.output.terminate);
-    ExecutedBatch {
-        completion_order,
-        source_order,
-        terminate,
-    }
-}
-
-#[derive(Default)]
-struct SendUpdateCollector {
-    updates: Mutex<Vec<ToolUpdate>>,
-}
-
-impl SendUpdateCollector {
-    fn take(&self) -> Vec<ToolUpdate> {
-        std::mem::take(&mut *lock_unpoisoned(&self.updates))
-    }
-}
-
-impl ToolUpdateSink for SendUpdateCollector {
-    fn update(&self, update: ToolUpdate) -> Result<(), ToolUpdateError> {
-        lock_unpoisoned(&self.updates).push(update);
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-struct LocalUpdateCollector {
-    updates: RefCell<Vec<ToolUpdate>>,
-}
-
-impl LocalUpdateCollector {
-    fn take(&self) -> Vec<ToolUpdate> {
-        std::mem::take(&mut *self.updates.borrow_mut())
-    }
-}
-
-impl crate::LocalToolUpdateSink for LocalUpdateCollector {
-    fn update(&self, update: ToolUpdate) -> Result<(), ToolUpdateError> {
-        self.updates.borrow_mut().push(update);
-        Ok(())
-    }
-}
-
-fn immediate_tool_error(source_index: usize, call: ToolCall, message: &str) -> CompletedTool {
-    CompletedTool {
-        source_index,
-        call,
-        output: error_tool_output(message, source_index),
-        is_error: true,
-        updates: Vec::new(),
-    }
-}
-
-fn error_tool_output(message: &str, source_index: usize) -> ToolOutput {
-    ToolOutput::new(vec![ToolResultContent::Text {
-        id: ContentBlockId::new(format!("agent-tool-error-{source_index}")),
-        text: message.into(),
-    }])
+fn execute_local_tool_batch<'a>(
+    scheduler: &'a LocalToolScheduler,
+    tools: &'a LocalToolRegistry,
+    request: ToolBatchRequest<'a>,
+) -> LocalBoxStream<'a, ToolBatchStreamEvent> {
+    scheduler.execute_batch_events(tools, request)
 }
 
 fn tool_result_message(
     assistant: &AssistantMessage,
-    completed: &CompletedTool,
+    completed: &ToolCallOutcome,
 ) -> ToolResultMessage {
     ToolResultMessage {
         id: MessageId::new(format!(
             "{}-tool-result-{}",
             assistant.id.as_str(),
-            completed.source_index
+            completed.source_index.0
         )),
         tool_call_id: completed.call.id.clone(),
         tool_name: completed.call.name.clone(),
@@ -1744,6 +1502,12 @@ fn remove_pending_call(pending: &mut Arc<[ToolCallId]>, completed: &ToolCallId) 
         .cloned()
         .collect::<Vec<_>>()
         .into();
+}
+
+fn add_pending_call(pending: &mut Arc<[ToolCallId]>, call_id: ToolCallId) {
+    let mut calls = pending.to_vec();
+    calls.push(call_id);
+    *pending = calls.into();
 }
 
 fn commands_to_records(commands: Vec<crate::QueueCommand>) -> Vec<AgentRecord> {
@@ -2036,10 +1800,4 @@ fn apply_next_turn(
     if let Some(replacement) = next.reasoning {
         *reasoning = replacement;
     }
-}
-
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

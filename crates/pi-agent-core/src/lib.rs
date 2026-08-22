@@ -13,6 +13,7 @@ mod policy;
 mod replay;
 mod restore;
 mod run;
+mod scheduler;
 mod state;
 mod tools;
 
@@ -23,5 +24,6 @@ pub use policy::*;
 pub use replay::*;
 pub use restore::*;
 pub use run::*;
+pub use scheduler::*;
 pub use state::*;
 pub use tools::*;

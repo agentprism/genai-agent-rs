@@ -1,12 +1,14 @@
 //! Context projection and post-turn policy seams from Architecture v2 part 1
 //! §4.7–§4.8 and part 2 §2.2, §4.4, and §8.1.
 
-use crate::{AgentRecord, AgentState, TurnOutcome};
+use crate::{AgentError, AgentRecord, AgentState, ToolOutput, TurnOutcome};
 use pi_ai::{
     ApiId, AssistantFinishReason, AssistantMessage, CancellationToken, Context, HandoffChange,
     HandoffReport, LocalBoxFuture, Message, ModelFingerprint, ModelRef, ReasoningLevel,
-    SendBoxFuture, SimpleGenerationOptions, ToolResultMessage, ToolSpec,
+    SendBoxFuture, SimpleGenerationOptions, ToolCall, ToolResultContent, ToolResultMessage,
+    ToolSpec, Usage,
 };
+use serde_json::{Value, value::RawValue};
 use std::fmt;
 
 /// Borrowed durable and run-local state supplied to context preparation.
@@ -178,6 +180,168 @@ fn project_default_context(state: AgentStateView<'_>) -> PreparedContext {
         model_override: None,
         options_override: None,
         report,
+    }
+}
+
+/// Deterministic pre-execution authorization selected by [`ToolPolicy`].
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum ToolAuthorization {
+    /// Permit the validated call to execute.
+    #[default]
+    Allow,
+    /// Produce an error result without invoking the tool.
+    Block {
+        /// Optional model-visible reason; a Pi-compatible default is used when
+        /// absent.
+        reason: Option<String>,
+        /// Termination hint applied to the blocked result.
+        terminate: bool,
+    },
+}
+
+/// Borrowed inputs to deterministic tool preflight.
+pub struct BeforeToolCall<'a> {
+    /// Assistant message that requested the complete batch.
+    pub assistant_message: &'a AssistantMessage,
+    /// Source call exactly as committed in the assistant message.
+    pub tool_call: &'a ToolCall,
+    /// Prepared and JSON-Schema-validated arguments. Pi-compatible policies
+    /// may mutate this value after validation; execution observes the mutation
+    /// without a second validation pass.
+    pub args: &'a mut Value,
+    /// Current run-local record view.
+    pub records: &'a [AgentRecord],
+}
+
+/// Borrowed inputs to post-execution tool finalization.
+pub struct AfterToolCall<'a> {
+    /// Assistant message that requested the complete batch.
+    pub assistant_message: &'a AssistantMessage,
+    /// Source call exactly as committed in the assistant message.
+    pub tool_call: &'a ToolCall,
+    /// Prepared and JSON-Schema-validated arguments used for execution.
+    pub args: &'a Value,
+    /// Tool output before post-execution replacement fields are applied.
+    pub result: &'a ToolOutput,
+    /// Whether the result currently represents an execution failure.
+    pub is_error: bool,
+    /// Current run-local record view.
+    pub records: &'a [AgentRecord],
+}
+
+/// Field-by-field replacement returned by [`ToolPolicy::finalize`].
+///
+/// `None` retains the executed value. Provided content, details, and usage
+/// replace their complete fields rather than being deep-merged, matching Pi's
+/// `afterToolCall` contract.
+#[derive(Clone, Debug, Default)]
+pub struct ToolOutputPatch {
+    /// Replacement model-visible content.
+    pub content: Option<Vec<ToolResultContent>>,
+    /// Replacement tool-owned details.
+    pub details: Option<Box<RawValue>>,
+    /// Replacement tool usage.
+    pub usage: Option<Usage>,
+    /// Replacement error classification.
+    pub is_error: Option<bool>,
+    /// Replacement termination hint.
+    pub terminate: Option<bool>,
+}
+
+impl ToolOutputPatch {
+    pub(crate) fn apply(self, mut output: ToolOutput, mut is_error: bool) -> (ToolOutput, bool) {
+        if let Some(content) = self.content {
+            output.content = content;
+        }
+        if let Some(details) = self.details {
+            output.details = Some(details);
+        }
+        if let Some(usage) = self.usage {
+            output.usage = Some(usage);
+        }
+        if let Some(terminate) = self.terminate {
+            output.terminate = terminate;
+        }
+        if let Some(replacement) = self.is_error {
+            is_error = replacement;
+        }
+        (output, is_error)
+    }
+}
+
+/// Thread-safe authorization and finalization policy for executable tools.
+pub trait ToolPolicy: Send + Sync + 'static {
+    /// Authorizes one normalized and validated call during source-ordered
+    /// preflight.
+    fn authorize<'a>(
+        &'a self,
+        context: BeforeToolCall<'a>,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'a, Result<ToolAuthorization, AgentError>>;
+
+    /// Finalizes one executed output before completion events and transcript
+    /// messages are produced.
+    fn finalize<'a>(
+        &'a self,
+        context: AfterToolCall<'a>,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'a, Result<ToolOutputPatch, AgentError>>;
+}
+
+/// Local-executor authorization and finalization policy.
+pub trait LocalToolPolicy: 'static {
+    /// Authorizes one local normalized and validated call.
+    fn authorize<'a>(
+        &'a self,
+        context: BeforeToolCall<'a>,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'a, Result<ToolAuthorization, AgentError>>;
+
+    /// Finalizes one local executed output.
+    fn finalize<'a>(
+        &'a self,
+        context: AfterToolCall<'a>,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'a, Result<ToolOutputPatch, AgentError>>;
+}
+
+/// Pi-compatible allow/no-op tool policy.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DefaultToolPolicy;
+
+impl ToolPolicy for DefaultToolPolicy {
+    fn authorize<'a>(
+        &'a self,
+        _context: BeforeToolCall<'a>,
+        _cancellation: CancellationToken,
+    ) -> SendBoxFuture<'a, Result<ToolAuthorization, AgentError>> {
+        Box::pin(async { Ok(ToolAuthorization::Allow) })
+    }
+
+    fn finalize<'a>(
+        &'a self,
+        _context: AfterToolCall<'a>,
+        _cancellation: CancellationToken,
+    ) -> SendBoxFuture<'a, Result<ToolOutputPatch, AgentError>> {
+        Box::pin(async { Ok(ToolOutputPatch::default()) })
+    }
+}
+
+impl LocalToolPolicy for DefaultToolPolicy {
+    fn authorize<'a>(
+        &'a self,
+        _context: BeforeToolCall<'a>,
+        _cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'a, Result<ToolAuthorization, AgentError>> {
+        Box::pin(async { Ok(ToolAuthorization::Allow) })
+    }
+
+    fn finalize<'a>(
+        &'a self,
+        _context: AfterToolCall<'a>,
+        _cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'a, Result<ToolOutputPatch, AgentError>> {
+        Box::pin(async { Ok(ToolOutputPatch::default()) })
     }
 }
 

@@ -48,6 +48,13 @@ pub enum AgentError {
         /// Duplicate model-facing tool name.
         name: String,
     },
+    /// A model-facing tool specification contains an invalid JSON Schema.
+    InvalidToolSchema {
+        /// Tool whose argument schema could not be compiled.
+        name: String,
+        /// Sanitized schema compiler diagnostic.
+        message: String,
+    },
     /// An operation requiring an idle agent was requested during a run.
     RunActive,
     /// Continue was requested without any durable transcript records.
@@ -120,6 +127,12 @@ impl fmt::Display for AgentError {
             Self::InvalidToolName => formatter.write_str("tool name must not be empty"),
             Self::DuplicateToolName { name } => {
                 write!(formatter, "tool {name} is registered more than once")
+            }
+            Self::InvalidToolSchema { name, message } => {
+                write!(
+                    formatter,
+                    "invalid argument schema for tool {name}: {message}"
+                )
             }
             Self::RunActive => formatter.write_str("agent is already processing a run"),
             Self::ContinueWithoutMessages => {
