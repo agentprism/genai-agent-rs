@@ -1,5 +1,5 @@
-# Initial parity inventory established by implementation package M1.1.
-# The dependency-free validator and CI wiring are delivered by M1.4.
+# Parity inventory for architecture v2 part 2 §10, pinned to the source commit
+# below. Planned mappings name the milestone that will port the complete file.
 upstream_repository = "earendil-works/pi"
 upstream_commit = "c49906ec77788625aacbdc53ebca6fbe65bd20f5"
 
@@ -16,8 +16,7 @@ status = "semantic-parity"
 [[mapping]]
 source = "packages/ai/src/utils/event-stream.ts"
 rust = ["assembler_applies_finished_failed_and_cancelled_terminals", "assembler_rejects_non_exact_cancelled_terminal", "assembler_rejects_success_terminal_with_error", "stream_binary_scratch_not_persisted", "stream_cancellation_is_terminal_message", "stream_cancellation_preserves_partial_tool_arguments", "stream_cancellation_preserves_partial_tool_with_incomplete_metadata", "stream_exactly_one_terminal", "stream_failure_is_terminal_message", "stream_failure_preserves_partial_tool_arguments", "stream_failure_preserves_partial_tool_with_incomplete_metadata", "stream_length_preserves_truncated_tool_arguments", "stream_missing_provider_terminal_fails", "stream_no_event_after_terminal", "stream_partial_identity_is_stable", "stream_response_id_is_preserved", "stream_response_model_is_preserved", "stream_start_precedes_content", "stream_tool_json_scratch_not_persisted", "stream_usage_is_cumulative"]
-status = "deliberate-divergence"
-reason = "The §10.11 replay-stream replacement preserves Pi's start/terminal/fusion and partial-message behavior using immutable events, AssistantAssembler, and in-band Finished/Failed/Cancelled records."
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/utils/json-parse.ts"
@@ -27,37 +26,108 @@ status = "semantic-parity"
 [[mapping]]
 source = "packages/ai/src/api/anthropic-messages.ts"
 rust = ["anthropic_complete_replay_item_is_found_after_message_round_trip", "anthropic_failed_partial_signature_is_not_replayed", "anthropic_redacted_event_sequence_retains_exact_data", "anthropic_signature_fragments_append_in_order", "anthropic_signature_survives_message_round_trip", "persisted_anthropic_replay_item_json_matches_architecture", "persisted_anthropic_thinking_json_matches_architecture", "stream_cancellation_preserves_partial_tool_arguments", "stream_cancellation_preserves_partial_tool_with_incomplete_metadata", "stream_failure_preserves_partial_tool_arguments", "stream_partial_tool_json_matches_pi", "stream_partial_tool_malformed_numbers_match_pi"]
-status = "deliberate-divergence"
-reason = "The §10.11 replay-envelope replacement makes Pi's silently mutated thinkingSignature explicit and persistable."
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/api/openai-completions.ts"
 rust = ["openai_chat_incomplete_reasoning_detail_is_not_replayed", "openai_chat_reasoning_details_preserve_array_order", "openai_chat_reasoning_details_survive_round_trip", "persisted_openai_chat_reasoning_detail_json_matches_architecture", "stream_cancellation_preserves_partial_tool_arguments", "stream_failure_preserves_partial_tool_arguments", "stream_failure_preserves_partial_tool_with_incomplete_metadata", "stream_length_preserves_truncated_tool_arguments"]
-status = "deliberate-divergence"
-reason = "The §10.11 replay-envelope replacement stores ordered reasoning details as explicit JSON-byte replay items."
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/api/openai-responses-shared.ts"
 rust = ["persisted_openai_responses_message_round_trip", "responses_function_call_call_id_survives", "responses_function_call_item_id_survives", "responses_function_call_namespace_survives", "responses_incomplete_output_item_is_not_replayed", "responses_output_items_preserve_global_order", "responses_reasoning_encrypted_content_survives", "responses_reasoning_item_preserves_full_json", "responses_response_id_survives_round_trip", "responses_text_item_id_survives", "responses_text_phase_survives"]
-status = "deliberate-divergence"
-reason = "The §10.11 replay-envelope replacement persists response identity alongside ordered provider output items."
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/api/bedrock-converse-stream.ts"
 rust = ["bedrock_opaque_bytes_json_encoding_matches_architecture", "bedrock_partial_redacted_payload_is_not_replayed", "bedrock_redacted_bytes_survive_json_round_trip", "bedrock_redacted_chunks_concatenate_as_bytes", "bedrock_signed_reasoning_event_sequence_preserves_text_and_signature", "stream_cancellation_preserves_partial_tool_arguments", "stream_failure_preserves_partial_tool_arguments"]
-status = "deliberate-divergence"
-reason = "The §10.11 replay-envelope replacement retains redacted reasoning as bytes and base64-encodes only at JSON boundaries."
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/api/google-shared.ts"
 rust = ["google_assembled_signatures_survive_message_round_trip", "google_empty_signed_text_part_is_retained", "google_empty_signed_thinking_part_is_retained", "google_signature_never_moves_between_parts", "google_stream_omission_does_not_clear_prior_signature", "google_text_part_signature_stays_on_text_part", "google_thinking_part_signature_stays_on_thinking_part", "google_thought_flag_not_signature_defines_thinking", "google_tool_call_replay_target_round_trip", "google_tool_call_signature_stays_on_function_call"]
-status = "deliberate-divergence"
-reason = "The §10.11 replay-envelope replacement attaches thought signatures to stable canonical targets."
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/auth/types.ts"
 rust = ["auth_provider_extra_fields_round_trip"]
 status = "semantic-parity"
+
+# Architecture v2 part 2 §10.11 divergence allowlist. Each row is represented
+# exactly once and names the replacement contract. A Rust list is present only
+# where the replacement already has an M1 conformance test.
+
+[[mapping]]
+source = "packages/ai/src/types.ts#mutable-partial-provider-signatures"
+rust = ["anthropic_signature_fragments_append_in_order", "replay_r4_same_provider_round_trip_is_deterministic_before_encoder"]
+status = "deliberate-divergence"
+allowlist_row = "mutable-partial-provider-signatures"
+replacement = "Explicit replay stream events plus AssistantAssembler."
+reason = "Rust events are immutable values, so provider replay metadata is carried by explicit replay events and assembled authoritatively instead of silently mutating a shared partial message."
+
+[[mapping]]
+source = "packages/ai/src/types.ts#stream-function-error-contract"
+rust = ["stream_cancellation_is_terminal_message", "stream_failure_is_terminal_message"]
+status = "deliberate-divergence"
+allowlist_row = "event-stream-only-error-handling"
+replacement = "In-band committed terminal message plus structured RunOutcome."
+reason = "Rust uses Result at request-start boundaries while preserving Pi's partial-output behavior in a terminal failed or cancelled assistant record and, at the agent boundary, a structured run outcome."
+
+[[mapping]]
+source = "packages/agent/src/agent.ts#continue"
+rust = []
+status = "deliberate-divergence"
+allowlist_row = "continue-retry-ambiguity"
+replacement = "Strict continue_run plus explicit retry_last_turn."
+reason = "Pi's implementation rejects an assistant-tail continue despite README ambiguity; Rust keeps that precondition and adds an explicit retry operation."
+
+[[mapping]]
+source = "packages/agent/src/stream-fn.ts"
+rust = ["model_runtime_is_a_narrow_arc_capability_and_local_runtime_accepts_rc_state"]
+status = "deliberate-divergence"
+allowlist_row = "global-default-stream-function"
+replacement = "Explicit ModelRuntime injection and AgentFactory."
+reason = "An explicitly injected runtime replaces mutable process-global request routing for deterministic tests, multiple tenants, and FFI."
+
+[[mapping]]
+source = "packages/ai/src/api/transform-messages.ts"
+rust = []
+status = "deliberate-divergence"
+allowlist_row = "silent-lossy-context-transformations"
+replacement = "HandoffReport and optional strict rejection."
+reason = "Every lossy handoff change is reported, and callers may reject lossy projection instead of accepting Pi's silent transformation."
+
+[[mapping]]
+source = "packages/ai/src/types.ts#legacy-replay-fields"
+rust = ["replay_r1_complete_item_identity_is_stable", "replay_r6_signature_target_is_exact_and_stable", "replay_r7_provider_order_is_independent_of_block_order"]
+status = "deliberate-divergence"
+allowlist_row = "overloaded-provider-replay-fields"
+replacement = "Versioned ordered ReplayEnvelope; Pi importer/exporter handles legacy slots."
+reason = "Provider replay artifacts use typed targets, applicability, completeness, and provider order rather than overloading three unrelated string fields."
+
+[[mapping]]
+source = "packages/ai/src/auth/oauth/openai-codex.ts"
+rust = []
+status = "deliberate-divergence"
+allowlist_row = "provider-owned-loopback-server"
+replacement = "Host-provided RedirectReceiver; core owns OAuth state machine."
+reason = "The host owns platform redirect reception while pi-ai retains PKCE, state validation, token exchange, polling, and flow arbitration."
+
+[[mapping]]
+source = "packages/agent/src/harness/session/jsonl/codec.ts"
+rust = []
+status = "deliberate-divergence"
+allowlist_row = "pi-v4-only-session-format"
+replacement = "Native versioned log plus explicit Pi-v4 compatibility backend."
+reason = "The native log must represent replay completeness and other Rust state losslessly; the Pi-v4 writer rejects unrepresentable mutations."
+
+[[mapping]]
+source = "packages/agent/src/harness/agent-harness.ts"
+rust = []
+status = "deliberate-divergence"
+allowlist_row = "top-level-harness-scaffold"
+replacement = "Implement orchestration against the already-defined subsystem contracts and tests."
+reason = "The pinned top-level harness is a scaffold, so Rust derives orchestration from implemented session, reducer, compaction, environment, tool, and telemetry contracts."
 
 # M1.2 proves assembly and persistence. These encoder-dependent §10.2 names
 # remain explicit M4 work; planned tests may be absent until their milestone.
@@ -206,10 +276,12 @@ status = "planned"
 milestone = "M4"
 
 [[mapping]]
-source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#9.5"
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#9.2-9.5"
 rust = ["cancellation_child_propagates_from_parent", "cancellation_wakes_waiter"]
 status = "deliberate-divergence"
-reason = "The §10.11 executor-environment divergence replaces AbortSignal with the portable parent/child CancellationToken required by §9.5."
+allowlist_row = "implicit-async-executor-environment"
+replacement = "Local executor-neutral core plus explicit Send/Tokio adapter."
+reason = "Separate Local and Send trait families plus the portable parent/child CancellationToken replace Pi's single implicit JavaScript async environment."
 
 [[mapping]]
 source = "packages/ai/src/api/simple-options.ts"
