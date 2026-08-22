@@ -12,18 +12,28 @@
 
 mod async_types;
 mod auth;
+mod cancellation;
 mod ids;
 mod messages;
 mod model;
+mod options;
 mod replay;
+mod runtime;
+mod sanitization;
+mod scripted;
 mod streaming;
 mod usage;
 
 pub use async_types::*;
 pub use auth::*;
+pub use cancellation::*;
 pub use ids::*;
 pub use messages::*;
 pub use model::*;
+pub use options::*;
 pub use replay::*;
+pub use runtime::*;
+pub use sanitization::*;
+pub use scripted::*;
 pub use streaming::*;
 pub use usage::*;

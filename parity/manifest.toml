@@ -5,12 +5,17 @@ upstream_commit = "c49906ec77788625aacbdc53ebca6fbe65bd20f5"
 
 [[mapping]]
 source = "packages/ai/src/types.ts"
-rust = ["all_api_model_config_variants_round_trip", "all_identifier_model_ref_and_timestamp_types_round_trip", "anthropic_compat_every_architecture_field_round_trips", "canonical_message_context_and_conversation_types_round_trip", "catalog_unknown_extensions_round_trip", "finish_and_public_error_types_round_trip", "model_descriptor_and_typed_compat_fields_round_trip", "openai_completions_compat_serialized_values_match_pi_contract", "openrouter_max_price_decimal_number_is_lossless_and_distinct_from_string", "pricing_types_round_trip_and_use_integer_arithmetic", "replay_helpers_reject_incomplete_and_cross_model_items", "replay_r1_complete_item_identity_is_stable", "replay_r2_success_rejects_incomplete_item", "replay_r3_failed_and_cancelled_items_are_incomplete_and_ignored", "replay_r4_same_provider_round_trip_is_deterministic_before_encoder", "replay_r5_cross_provider_projection_rejects_nonportable_item", "replay_r6_signature_target_is_exact_and_stable", "replay_r7_provider_order_is_independent_of_block_order", "replay_r8_scratch_state_is_not_in_persisted_schema", "replay_target_applicability_completeness_and_usage_sources_round_trip", "request_wide_pricing_uses_highest_strictly_exceeded_tier", "secret_types_are_not_serializable_and_redact_debug", "tool_call_spec_and_every_result_content_variant_round_trip", "tool_spec_constrained_sampling_serialized_values_match_pi_contract"]
+rust = ["all_api_model_config_variants_round_trip", "all_identifier_model_ref_and_timestamp_types_round_trip", "anthropic_compat_every_architecture_field_round_trips", "canonical_message_context_and_conversation_types_round_trip", "catalog_unknown_extensions_round_trip", "finish_and_public_error_types_round_trip", "model_descriptor_and_typed_compat_fields_round_trip", "model_runtime_is_a_narrow_arc_capability_and_local_runtime_accepts_rc_state", "openai_completions_compat_serialized_values_match_pi_contract", "openrouter_max_price_decimal_number_is_lossless_and_distinct_from_string", "pricing_types_round_trip_and_use_integer_arithmetic", "replay_helpers_reject_incomplete_and_cross_model_items", "replay_r1_complete_item_identity_is_stable", "replay_r2_success_rejects_incomplete_item", "replay_r3_failed_and_cancelled_items_are_incomplete_and_ignored", "replay_r4_same_provider_round_trip_is_deterministic_before_encoder", "replay_r5_cross_provider_projection_rejects_nonportable_item", "replay_r6_signature_target_is_exact_and_stable", "replay_r7_provider_order_is_independent_of_block_order", "replay_r8_scratch_state_is_not_in_persisted_schema", "replay_target_applicability_completeness_and_usage_sources_round_trip", "request_wide_pricing_uses_highest_strictly_exceeded_tier", "secret_types_are_not_serializable_and_redact_debug", "stream_error_sanitizes_secrets", "tool_call_spec_and_every_result_content_variant_round_trip", "tool_spec_constrained_sampling_serialized_values_match_pi_contract"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/ai/src/utils/sanitize-unicode.ts"
+rust = ["stream_unicode_matches_pi"]
 status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/utils/event-stream.ts"
-rust = ["assembler_applies_finished_failed_and_cancelled_terminals", "assembler_rejects_non_exact_cancelled_terminal", "assembler_rejects_success_terminal_with_error", "stream_binary_scratch_not_persisted", "stream_cancellation_is_terminal_message", "stream_cancellation_preserves_partial_tool_arguments", "stream_cancellation_preserves_partial_tool_with_incomplete_metadata", "stream_exactly_one_terminal", "stream_failure_is_terminal_message", "stream_failure_preserves_partial_tool_arguments", "stream_failure_preserves_partial_tool_with_incomplete_metadata", "stream_length_preserves_truncated_tool_arguments", "stream_no_event_after_terminal", "stream_partial_identity_is_stable", "stream_response_id_is_preserved", "stream_response_model_is_preserved", "stream_start_precedes_content", "stream_tool_json_scratch_not_persisted", "stream_usage_is_cumulative"]
+rust = ["assembler_applies_finished_failed_and_cancelled_terminals", "assembler_rejects_non_exact_cancelled_terminal", "assembler_rejects_success_terminal_with_error", "stream_binary_scratch_not_persisted", "stream_cancellation_is_terminal_message", "stream_cancellation_preserves_partial_tool_arguments", "stream_cancellation_preserves_partial_tool_with_incomplete_metadata", "stream_exactly_one_terminal", "stream_failure_is_terminal_message", "stream_failure_preserves_partial_tool_arguments", "stream_failure_preserves_partial_tool_with_incomplete_metadata", "stream_length_preserves_truncated_tool_arguments", "stream_missing_provider_terminal_fails", "stream_no_event_after_terminal", "stream_partial_identity_is_stable", "stream_response_id_is_preserved", "stream_response_model_is_preserved", "stream_start_precedes_content", "stream_tool_json_scratch_not_persisted", "stream_usage_is_cumulative"]
 status = "deliberate-divergence"
 reason = "The §10.11 replay-stream replacement preserves Pi's start/terminal/fusion and partial-message behavior using immutable events, AssistantAssembler, and in-band Finished/Failed/Cancelled records."
 
@@ -196,9 +201,40 @@ milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/abort.test.ts"
-rust = []
+rust = ["cancellation_before_scripted_stream_yields_cancelled_record", "cancellation_during_scripted_stream_yields_cancelled_record", "stream_cancellation_is_terminal_message"]
 status = "planned"
-milestone = "M6"
+milestone = "M4"
+
+[[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#9.5"
+rust = ["cancellation_child_propagates_from_parent", "cancellation_wakes_waiter"]
+status = "deliberate-divergence"
+reason = "The §10.11 executor-environment divergence replaces AbortSignal with the portable parent/child CancellationToken required by §9.5."
+
+[[mapping]]
+source = "packages/ai/src/api/simple-options.ts"
+rust = ["reasoning_xhigh_clamps_in_pi_mode", "thinking_budget_defaults_match_pi"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#3.3"
+rust = ["simple_api_patch_validation_uses_family_constant", "simple_options_and_erased_patch_round_trip", "simple_typed_and_erased_patch_conflict", "simple_unknown_api_patch_rejected"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#3.4"
+rust = ["simple_optional_planning_fields_preserve_omission_and_explicit_values"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#3.7"
+rust = ["reasoning_xhigh_rejects_in_strict_mode"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#1.4"
+rust = ["scripted_anthropic_redacted_event_sequence_retains_exact_data"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/anthropic-adaptive-thinking-models.test.ts"
@@ -952,7 +988,7 @@ milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/unicode-surrogate.test.ts"
-rust = []
+rust = ["stream_unicode_matches_pi"]
 status = "planned"
 milestone = "M6"
 

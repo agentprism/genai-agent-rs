@@ -1046,7 +1046,7 @@ impl AssistantAssembler {
         self.build_terminal_without_validation(AssistantFinish {
             reason: AssistantFinishReason::Error,
             raw_provider_reason: None,
-            error: Some(error),
+            error: Some(error.sanitized(&[])),
         })
     }
 

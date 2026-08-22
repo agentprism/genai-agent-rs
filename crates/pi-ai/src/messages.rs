@@ -455,3 +455,23 @@ pub struct PublicError {
     /// Provider request identifier when safe to expose.
     pub request_id: Option<String>,
 }
+
+impl PublicError {
+    /// Redacts known credential values and secret-bearing structured fields.
+    ///
+    /// Provider adapters pass the credential values available at their
+    /// boundary. Ordinary status and provider-body diagnostics are retained;
+    /// only exact credential values and values assigned to known secret keys
+    /// are replaced.
+    pub fn sanitized(mut self, secret_values: &[&str]) -> Self {
+        self.code = crate::sanitization::redact_public_text(self.code, secret_values);
+        self.message = crate::sanitization::redact_public_text(self.message, secret_values);
+        self.provider_code = self
+            .provider_code
+            .map(|value| crate::sanitization::redact_public_text(value, secret_values));
+        self.request_id = self
+            .request_id
+            .map(|value| crate::sanitization::redact_public_text(value, secret_values));
+        self
+    }
+}
