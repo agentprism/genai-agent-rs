@@ -7,6 +7,18 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::task::{Context, Poll, Waker};
 
+/// Error returned when an executor-neutral operation observes cancellation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CancellationError;
+
+impl std::fmt::Display for CancellationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("operation cancelled")
+    }
+}
+
+impl std::error::Error for CancellationError {}
+
 /// A cloneable, executor-neutral cancellation signal.
 ///
 /// Cancelling a token wakes all futures currently waiting on it and propagates
@@ -54,6 +66,15 @@ impl CancellationToken {
     /// Returns whether this token has been cancelled.
     pub fn is_cancelled(&self) -> bool {
         self.inner.cancelled.load(Ordering::Acquire)
+    }
+
+    /// Returns an error when cancellation has already been requested.
+    pub fn check(&self) -> Result<(), CancellationError> {
+        if self.is_cancelled() {
+            Err(CancellationError)
+        } else {
+            Ok(())
+        }
     }
 
     /// Returns a future that resolves when this token is cancelled.

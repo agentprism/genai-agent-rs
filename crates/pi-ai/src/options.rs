@@ -297,9 +297,17 @@ impl<A: ApiFamily> ApiOptionsInput<A> {
 /// Part 2 §3.3 replaces Part 1's multi-entry `extensions[api]` bag with the
 /// single versioned `api_options` patch below. Typed callers carry the same one
 /// patch as [`ApiOptionsInput::Typed`] until API-family lowering.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SimpleGenerationOptions {
+    /// Maximum retry attempts after the initial pre-stream request.
+    pub max_retries: Option<u32>,
+    /// Maximum provider-requested retry delay in milliseconds. Zero disables
+    /// the cap.
+    pub max_retry_delay_ms: Option<u64>,
+    /// HTTP establishment timeout in milliseconds for transports that support
+    /// it.
+    pub timeout_ms: Option<u64>,
     /// Requested maximum number of output tokens.
     pub max_output_tokens: Option<u32>,
     /// Requested sampling temperature.
@@ -326,6 +334,36 @@ pub struct SimpleGenerationOptions {
     pub tool_choice: Option<ToolChoice>,
     /// The sole erased API-family patch for dynamic callers.
     pub api_options: Option<ErasedApiOptionsPatch>,
+}
+
+impl fmt::Debug for SimpleGenerationOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SimpleGenerationOptions")
+            .field("max_retries", &self.max_retries)
+            .field("max_retry_delay_ms", &self.max_retry_delay_ms)
+            .field("timeout_ms", &self.timeout_ms)
+            .field("max_output_tokens", &self.max_output_tokens)
+            .field("temperature", &self.temperature)
+            .field("top_p", &self.top_p)
+            .field("stop", &self.stop)
+            .field("reasoning", &self.reasoning)
+            .field("reasoning_fallback", &self.reasoning_fallback)
+            .field("thinking_budgets", &self.thinking_budgets)
+            .field("seed", &self.seed)
+            .field(
+                "session_id",
+                &self.session_id.as_ref().map(|_| "<redacted session id>"),
+            )
+            .field("headers", &"<redacted headers>")
+            .field("cache_retention", &self.cache_retention)
+            .field("tool_choice", &self.tool_choice)
+            .field(
+                "api_options",
+                &self.api_options.as_ref().map(|_| "<redacted API options>"),
+            )
+            .finish()
+    }
 }
 
 /// Failure while lowering provider-neutral options into an API family.

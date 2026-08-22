@@ -1369,6 +1369,8 @@ Pi's retry helper reproduces the pinned OpenAI/Anthropic SDK policy while making
 
 See `packages/ai/src/utils/provider-retry.ts:1–260`.
 
+> Correction: Pinned Pi's implementation retries every numeric status `>= 500`, not only statuses in the HTTP 5xx range. The Rust classifier preserves that exact predicate (`packages/ai/src/utils/provider-retry.ts:22–36`).
+
 ### Correct owner
 
 The retry loop belongs inside the **API transport implementation**, immediately around the operation that establishes the HTTP response or provider SDK stream.
@@ -1657,6 +1659,8 @@ The exact request pipeline should be:
 ### Bedrock signing special case
 
 Pi inserts caller headers at the Smithy build step, after serialization but before SigV4 signing, and suppresses reserved `x-amz-*`, `authorization`, and `host` values. It also captures response headers using a deserialize middleware. See `packages/ai/src/api/bedrock-converse-stream.ts:120–330` and `320–500`.
+
+> Correction: Pinned Pi suppresses those reserved Bedrock headers silently; it does not report their names through diagnostics. Rust parity therefore inserts allowed logical headers at the signer-compatible build stage and silently suppresses reserved names (`packages/ai/src/api/bedrock-converse-stream.ts:452–485`; `packages/ai/test/bedrock-custom-headers.test.ts`).
 
 The generic header pipeline therefore produces **logical headers**. The Bedrock transport adapter is responsible for inserting them at the signer-compatible stage and reporting any suppressed names through diagnostics.
 

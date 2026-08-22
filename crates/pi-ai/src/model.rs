@@ -5,6 +5,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value, value::RawValue};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use url::Url;
 
 /// An insertion-ordered JSON object used for model sampling defaults
@@ -39,7 +40,7 @@ pub struct ModelDescriptor {
 }
 
 /// API-independent model catalog fields (Architecture v2 part 2 §5.1).
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CommonModelDescriptor {
     /// Provider/model identity.
     pub model_ref: ModelRef,
@@ -57,6 +58,22 @@ pub struct CommonModelDescriptor {
     pub reasoning: bool,
     /// Per-model logical headers.
     pub headers: HeaderMapSpec,
+}
+
+impl fmt::Debug for CommonModelDescriptor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CommonModelDescriptor")
+            .field("model_ref", &self.model_ref)
+            .field("display_name", &self.display_name)
+            .field("base_url", &"<redacted endpoint>")
+            .field("modalities", &self.modalities)
+            .field("limits", &self.limits)
+            .field("pricing", &self.pricing)
+            .field("reasoning", &self.reasoning)
+            .field("headers", &"<redacted headers>")
+            .finish()
+    }
 }
 
 /// A model input or output modality (Architecture v2 part 2 §5.1).

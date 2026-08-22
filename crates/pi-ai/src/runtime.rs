@@ -33,6 +33,8 @@ pub enum RequestStartErrorKind {
     RuntimeUnavailable,
     /// The runtime violated an internal setup invariant.
     Internal,
+    /// The request was cancelled before a stream could be established.
+    Cancelled,
 }
 
 /// Sanitized error returned only before a model stream can be established.
