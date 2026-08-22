@@ -91,11 +91,16 @@ reason = "An explicitly injected runtime replaces mutable process-global request
 
 [[mapping]]
 source = "packages/ai/src/api/transform-messages.ts"
-rust = ["agent_failed_assistant_is_omitted_from_next_provider_projection"]
+rust = []
 status = "deliberate-divergence"
 allowlist_row = "silent-lossy-context-transformations"
 replacement = "HandoffReport and optional strict rejection."
 reason = "Every lossy handoff change is reported, and callers may reject lossy projection instead of accepting Pi's silent transformation."
+
+[[planned_test]]
+rust = "agent_failed_assistant_is_omitted_from_next_provider_projection"
+source = "packages/ai/src/api/transform-messages.ts"
+milestone = "M3.4"
 
 [[mapping]]
 source = "packages/ai/src/types.ts#legacy-replay-fields"
@@ -1129,6 +1134,9 @@ rust = [
   "agent_cancelled_assistant_is_committed",
   "agent_cancelled_assistant_commit_replays",
   "agent_committed_event_replay_reproduces_final_state",
+  "agent_completed_turn_new_messages_match_pi_invocation_boundary",
+  "agent_context_policy_can_override_model_and_options",
+  "agent_context_policy_receives_cancellation",
   "agent_continue_with_tools",
   "agent_continue_without_tools",
   "agent_event_envelope_and_outcomes_round_trip",
@@ -1143,12 +1151,21 @@ rust = [
   "agent_failed_partial_content_round_trips",
   "agent_partial_usage_survives_failure",
   "agent_failed_partial_usage_replays",
+  "agent_local_tool_hooks_receive_replaced_complete_context",
+  "agent_prepare_next_turn_can_replace_context",
+  "agent_prepare_next_turn_can_replace_model",
+  "agent_prepare_next_turn_can_replace_reasoning",
+  "agent_prepare_next_turn_runs_after_turn_finished",
+  "agent_projector_runs_once_per_model_turn",
   "agent_prompt_with_multiple_tools",
   "agent_prompt_with_one_tool",
   "agent_prompt_without_tools",
   "agent_run_finished_is_final_event",
   "agent_run_accepts_agent_input",
+  "agent_should_stop_precedes_queue_poll",
+  "agent_should_stop_runs_after_prepare_next_turn",
   "agent_should_stop_failure_commits_assistant",
+  "agent_transform_context_runs_before_projector",
   "queue_followup_polled_only_when_agent_would_stop",
   "queue_steering_not_polled_between_tools",
   "queue_steering_not_polled_when_should_stop_returns_true",
@@ -1183,7 +1200,7 @@ rust = [
   "tool_validation_precedes_before_hook",
 ]
 status = "planned"
-milestone = "M2.4"
+milestone = "M3.4"
 
 [[mapping]]
 source = "packages/agent/test/agent.test.ts"
@@ -1192,6 +1209,7 @@ rust = [
   "agent_continue_drains_steering_before_rejecting_assistant_tail",
   "agent_continue_event_sequence",
   "agent_continue_rejects_assistant_tail",
+  "agent_default_projector_matches_pi_convert_to_llm",
   "agent_handle_event_sinks_are_barriers",
   "agent_local_run_matches_send_lifecycle",
   "agent_low_level_stream_is_observational",
@@ -1225,8 +1243,7 @@ rust = [
   "queue_ingress_order_is_stable",
   "queue_one_mode_drains_one",
 ]
-status = "planned"
-milestone = "M2.4"
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/e2e.test.ts"

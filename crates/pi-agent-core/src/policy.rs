@@ -1,12 +1,13 @@
 //! Context projection and post-turn policy seams from Architecture v2 part 1
 //! §4.7–§4.8 and part 2 §2.2, §4.4, and §8.1.
 
-use crate::{AgentError, AgentRecord, AgentState, ToolOutput, TurnOutcome};
+use crate::{
+    AgentError, AgentRecord, AgentState, LocalToolRegistry, ToolOutput, ToolRegistry, TurnOutcome,
+};
 use pi_ai::{
-    ApiId, AssistantFinishReason, AssistantMessage, CancellationToken, Context, HandoffChange,
-    HandoffReport, LocalBoxFuture, Message, ModelFingerprint, ModelRef, ReasoningLevel,
-    SendBoxFuture, SimpleGenerationOptions, ToolCall, ToolResultContent, ToolResultMessage,
-    ToolSpec, Usage,
+    AssistantMessage, CancellationToken, Context, LocalBoxFuture, Message, ModelRef,
+    ReasoningLevel, SendBoxFuture, SimpleGenerationOptions, ToolCall, ToolResultContent,
+    ToolResultMessage, ToolSpec, Usage,
 };
 use serde_json::{Value, value::RawValue};
 use std::fmt;
@@ -25,7 +26,47 @@ pub struct AgentStateView<'a> {
     pub reasoning: ReasoningLevel,
 }
 
+/// Complete run-local agent context used between model turns.
+///
+/// The executable-tool parameter keeps the Send and Local runtime families
+/// equally expressive: [`AgentContext`] owns a [`ToolRegistry`], while
+/// [`LocalAgentContext`] owns a [`LocalToolRegistry`]. Replacing this value is
+/// the Rust equivalent of Pi replacing its complete `AgentContext`, including
+/// `systemPrompt`, `messages`, and executable tools.
+#[derive(Clone, Debug)]
+pub struct AgentRunContext<Tools> {
+    /// System instruction used for subsequent requests in this run.
+    pub system_prompt: String,
+    /// Agent records visible to subsequent context-policy preparation.
+    pub records: Vec<AgentRecord>,
+    /// Executable tools active for subsequent requests and tool batches.
+    pub tools: Tools,
+}
+
+/// Complete Send-runtime context used within one run.
+pub type AgentContext = AgentRunContext<ToolRegistry>;
+
+/// Complete Local-runtime context used within one run.
+pub type LocalAgentContext = AgentRunContext<LocalToolRegistry>;
+
+/// Agent-record preparation produced before message projection.
+///
+/// This intermediate value keeps Pi's `transformContext` and `convertToLlm`
+/// phases distinct while retaining Architecture v2's model and option
+/// override capabilities. The core turns it into [`PreparedContext`] only
+/// after [`MessageProjector::project`] succeeds.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PreparedAgentRecords {
+    /// Run-local records supplied to message projection.
+    pub records: Vec<AgentRecord>,
+    /// Optional model replacement for this request and later turns in the run.
+    pub model_override: Option<ModelRef>,
+    /// Optional complete common generation-option replacement.
+    pub options_override: Option<SimpleGenerationOptions>,
+}
+
 /// Complete provider-neutral request context prepared for one model turn.
+#[derive(Clone, Debug, PartialEq)]
 pub struct PreparedContext {
     /// Projected canonical context.
     pub context: Context,
@@ -33,8 +74,6 @@ pub struct PreparedContext {
     pub model_override: Option<ModelRef>,
     /// Optional common generation-option replacement.
     pub options_override: Option<SimpleGenerationOptions>,
-    /// Structured projection and handoff diagnostics.
-    pub report: HandoffReport,
 }
 
 /// Failure while preparing the provider-visible context.
@@ -61,126 +100,127 @@ impl fmt::Display for ContextError {
 
 impl std::error::Error for ContextError {}
 
-/// Thread-safe context preparation and failed-turn projection policy.
+/// Thread-safe Agent-record preparation policy.
+///
+/// This is the Rust mapping of Pi's `transformContext` phase. It deliberately
+/// runs before [`MessageProjector`] and does not perform provider/API handoff;
+/// that later layer owns its [`pi_ai::HandoffReport`].
 pub trait ContextPolicy: Send + Sync + 'static {
-    /// Prepares one provider-neutral context immediately before the model call.
-    fn prepare<'a>(
+    /// Prepares run-local Agent records immediately before message projection.
+    fn prepare_agent_records<'a>(
         &'a self,
         state: AgentStateView<'a>,
         cancellation: CancellationToken,
-    ) -> SendBoxFuture<'a, Result<PreparedContext, ContextError>>;
+    ) -> SendBoxFuture<'a, Result<PreparedAgentRecords, ContextError>>;
 }
 
 /// Local-executor context preparation policy.
 pub trait LocalContextPolicy: 'static {
-    /// Prepares one provider-neutral context without requiring `Send`.
-    fn prepare<'a>(
+    /// Prepares local Agent records without requiring `Send`.
+    fn prepare_agent_records<'a>(
         &'a self,
         state: AgentStateView<'a>,
         cancellation: CancellationToken,
-    ) -> LocalBoxFuture<'a, Result<PreparedContext, ContextError>>;
+    ) -> LocalBoxFuture<'a, Result<PreparedAgentRecords, ContextError>>;
 }
 
-/// Pi-compatible default context policy.
-///
-/// Custom records remain UI-only and failed or aborted assistants remain
-/// durable while being omitted from provider projection (part 2 §2.2).
+/// Pi-compatible identity `transformContext` policy.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DefaultContextPolicy;
 
 impl ContextPolicy for DefaultContextPolicy {
-    fn prepare<'a>(
+    fn prepare_agent_records<'a>(
         &'a self,
         state: AgentStateView<'a>,
         cancellation: CancellationToken,
-    ) -> SendBoxFuture<'a, Result<PreparedContext, ContextError>> {
+    ) -> SendBoxFuture<'a, Result<PreparedAgentRecords, ContextError>> {
         Box::pin(async move {
             if cancellation.is_cancelled() {
                 return Err(ContextError::Cancelled);
             }
-            Ok(project_default_context(state))
+            Ok(PreparedAgentRecords {
+                records: state.records.to_vec(),
+                model_override: None,
+                options_override: None,
+            })
         })
     }
 }
 
 impl LocalContextPolicy for DefaultContextPolicy {
-    fn prepare<'a>(
+    fn prepare_agent_records<'a>(
         &'a self,
         state: AgentStateView<'a>,
         cancellation: CancellationToken,
-    ) -> LocalBoxFuture<'a, Result<PreparedContext, ContextError>> {
+    ) -> LocalBoxFuture<'a, Result<PreparedAgentRecords, ContextError>> {
         Box::pin(async move {
             if cancellation.is_cancelled() {
                 return Err(ContextError::Cancelled);
             }
-            Ok(project_default_context(state))
+            Ok(PreparedAgentRecords {
+                records: state.records.to_vec(),
+                model_override: None,
+                options_override: None,
+            })
         })
     }
 }
 
-fn project_default_context(state: AgentStateView<'_>) -> PreparedContext {
-    let target_api = state
-        .records
+/// Thread-safe projection from extensible Agent records to canonical messages.
+///
+/// This is the Rust mapping of Pi's `convertToLlm`. It is called exactly once
+/// per model turn, after [`ContextPolicy::prepare_agent_records`].
+pub trait MessageProjector: Send + Sync + 'static {
+    /// Projects prepared Agent records into provider-neutral LLM messages.
+    fn project<'a>(
+        &'a self,
+        records: &'a [AgentRecord],
+    ) -> SendBoxFuture<'a, Result<Vec<Message>, ContextError>>;
+}
+
+/// Local-executor message projector.
+pub trait LocalMessageProjector: 'static {
+    /// Projects prepared local Agent records without requiring `Send`.
+    fn project<'a>(
+        &'a self,
+        records: &'a [AgentRecord],
+    ) -> LocalBoxFuture<'a, Result<Vec<Message>, ContextError>>;
+}
+
+/// Pi-compatible default `convertToLlm` projection.
+///
+/// Canonical user, assistant, and tool-result records pass through unchanged;
+/// custom records remain durable and UI-visible but are omitted from model
+/// context. Provider/API handoff may subsequently omit failed assistants.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DefaultMessageProjector;
+
+impl MessageProjector for DefaultMessageProjector {
+    fn project<'a>(
+        &'a self,
+        records: &'a [AgentRecord],
+    ) -> SendBoxFuture<'a, Result<Vec<Message>, ContextError>> {
+        Box::pin(async move { Ok(project_default_messages(records)) })
+    }
+}
+
+impl LocalMessageProjector for DefaultMessageProjector {
+    fn project<'a>(
+        &'a self,
+        records: &'a [AgentRecord],
+    ) -> LocalBoxFuture<'a, Result<Vec<Message>, ContextError>> {
+        Box::pin(async move { Ok(project_default_messages(records)) })
+    }
+}
+
+fn project_default_messages(records: &[AgentRecord]) -> Vec<Message> {
+    records
         .iter()
-        .rev()
-        .find_map(|record| match record {
-            AgentRecord::Llm(Message::Assistant(message))
-                if message.provider == state.model.provider
-                    && message.requested_model == state.model.model =>
-            {
-                Some(message.api.clone())
-            }
-            AgentRecord::Llm(_) | AgentRecord::Custom { .. } => None,
+        .filter_map(|record| match record {
+            AgentRecord::Llm(message) => Some(message.clone()),
+            AgentRecord::Custom { .. } => None,
         })
-        .unwrap_or_else(|| ApiId::new("unknown"));
-    let target = ModelFingerprint::new(
-        state.model.provider.clone(),
-        target_api,
-        state.model.model.clone(),
-    );
-    let mut report = HandoffReport::unchanged(target);
-    let mut messages = Vec::new();
-
-    for record in state.records {
-        let AgentRecord::Llm(message) = record else {
-            continue;
-        };
-        if let Message::Assistant(assistant) = message {
-            report.source_models.insert(ModelFingerprint::new(
-                assistant.provider.clone(),
-                assistant.api.clone(),
-                assistant
-                    .response_model
-                    .clone()
-                    .unwrap_or_else(|| assistant.requested_model.clone()),
-            ));
-            if matches!(
-                assistant.finish.reason,
-                AssistantFinishReason::Error | AssistantFinishReason::Aborted
-            ) {
-                report.changes.push(HandoffChange::FailedAssistantOmitted {
-                    message_id: assistant.id.clone(),
-                    reason: assistant.finish.reason,
-                });
-                report.lossy = true;
-                continue;
-            }
-        }
-        messages.push(message.clone());
-    }
-
-    PreparedContext {
-        context: Context {
-            schema_version: pi_ai::CONTEXT_SCHEMA_VERSION,
-            system_prompt: (!state.state.system_prompt.is_empty())
-                .then(|| state.state.system_prompt.clone()),
-            messages,
-            tools: state.tools.to_vec(),
-        },
-        model_override: None,
-        options_override: None,
-        report,
-    }
+        .collect()
 }
 
 /// Deterministic pre-execution authorization selected by [`ToolPolicy`].
@@ -200,7 +240,7 @@ pub enum ToolAuthorization {
 }
 
 /// Borrowed inputs to deterministic tool preflight.
-pub struct BeforeToolCall<'a> {
+pub struct BeforeToolCall<'a, Tools = ToolRegistry> {
     /// Assistant message that requested the complete batch.
     pub assistant_message: &'a AssistantMessage,
     /// Source call exactly as committed in the assistant message.
@@ -209,12 +249,13 @@ pub struct BeforeToolCall<'a> {
     /// may mutate this value after validation; execution observes the mutation
     /// without a second validation pass.
     pub args: &'a mut Value,
-    /// Current run-local record view.
-    pub records: &'a [AgentRecord],
+    /// Complete current run-local context, including system prompt, records,
+    /// and executable tools.
+    pub context: &'a AgentRunContext<Tools>,
 }
 
 /// Borrowed inputs to post-execution tool finalization.
-pub struct AfterToolCall<'a> {
+pub struct AfterToolCall<'a, Tools = ToolRegistry> {
     /// Assistant message that requested the complete batch.
     pub assistant_message: &'a AssistantMessage,
     /// Source call exactly as committed in the assistant message.
@@ -225,9 +266,16 @@ pub struct AfterToolCall<'a> {
     pub result: &'a ToolOutput,
     /// Whether the result currently represents an execution failure.
     pub is_error: bool,
-    /// Current run-local record view.
-    pub records: &'a [AgentRecord],
+    /// Complete current run-local context, including system prompt, records,
+    /// and executable tools.
+    pub context: &'a AgentRunContext<Tools>,
 }
+
+/// Local-runtime inputs to deterministic tool preflight.
+pub type LocalBeforeToolCall<'a> = BeforeToolCall<'a, LocalToolRegistry>;
+
+/// Local-runtime inputs to post-execution tool finalization.
+pub type LocalAfterToolCall<'a> = AfterToolCall<'a, LocalToolRegistry>;
 
 /// Field-by-field replacement returned by [`ToolPolicy::finalize`].
 ///
@@ -270,6 +318,10 @@ impl ToolOutputPatch {
 }
 
 /// Thread-safe authorization and finalization policy for executable tools.
+///
+/// Authorization here is a logical allow/block decision, not an operating
+/// system sandbox or security boundary. Isolation remains the responsibility
+/// of the tool implementation and its host environment.
 pub trait ToolPolicy: Send + Sync + 'static {
     /// Authorizes one normalized and validated call during source-ordered
     /// preflight.
@@ -289,18 +341,20 @@ pub trait ToolPolicy: Send + Sync + 'static {
 }
 
 /// Local-executor authorization and finalization policy.
+///
+/// Like [`ToolPolicy`], this is not a sandbox or security boundary.
 pub trait LocalToolPolicy: 'static {
     /// Authorizes one local normalized and validated call.
     fn authorize<'a>(
         &'a self,
-        context: BeforeToolCall<'a>,
+        context: LocalBeforeToolCall<'a>,
         cancellation: CancellationToken,
     ) -> LocalBoxFuture<'a, Result<ToolAuthorization, AgentError>>;
 
     /// Finalizes one local executed output.
     fn finalize<'a>(
         &'a self,
-        context: AfterToolCall<'a>,
+        context: LocalAfterToolCall<'a>,
         cancellation: CancellationToken,
     ) -> LocalBoxFuture<'a, Result<ToolOutputPatch, AgentError>>;
 }
@@ -330,7 +384,7 @@ impl ToolPolicy for DefaultToolPolicy {
 impl LocalToolPolicy for DefaultToolPolicy {
     fn authorize<'a>(
         &'a self,
-        _context: BeforeToolCall<'a>,
+        _context: LocalBeforeToolCall<'a>,
         _cancellation: CancellationToken,
     ) -> LocalBoxFuture<'a, Result<ToolAuthorization, AgentError>> {
         Box::pin(async { Ok(ToolAuthorization::Allow) })
@@ -338,7 +392,7 @@ impl LocalToolPolicy for DefaultToolPolicy {
 
     fn finalize<'a>(
         &'a self,
-        _context: AfterToolCall<'a>,
+        _context: LocalAfterToolCall<'a>,
         _cancellation: CancellationToken,
     ) -> LocalBoxFuture<'a, Result<ToolOutputPatch, AgentError>> {
         Box::pin(async { Ok(ToolOutputPatch::default()) })
@@ -346,27 +400,49 @@ impl LocalToolPolicy for DefaultToolPolicy {
 }
 
 /// Immutable facts available after `TurnFinished` and before queue polling.
-pub struct CompletedTurn<'a> {
+pub struct CompletedTurn<'a, Tools = ToolRegistry> {
     /// Committed turn outcome.
     pub outcome: &'a TurnOutcome,
     /// Committed assistant message.
     pub assistant: &'a AssistantMessage,
     /// Committed tool results in assistant source order.
     pub tool_results: &'a [ToolResultMessage],
-    /// Current run-local record view.
-    pub records: &'a [AgentRecord],
+    /// Complete current run-local context.
+    pub context: &'a AgentRunContext<Tools>,
+    /// Records committed by this loop invocation so far. Prompt runs include
+    /// their initial prompt records; continuation and retry runs exclude
+    /// records that predate the invocation. This accumulator is independent
+    /// of replaceable [`Self::context`].
+    pub new_messages: &'a [AgentRecord],
 }
 
 /// Run-local replacements selected after a completed turn.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct NextTurn {
-    /// Replacement record view for subsequent context preparation.
-    pub records: Option<Vec<AgentRecord>>,
+#[derive(Clone, Debug)]
+pub struct NextTurn<Tools = ToolRegistry> {
+    /// Replacement complete context for subsequent preparation, requests, and
+    /// tool execution within this run.
+    pub context: Option<AgentRunContext<Tools>>,
     /// Replacement model for subsequent requests in this run.
     pub model: Option<ModelRef>,
     /// Replacement reasoning level for subsequent requests in this run.
     pub reasoning: Option<ReasoningLevel>,
 }
+
+impl<Tools> Default for NextTurn<Tools> {
+    fn default() -> Self {
+        Self {
+            context: None,
+            model: None,
+            reasoning: None,
+        }
+    }
+}
+
+/// Completed-turn input for the Local runtime family.
+pub type LocalCompletedTurn<'a> = CompletedTurn<'a, LocalToolRegistry>;
+
+/// Next-turn replacement for the Local runtime family.
+pub type LocalNextTurn = NextTurn<LocalToolRegistry>;
 
 /// Failure from post-turn policy evaluation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -414,14 +490,14 @@ pub trait LocalTurnPolicy: 'static {
     /// Optionally replaces run-local context, model, or reasoning.
     fn prepare_next_turn<'a>(
         &'a self,
-        turn: CompletedTurn<'a>,
+        turn: LocalCompletedTurn<'a>,
         cancellation: CancellationToken,
-    ) -> LocalBoxFuture<'a, Result<NextTurn, TurnPolicyError>>;
+    ) -> LocalBoxFuture<'a, Result<LocalNextTurn, TurnPolicyError>>;
 
     /// Decides whether to stop before either queue is polled.
     fn should_stop<'a>(
         &'a self,
-        turn: CompletedTurn<'a>,
+        turn: LocalCompletedTurn<'a>,
         cancellation: CancellationToken,
     ) -> LocalBoxFuture<'a, Result<bool, TurnPolicyError>>;
 }
@@ -451,15 +527,15 @@ impl TurnPolicy for DefaultTurnPolicy {
 impl LocalTurnPolicy for DefaultTurnPolicy {
     fn prepare_next_turn<'a>(
         &'a self,
-        _turn: CompletedTurn<'a>,
+        _turn: LocalCompletedTurn<'a>,
         _cancellation: CancellationToken,
-    ) -> LocalBoxFuture<'a, Result<NextTurn, TurnPolicyError>> {
-        Box::pin(async { Ok(NextTurn::default()) })
+    ) -> LocalBoxFuture<'a, Result<LocalNextTurn, TurnPolicyError>> {
+        Box::pin(async { Ok(LocalNextTurn::default()) })
     }
 
     fn should_stop<'a>(
         &'a self,
-        _turn: CompletedTurn<'a>,
+        _turn: LocalCompletedTurn<'a>,
         _cancellation: CancellationToken,
     ) -> LocalBoxFuture<'a, Result<bool, TurnPolicyError>> {
         Box::pin(async { Ok(false) })

@@ -2,9 +2,10 @@
 //! (Architecture v2 part 1 §4.6 and part 2 §8.1, §9.1).
 
 use crate::{
-    AfterToolCall, AgentRecord, BeforeToolCall, DefaultToolPolicy, LocalToolPolicy,
-    LocalToolRegistry, LocalToolUpdateSink, ToolAuthorization, ToolExecutionMode, ToolOutput,
-    ToolPolicy, ToolRegistry, ToolUpdate, ToolUpdateError, ToolUpdateSink, validate_arguments,
+    AfterToolCall, AgentContext, AgentRunContext, BeforeToolCall, DefaultToolPolicy,
+    LocalAfterToolCall, LocalAgentContext, LocalBeforeToolCall, LocalToolPolicy, LocalToolRegistry,
+    LocalToolUpdateSink, ToolAuthorization, ToolExecutionMode, ToolOutput, ToolPolicy,
+    ToolRegistry, ToolUpdate, ToolUpdateError, ToolUpdateSink, validate_arguments,
 };
 use futures_channel::mpsc::{Sender, channel};
 use futures_util::{StreamExt, future::Either, stream::FuturesUnordered};
@@ -122,13 +123,13 @@ pub enum ToolBatchStreamEvent {
 }
 
 /// Borrowed inputs shared by the Send and local batch schedulers.
-pub struct ToolBatchRequest<'a> {
+pub struct ToolBatchRequest<'a, Tools = ToolRegistry> {
     /// Assistant message that owns the finalized calls.
     pub assistant: &'a AssistantMessage,
     /// Finalized calls in assistant source order.
     pub calls: &'a [ToolCall],
-    /// Current run-local record view supplied to tool policies.
-    pub records: &'a [AgentRecord],
+    /// Complete current run-local context supplied to tool policies.
+    pub context: &'a AgentRunContext<Tools>,
     /// Agent-level default scheduling mode.
     pub configured_mode: ToolExecutionMode,
     /// Parent run cancellation signal.
@@ -163,7 +164,7 @@ impl ToolScheduler {
     pub async fn execute_batch(
         &self,
         tools: &ToolRegistry,
-        request: ToolBatchRequest<'_>,
+        request: ToolBatchRequest<'_, ToolRegistry>,
     ) -> ToolBatchOutcome {
         let mut events = self.execute_batch_events(tools, request);
         while let Some(event) = events.next().await {
@@ -179,7 +180,7 @@ impl ToolScheduler {
     pub fn execute_batch_events<'a>(
         &'a self,
         tools: &'a ToolRegistry,
-        request: ToolBatchRequest<'a>,
+        request: ToolBatchRequest<'a, ToolRegistry>,
     ) -> SendBoxStream<'a, ToolBatchStreamEvent> {
         send_batch_stream(self.policy.clone(), tools, request)
     }
@@ -218,7 +219,7 @@ impl LocalToolScheduler {
     pub async fn execute_batch(
         &self,
         tools: &LocalToolRegistry,
-        request: ToolBatchRequest<'_>,
+        request: ToolBatchRequest<'_, LocalToolRegistry>,
     ) -> ToolBatchOutcome {
         let mut events = self.execute_batch_events(tools, request);
         while let Some(event) = events.next().await {
@@ -233,7 +234,7 @@ impl LocalToolScheduler {
     pub fn execute_batch_events<'a>(
         &'a self,
         tools: &'a LocalToolRegistry,
-        request: ToolBatchRequest<'a>,
+        request: ToolBatchRequest<'a, LocalToolRegistry>,
     ) -> LocalBoxStream<'a, ToolBatchStreamEvent> {
         local_batch_stream(self.policy.clone(), tools, request)
     }
@@ -322,7 +323,7 @@ fn local_plan(
 fn send_batch_stream<'a>(
     policy: Arc<dyn ToolPolicy>,
     tools: &'a ToolRegistry,
-    request: ToolBatchRequest<'a>,
+    request: ToolBatchRequest<'a, ToolRegistry>,
 ) -> SendBoxStream<'a, ToolBatchStreamEvent> {
     Box::pin(async_stream::stream! {
         let truncated = request.assistant.finish.reason == AssistantFinishReason::Length;
@@ -369,7 +370,7 @@ fn send_batch_stream<'a>(
                         tools,
                         policy.clone(),
                         request.assistant,
-                        request.records,
+                        request.context,
                         preflight_index,
                         source_index,
                         call,
@@ -384,14 +385,14 @@ fn send_batch_stream<'a>(
                             let execution_sender = sender.clone();
                             let execution_policy = policy.clone();
                             let assistant = request.assistant.clone();
-                            let records = request.records.to_vec();
+                            let context = request.context.clone();
                             let cancellation = batch_cancellation.clone();
                             running.push(Box::pin(async move {
                                 execute_prepared_send(
                                     prepared,
                                     execution_policy,
                                     assistant,
-                                    records,
+                                    context,
                                     cancellation,
                                     execution_sender,
                                 ).await
@@ -437,7 +438,7 @@ fn send_batch_stream<'a>(
                         tools,
                         policy.clone(),
                         request.assistant,
-                        request.records,
+                        request.context,
                         preflight_index,
                         source_index,
                         call,
@@ -461,14 +462,14 @@ fn send_batch_stream<'a>(
                     let execution_sender = sender.clone();
                     let execution_policy = policy.clone();
                     let assistant = request.assistant.clone();
-                    let records = request.records.to_vec();
+                    let context = request.context.clone();
                     let cancellation = batch_cancellation.clone();
                     running.push(Box::pin(async move {
                         execute_prepared_send(
                             prepared,
                             execution_policy,
                             assistant,
-                            records,
+                            context,
                             cancellation,
                             execution_sender,
                         ).await
@@ -510,7 +511,7 @@ async fn preflight_send(
     tools: &ToolRegistry,
     policy: Arc<dyn ToolPolicy>,
     assistant: &AssistantMessage,
-    records: &[AgentRecord],
+    context: &AgentContext,
     preflight_index: PreflightIndex,
     source_index: SourceIndex,
     call: ToolCall,
@@ -561,7 +562,7 @@ async fn preflight_send(
                 assistant_message: assistant,
                 tool_call: &call,
                 args: &mut effective_arguments,
-                records,
+                context,
             },
             cancellation.clone(),
         )
@@ -612,7 +613,7 @@ async fn execute_prepared_send(
     prepared: PreparedSendCall,
     policy: Arc<dyn ToolPolicy>,
     assistant: AssistantMessage,
-    records: Vec<AgentRecord>,
+    context: AgentContext,
     cancellation: CancellationToken,
     events: Sender<ExecutionSignal>,
 ) -> OutcomeBase {
@@ -646,7 +647,7 @@ async fn execute_prepared_send(
                 args: &prepared.effective_call.arguments,
                 result: &output,
                 is_error,
-                records: &records,
+                context: &context,
             },
             cancellation,
         )
@@ -673,7 +674,7 @@ async fn execute_prepared_send(
 fn local_batch_stream<'a>(
     policy: Rc<dyn LocalToolPolicy>,
     tools: &'a LocalToolRegistry,
-    request: ToolBatchRequest<'a>,
+    request: ToolBatchRequest<'a, LocalToolRegistry>,
 ) -> LocalBoxStream<'a, ToolBatchStreamEvent> {
     Box::pin(async_stream::stream! {
         let truncated = request.assistant.finish.reason == AssistantFinishReason::Length;
@@ -716,7 +717,7 @@ fn local_batch_stream<'a>(
                         tools,
                         policy.clone(),
                         request.assistant,
-                        request.records,
+                        request.context,
                         preflight_index,
                         source_index,
                         call,
@@ -731,14 +732,14 @@ fn local_batch_stream<'a>(
                             let execution_sender = sender.clone();
                             let execution_policy = policy.clone();
                             let assistant = request.assistant.clone();
-                            let records = request.records.to_vec();
+                            let context = request.context.clone();
                             let cancellation = batch_cancellation.clone();
                             running.push(Box::pin(async move {
                                 execute_prepared_local(
                                     prepared,
                                     execution_policy,
                                     assistant,
-                                    records,
+                                    context,
                                     cancellation,
                                     execution_sender,
                                 ).await
@@ -784,7 +785,7 @@ fn local_batch_stream<'a>(
                         tools,
                         policy.clone(),
                         request.assistant,
-                        request.records,
+                        request.context,
                         preflight_index,
                         source_index,
                         call,
@@ -806,14 +807,14 @@ fn local_batch_stream<'a>(
                     let execution_sender = sender.clone();
                     let execution_policy = policy.clone();
                     let assistant = request.assistant.clone();
-                    let records = request.records.to_vec();
+                    let context = request.context.clone();
                     let cancellation = batch_cancellation.clone();
                     running.push(Box::pin(async move {
                         execute_prepared_local(
                             prepared,
                             execution_policy,
                             assistant,
-                            records,
+                            context,
                             cancellation,
                             execution_sender,
                         ).await
@@ -855,7 +856,7 @@ async fn preflight_local(
     tools: &LocalToolRegistry,
     policy: Rc<dyn LocalToolPolicy>,
     assistant: &AssistantMessage,
-    records: &[AgentRecord],
+    context: &LocalAgentContext,
     preflight_index: PreflightIndex,
     source_index: SourceIndex,
     call: ToolCall,
@@ -902,11 +903,11 @@ async fn preflight_local(
     let validated_arguments = effective_arguments.clone();
     let authorization = policy
         .authorize(
-            BeforeToolCall {
+            LocalBeforeToolCall {
                 assistant_message: assistant,
                 tool_call: &call,
                 args: &mut effective_arguments,
-                records,
+                context,
             },
             cancellation.clone(),
         )
@@ -957,7 +958,7 @@ async fn execute_prepared_local(
     prepared: PreparedLocalCall,
     policy: Rc<dyn LocalToolPolicy>,
     assistant: AssistantMessage,
-    records: Vec<AgentRecord>,
+    context: LocalAgentContext,
     cancellation: CancellationToken,
     events: Sender<ExecutionSignal>,
 ) -> OutcomeBase {
@@ -985,13 +986,13 @@ async fn execute_prepared_local(
     };
     match policy
         .finalize(
-            AfterToolCall {
+            LocalAfterToolCall {
                 assistant_message: &assistant,
                 tool_call: &prepared.source_call,
                 args: &prepared.effective_call.arguments,
                 result: &output,
                 is_error,
-                records: &records,
+                context: &context,
             },
             cancellation,
         )

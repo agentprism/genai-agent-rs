@@ -3,21 +3,22 @@
 //! §8, and §9.
 
 use crate::{
-    AgentControl, AgentError, AgentEvent, AgentRecord, AgentState, AgentStateView, CompletedTurn,
-    ContextError, ContextPolicy, DefaultContextPolicy, DefaultTurnPolicy, LocalAgent,
-    LocalContextPolicy, LocalToolPolicy, LocalToolRegistry, LocalToolScheduler, LocalTurnPolicy,
-    MessageRole, NextTurn, QueueKind, RunOutcome, ToolBatchRequest, ToolBatchStreamEvent,
-    ToolCallOutcome, ToolExecutionMode, ToolPolicy, ToolRegistry, ToolScheduler, TurnOutcome,
-    TurnPolicy,
+    AgentContext, AgentControl, AgentError, AgentEvent, AgentRecord, AgentRunContext, AgentState,
+    AgentStateView, CompletedTurn, ContextError, ContextPolicy, DefaultContextPolicy,
+    DefaultMessageProjector, DefaultTurnPolicy, LocalAgent, LocalAgentContext, LocalContextPolicy,
+    LocalMessageProjector, LocalToolPolicy, LocalToolRegistry, LocalToolScheduler, LocalTurnPolicy,
+    MessageProjector, MessageRole, NextTurn, PreparedContext, QueueKind, RunOutcome,
+    ToolBatchRequest, ToolBatchStreamEvent, ToolCallOutcome, ToolExecutionMode, ToolPolicy,
+    ToolRegistry, ToolScheduler, TurnOutcome, TurnPolicy,
 };
 use futures_util::StreamExt;
 use pi_ai::{
     ApiId, AssistantAssembler, AssistantEvent, AssistantFinish, AssistantFinishReason,
     AssistantMessage, AssistantMessageSnapshot, CancellationReason, CancellationToken,
-    ContentBlock, ContentBlockId, LocalBoxStream, Message, MessageId, ModelRequest, ModelRuntime,
-    PublicError, ReplayCompleteness, ReplayEnvelope, ReplayScope, RequestStartError,
+    ContentBlock, ContentBlockId, Context, LocalBoxStream, Message, MessageId, ModelRequest,
+    ModelRuntime, PublicError, ReplayCompleteness, ReplayEnvelope, ReplayScope, RequestStartError,
     RequestStartErrorKind, RunId, SendBoxStream, SimpleGenerationOptions, Timestamp, ToolCallId,
-    ToolResultMessage, ToolSpec, Usage, UsageSource, UserMessage, VersionedExtension,
+    ToolResultMessage, Usage, UsageSource, UserMessage, VersionedExtension,
 };
 use serde::{Deserialize, Serialize};
 use std::{rc::Rc, sync::Arc};
@@ -160,6 +161,7 @@ impl crate::Agent {
             tool_execution: ToolExecutionMode::Parallel,
             tool_scheduler: ToolScheduler::default(),
             context_policy: Arc::new(DefaultContextPolicy),
+            message_projector: Arc::new(DefaultMessageProjector),
             turn_policy: Arc::new(DefaultTurnPolicy),
             defaults,
             next_identity: 1,
@@ -245,6 +247,16 @@ impl crate::Agent {
         Ok(())
     }
 
+    /// Replaces the Agent-record to canonical-message projector.
+    pub fn set_message_projector(
+        &mut self,
+        projector: Arc<dyn MessageProjector>,
+    ) -> Result<(), AgentError> {
+        self.require_idle()?;
+        self.message_projector = projector;
+        Ok(())
+    }
+
     /// Replaces the post-turn policy.
     pub fn set_turn_policy(&mut self, policy: Arc<dyn TurnPolicy>) -> Result<(), AgentError> {
         self.require_idle()?;
@@ -319,7 +331,8 @@ impl crate::Agent {
     }
 
     /// Retries the request boundary preceding an errored or aborted assistant.
-    /// The failed record stays durable and default projection omits it.
+    /// The failed record stays durable while the retry's run-local context
+    /// starts at the last valid request boundary.
     pub fn retry_last_turn<'a>(
         &'a mut self,
         cancellation: CancellationToken,
@@ -328,7 +341,8 @@ impl crate::Agent {
         if !tail_is_failed_assistant(&self.state.transcript) {
             return Err(AgentError::RetryRequiresFailedAssistant);
         }
-        Ok(self.start_run(Vec::new(), true, cancellation))
+        let retry_records = self.state.transcript[..self.state.transcript.len() - 1].to_vec();
+        Ok(self.start_run_with_context(Vec::new(), true, cancellation, Some(retry_records)))
     }
 
     /// Clears transcript and all run scratch while retaining configured model,
@@ -358,6 +372,7 @@ impl crate::Agent {
         self.control.set_steering_mode(crate::QueueDrainMode::One);
         self.control.set_follow_up_mode(crate::QueueDrainMode::One);
         self.context_policy = Arc::new(DefaultContextPolicy);
+        self.message_projector = Arc::new(DefaultMessageProjector);
         self.turn_policy = Arc::new(DefaultTurnPolicy);
         Ok(())
     }
@@ -367,6 +382,16 @@ impl crate::Agent {
         records: Vec<AgentRecord>,
         poll_initial_steering: bool,
         cancellation: CancellationToken,
+    ) -> SendBoxStream<'a, AgentEvent> {
+        self.start_run_with_context(records, poll_initial_steering, cancellation, None)
+    }
+
+    fn start_run_with_context<'a>(
+        &'a mut self,
+        records: Vec<AgentRecord>,
+        poll_initial_steering: bool,
+        cancellation: CancellationToken,
+        initial_context_records: Option<Vec<AgentRecord>>,
     ) -> SendBoxStream<'a, AgentEvent> {
         self.require_idle()
             .expect("a borrowed Agent cannot safely start a second active run");
@@ -389,7 +414,8 @@ impl crate::Agent {
             guard,
             execute_send_tool_batch,
             records,
-            poll_initial_steering
+            poll_initial_steering,
+            initial_context_records
         ))
     }
 
@@ -465,6 +491,7 @@ impl LocalAgent {
             tool_execution: ToolExecutionMode::Parallel,
             tool_scheduler: LocalToolScheduler::default(),
             context_policy: Rc::new(DefaultContextPolicy),
+            message_projector: Rc::new(DefaultMessageProjector),
             turn_policy: Rc::new(DefaultTurnPolicy),
             defaults,
             next_identity: 1,
@@ -567,6 +594,16 @@ impl LocalAgent {
         Ok(())
     }
 
+    /// Replaces the local Agent-record to canonical-message projector.
+    pub fn set_message_projector(
+        &mut self,
+        projector: Rc<dyn LocalMessageProjector>,
+    ) -> Result<(), AgentError> {
+        self.require_idle()?;
+        self.message_projector = projector;
+        Ok(())
+    }
+
     /// Replaces the local post-turn policy while idle.
     pub fn set_turn_policy(&mut self, policy: Rc<dyn LocalTurnPolicy>) -> Result<(), AgentError> {
         self.require_idle()?;
@@ -624,7 +661,8 @@ impl LocalAgent {
         Ok(self.start_run(Vec::new(), true, cancellation))
     }
 
-    /// Retries the request boundary preceding a local failed assistant.
+    /// Retries the request boundary preceding a local failed assistant while
+    /// retaining that failed record in durable state.
     pub fn retry_last_turn<'a>(
         &'a mut self,
         cancellation: CancellationToken,
@@ -633,7 +671,8 @@ impl LocalAgent {
         if !tail_is_failed_assistant(&self.state.transcript) {
             return Err(AgentError::RetryRequiresFailedAssistant);
         }
-        Ok(self.start_run(Vec::new(), true, cancellation))
+        let retry_records = self.state.transcript[..self.state.transcript.len() - 1].to_vec();
+        Ok(self.start_run_with_context(Vec::new(), true, cancellation, Some(retry_records)))
     }
 
     /// Clears local transcript and runtime scratch with Pi retention semantics.
@@ -661,6 +700,7 @@ impl LocalAgent {
         self.control.set_steering_mode(crate::QueueDrainMode::One);
         self.control.set_follow_up_mode(crate::QueueDrainMode::One);
         self.context_policy = Rc::new(DefaultContextPolicy);
+        self.message_projector = Rc::new(DefaultMessageProjector);
         self.turn_policy = Rc::new(DefaultTurnPolicy);
         Ok(())
     }
@@ -670,6 +710,16 @@ impl LocalAgent {
         records: Vec<AgentRecord>,
         poll_initial_steering: bool,
         cancellation: CancellationToken,
+    ) -> LocalBoxStream<'a, AgentEvent> {
+        self.start_run_with_context(records, poll_initial_steering, cancellation, None)
+    }
+
+    fn start_run_with_context<'a>(
+        &'a mut self,
+        records: Vec<AgentRecord>,
+        poll_initial_steering: bool,
+        cancellation: CancellationToken,
+        initial_context_records: Option<Vec<AgentRecord>>,
     ) -> LocalBoxStream<'a, AgentEvent> {
         self.require_idle()
             .expect("a borrowed LocalAgent cannot safely start a second active run");
@@ -692,7 +742,8 @@ impl LocalAgent {
             guard,
             execute_local_tool_batch,
             records,
-            poll_initial_steering
+            poll_initial_steering,
+            initial_context_records
         ))
     }
 
@@ -783,12 +834,26 @@ impl Drop for LocalRunGuard<'_> {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! agent_run_stream {
-    ($guard:ident, $execute_tools:ident, $records:expr, $poll_initial_steering:expr) => {
+    (
+        $guard:ident,
+        $execute_tools:ident,
+        $records:expr,
+        $poll_initial_steering:expr,
+        $initial_context_records:expr
+    ) => {
         async_stream::stream! {
             let mut $guard = $guard;
             let run_id = $guard.run_id.clone();
             let mut pending_records = $records;
-            let mut context_records = $guard.agent.state.transcript.clone();
+            let mut current_context = $guard.agent.run_context();
+            if let Some(initial_records) = $initial_context_records {
+                current_context.records = initial_records;
+            }
+            // Pi's `newMessages` is cumulative for one loop invocation and is
+            // not the same value as the replaceable current context. Prompt
+            // records enter it; pre-existing continuation/retry history does
+            // not.
+            let mut new_messages = Vec::<AgentRecord>::new();
             let mut current_model = $guard.agent.state.model.clone();
             let mut current_reasoning = $guard.agent.state.reasoning;
             let mut turn = 0_u32;
@@ -819,7 +884,8 @@ macro_rules! agent_run_stream {
                         role,
                     };
                     $guard.agent.state.transcript.push(record.clone());
-                    context_records.push(record.clone());
+                    current_context.records.push(record.clone());
+                    new_messages.push(record.clone());
                     $guard.agent.bump_event_sequence();
                     yield AgentEvent::MessageCommitted { message: record };
                 }
@@ -845,22 +911,18 @@ macro_rules! agent_run_stream {
                             role,
                         };
                         $guard.agent.state.transcript.push(record.clone());
-                        context_records.push(record.clone());
+                        current_context.records.push(record.clone());
+                        new_messages.push(record.clone());
                         $guard.agent.bump_event_sequence();
                         yield AgentEvent::MessageCommitted { message: record };
                     }
                 }
 
                 $guard.agent.phase = Some(AgentPhase::PrepareContext);
-                let tool_specs = $guard.agent.tool_specs();
-                let prepared = $guard.agent.context_policy.prepare(
-                    AgentStateView {
-                        state: &$guard.agent.state,
-                        records: &context_records,
-                        tools: &tool_specs,
-                        model: &current_model,
-                        reasoning: current_reasoning,
-                    },
+                let prepared = $guard.agent.prepare_context(
+                    &current_context,
+                    &current_model,
+                    current_reasoning,
                     $guard.cancellation.clone(),
                 ).await;
 
@@ -889,7 +951,8 @@ macro_rules! agent_run_stream {
                             role: MessageRole::Assistant,
                         };
                         $guard.agent.state.transcript.push(AgentRecord::Llm(Message::Assistant(message.clone())));
-                        context_records.push(AgentRecord::Llm(Message::Assistant(message.clone())));
+                        current_context.records.push(AgentRecord::Llm(Message::Assistant(message.clone())));
+                        new_messages.push(AgentRecord::Llm(Message::Assistant(message.clone())));
                         $guard.agent.last_error = message.finish.error.clone();
                         $guard.agent.bump_event_sequence();
                         yield AgentEvent::MessageCommitted {
@@ -911,21 +974,14 @@ macro_rules! agent_run_stream {
                 if let Some(model) = prepared.model_override.clone() {
                     current_model = model;
                 }
-                if !prepared.report.changes.is_empty() {
-                    $guard.agent.bump_event_sequence();
-                    yield AgentEvent::ContextPrepared {
-                        turn,
-                        target: current_model.clone(),
-                        report: prepared.report.clone(),
-                    };
-                }
-                let mut request_options = prepared
-                    .options_override
-                    .unwrap_or_else(|| $guard.agent.options.clone());
-                request_options.reasoning = match current_reasoning {
+                let mut default_options = $guard.agent.options.clone();
+                default_options.reasoning = match current_reasoning {
                     pi_ai::ReasoningLevel::Off => None,
                     reasoning => Some(reasoning),
                 };
+                let request_options = prepared
+                    .options_override
+                    .unwrap_or(default_options);
 
                 $guard.agent.phase = Some(AgentPhase::RequestAssistant);
                 let stream_result = $guard.agent.runtime.stream(
@@ -1086,7 +1142,8 @@ macro_rules! agent_run_stream {
                 $guard.agent.phase = Some(AgentPhase::CommitAssistant);
                 $guard.agent.streaming = None;
                 $guard.agent.state.transcript.push(AgentRecord::Llm(Message::Assistant(assistant.clone())));
-                context_records.push(AgentRecord::Llm(Message::Assistant(assistant.clone())));
+                current_context.records.push(AgentRecord::Llm(Message::Assistant(assistant.clone())));
+                new_messages.push(AgentRecord::Llm(Message::Assistant(assistant.clone())));
                 run_usage = Some(match run_usage.take() {
                     None => assistant.usage.clone(),
                     Some(total) => add_usage(total, &assistant.usage),
@@ -1133,15 +1190,15 @@ macro_rules! agent_run_stream {
                     // live lifecycle polling does not immutably borrow Agent
                     // while event sequence and pending-call state are updated.
                     let tool_scheduler = $guard.agent.tool_scheduler.clone();
-                    let tool_registry = $guard.agent.tools.clone();
-                    let tool_records = context_records.clone();
+                    let tool_context = current_context.clone();
+                    let tool_registry = tool_context.tools.clone();
                     let mut batch_events = $execute_tools(
                         &tool_scheduler,
                         &tool_registry,
                         ToolBatchRequest {
                             assistant: &assistant,
                             calls: &tool_calls,
-                            records: &tool_records,
+                            context: &tool_context,
                             configured_mode: $guard.agent.tool_execution,
                             cancellation: $guard.cancellation.clone(),
                         },
@@ -1201,7 +1258,8 @@ macro_rules! agent_run_stream {
                                         role: MessageRole::ToolResult,
                                     };
                                     $guard.agent.state.transcript.push(AgentRecord::Llm(Message::ToolResult(message.clone())));
-                                    context_records.push(AgentRecord::Llm(Message::ToolResult(message.clone())));
+                                    current_context.records.push(AgentRecord::Llm(Message::ToolResult(message.clone())));
+                                    new_messages.push(AgentRecord::Llm(Message::ToolResult(message.clone())));
                                     $guard.agent.bump_event_sequence();
                                     yield AgentEvent::MessageCommitted {
                                         message: AgentRecord::Llm(Message::ToolResult(message.clone())),
@@ -1227,7 +1285,8 @@ macro_rules! agent_run_stream {
                                 role: MessageRole::ToolResult,
                             };
                             $guard.agent.state.transcript.push(AgentRecord::Llm(Message::ToolResult(message.clone())));
-                            context_records.push(AgentRecord::Llm(Message::ToolResult(message.clone())));
+                            current_context.records.push(AgentRecord::Llm(Message::ToolResult(message.clone())));
+                            new_messages.push(AgentRecord::Llm(Message::ToolResult(message.clone())));
                             $guard.agent.bump_event_sequence();
                             yield AgentEvent::MessageCommitted {
                                 message: AgentRecord::Llm(Message::ToolResult(message.clone())),
@@ -1258,7 +1317,8 @@ macro_rules! agent_run_stream {
                         outcome: &outcome,
                         assistant: &assistant,
                         tool_results: &tool_messages,
-                        records: &context_records,
+                        context: &current_context,
+                        new_messages: &new_messages,
                     },
                     $guard.cancellation.clone(),
                 ).await;
@@ -1280,6 +1340,8 @@ macro_rules! agent_run_stream {
                             )
                         };
                         $guard.agent.state.transcript.push(AgentRecord::Llm(Message::Assistant(failed.clone())));
+                        current_context.records.push(AgentRecord::Llm(Message::Assistant(failed.clone())));
+                        new_messages.push(AgentRecord::Llm(Message::Assistant(failed.clone())));
                         $guard.agent.last_error = failed.finish.error.clone();
                         $guard.agent.bump_event_sequence();
                         yield AgentEvent::MessageStarted {
@@ -1304,7 +1366,7 @@ macro_rules! agent_run_stream {
                 };
                 apply_next_turn(
                     next,
-                    &mut context_records,
+                    &mut current_context,
                     &mut current_model,
                     &mut current_reasoning,
                 );
@@ -1315,7 +1377,8 @@ macro_rules! agent_run_stream {
                         outcome: &outcome,
                         assistant: &assistant,
                         tool_results: &tool_messages,
-                        records: &context_records,
+                        context: &current_context,
+                        new_messages: &new_messages,
                     },
                     $guard.cancellation.clone(),
                 ).await;
@@ -1337,6 +1400,8 @@ macro_rules! agent_run_stream {
                             )
                         };
                         $guard.agent.state.transcript.push(AgentRecord::Llm(Message::Assistant(failed.clone())));
+                        current_context.records.push(AgentRecord::Llm(Message::Assistant(failed.clone())));
+                        new_messages.push(AgentRecord::Llm(Message::Assistant(failed.clone())));
                         $guard.agent.last_error = failed.finish.error.clone();
                         $guard.agent.bump_event_sequence();
                         yield AgentEvent::MessageStarted {
@@ -1414,28 +1479,108 @@ macro_rules! agent_run_stream {
 }
 
 impl crate::Agent {
-    fn bump_event_sequence(&mut self) {
-        self.next_sequence = self.next_sequence.saturating_add(1);
+    fn run_context(&self) -> AgentContext {
+        AgentRunContext {
+            system_prompt: self.state.system_prompt.clone(),
+            records: self.state.transcript.clone(),
+            tools: self.tools.clone(),
+        }
     }
 
-    fn tool_specs(&self) -> Vec<ToolSpec> {
-        self.tools
+    async fn prepare_context(
+        &self,
+        context: &AgentContext,
+        model: &pi_ai::ModelRef,
+        reasoning: pi_ai::ReasoningLevel,
+        cancellation: CancellationToken,
+    ) -> Result<PreparedContext, ContextError> {
+        let tool_specs = context
+            .tools
             .iter()
             .map(|(_, tool)| tool.spec().clone())
-            .collect()
+            .collect::<Vec<_>>();
+        let prepared = self
+            .context_policy
+            .prepare_agent_records(
+                AgentStateView {
+                    state: &self.state,
+                    records: &context.records,
+                    tools: &tool_specs,
+                    model,
+                    reasoning,
+                },
+                cancellation,
+            )
+            .await?;
+        let messages = self.message_projector.project(&prepared.records).await?;
+        Ok(PreparedContext {
+            context: Context {
+                schema_version: pi_ai::CONTEXT_SCHEMA_VERSION,
+                system_prompt: (!context.system_prompt.is_empty())
+                    .then(|| context.system_prompt.clone()),
+                messages,
+                tools: tool_specs,
+            },
+            model_override: prepared.model_override,
+            options_override: prepared.options_override,
+        })
+    }
+
+    fn bump_event_sequence(&mut self) {
+        self.next_sequence = self.next_sequence.saturating_add(1);
     }
 }
 
 impl LocalAgent {
-    fn bump_event_sequence(&mut self) {
-        self.next_sequence = self.next_sequence.saturating_add(1);
+    fn run_context(&self) -> LocalAgentContext {
+        AgentRunContext {
+            system_prompt: self.state.system_prompt.clone(),
+            records: self.state.transcript.clone(),
+            tools: self.tools.clone(),
+        }
     }
 
-    fn tool_specs(&self) -> Vec<ToolSpec> {
-        self.tools
+    async fn prepare_context(
+        &self,
+        context: &LocalAgentContext,
+        model: &pi_ai::ModelRef,
+        reasoning: pi_ai::ReasoningLevel,
+        cancellation: CancellationToken,
+    ) -> Result<PreparedContext, ContextError> {
+        let tool_specs = context
+            .tools
             .iter()
             .map(|(_, tool)| tool.spec().clone())
-            .collect()
+            .collect::<Vec<_>>();
+        let prepared = self
+            .context_policy
+            .prepare_agent_records(
+                AgentStateView {
+                    state: &self.state,
+                    records: &context.records,
+                    tools: &tool_specs,
+                    model,
+                    reasoning,
+                },
+                cancellation,
+            )
+            .await?;
+        let messages = self.message_projector.project(&prepared.records).await?;
+        Ok(PreparedContext {
+            context: Context {
+                schema_version: pi_ai::CONTEXT_SCHEMA_VERSION,
+                system_prompt: (!context.system_prompt.is_empty())
+                    .then(|| context.system_prompt.clone()),
+                messages,
+                tools: tool_specs,
+            },
+            model_override: prepared.model_override,
+            options_override: prepared.options_override,
+        })
+    }
+
+    fn bump_event_sequence(&mut self) {
+        self.next_sequence = self.next_sequence.saturating_add(1);
     }
 }
 
@@ -1454,7 +1599,7 @@ impl Drop for LocalAgent {
 fn execute_send_tool_batch<'a>(
     scheduler: &'a ToolScheduler,
     tools: &'a ToolRegistry,
-    request: ToolBatchRequest<'a>,
+    request: ToolBatchRequest<'a, ToolRegistry>,
 ) -> SendBoxStream<'a, ToolBatchStreamEvent> {
     scheduler.execute_batch_events(tools, request)
 }
@@ -1462,7 +1607,7 @@ fn execute_send_tool_batch<'a>(
 fn execute_local_tool_batch<'a>(
     scheduler: &'a LocalToolScheduler,
     tools: &'a LocalToolRegistry,
-    request: ToolBatchRequest<'a>,
+    request: ToolBatchRequest<'a, LocalToolRegistry>,
 ) -> LocalBoxStream<'a, ToolBatchStreamEvent> {
     scheduler.execute_batch_events(tools, request)
 }
@@ -1785,14 +1930,14 @@ fn add_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
     }
 }
 
-fn apply_next_turn(
-    next: NextTurn,
-    records: &mut Vec<AgentRecord>,
+fn apply_next_turn<Tools>(
+    next: NextTurn<Tools>,
+    context: &mut AgentRunContext<Tools>,
     model: &mut pi_ai::ModelRef,
     reasoning: &mut pi_ai::ReasoningLevel,
 ) {
-    if let Some(replacement) = next.records {
-        *records = replacement;
+    if let Some(replacement) = next.context {
+        *context = replacement;
     }
     if let Some(replacement) = next.model {
         *model = replacement;

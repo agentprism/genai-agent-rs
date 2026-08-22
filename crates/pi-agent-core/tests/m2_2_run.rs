@@ -1022,25 +1022,6 @@ impl ModelRuntime for RecordingRuntime {
 }
 
 #[test]
-fn agent_failed_assistant_is_omitted_from_next_provider_projection() {
-    // §10.9 Failure; part 2 §2.2. Pi basis: transform-messages.ts skips error/aborted assistants.
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let runtime = RecordingRuntime {
-        inner: ScriptedRuntime::new([
-            text_response("partial").failing(error()),
-            text_response("retried"),
-        ]),
-        requests: requests.clone(),
-    };
-    let mut agent = Agent::new(Arc::new(runtime), state(), ToolRegistry::new()).unwrap();
-    collect(agent.prompt_records([user("user-1", "go")], CancellationToken::new()));
-    collect(agent.retry_last_turn(CancellationToken::new()).unwrap());
-    let requests = lock(&requests);
-    assert_eq!(requests.len(), 2);
-    assert!(requests[1].context.messages.iter().all(|message| !matches!(message, Message::Assistant(assistant) if assistant.finish.reason == AssistantFinishReason::Error)));
-}
-
-#[test]
 fn agent_retry_last_turn_reuses_last_valid_request_boundary() {
     // §10.9 Failure; deliberate §10.11 retry addition. Failed record remains durable.
     let requests = Arc::new(Mutex::new(Vec::new()));

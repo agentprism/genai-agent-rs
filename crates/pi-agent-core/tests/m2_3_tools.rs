@@ -309,6 +309,22 @@ fn registry(tools: impl IntoIterator<Item = Arc<dyn Tool>>) -> ToolRegistry {
     registry
 }
 
+fn send_run_context(tools: &ToolRegistry) -> AgentContext {
+    AgentRunContext {
+        system_prompt: String::new(),
+        records: Vec::new(),
+        tools: tools.clone(),
+    }
+}
+
+fn local_run_context(tools: &LocalToolRegistry) -> LocalAgentContext {
+    AgentRunContext {
+        system_prompt: String::new(),
+        records: Vec::new(),
+        tools: tools.clone(),
+    }
+}
+
 fn run_batch(
     scheduler: &ToolScheduler,
     tools: &ToolRegistry,
@@ -326,12 +342,13 @@ fn run_batch(
             | ContentBlock::Thinking { .. } => None,
         })
         .collect::<Vec<_>>();
+    let context = send_run_context(tools);
     block_on(scheduler.execute_batch(
         tools,
         ToolBatchRequest {
             assistant,
             calls: &calls,
-            records: &[],
+            context: &context,
             configured_mode: mode,
             cancellation,
         },
@@ -1147,12 +1164,13 @@ fn tool_late_updates_are_ignored() {
     let calls = [call("call-0", "updates", json!({}))];
     let (outcome, accepted_updates) = block_on(async {
         let scheduler = ToolScheduler::default();
+        let context = send_run_context(&tools);
         let mut events = scheduler.execute_batch_events(
             &tools,
             ToolBatchRequest {
                 assistant: &message,
                 calls: &calls,
-                records: &[],
+                context: &context,
                 configured_mode: ToolExecutionMode::Parallel,
                 cancellation: CancellationToken::new(),
             },
@@ -1767,12 +1785,13 @@ fn tool_length_truncated_calls_are_never_executed() {
     local_tools
         .register(Rc::new(NeverLocalTool::new("echo")))
         .unwrap();
+    let local_context = local_run_context(&local_tools);
     let local_outcome = block_on(LocalToolScheduler::default().execute_batch(
         &local_tools,
         ToolBatchRequest {
             assistant: &adversarial_message,
             calls: &calls,
-            records: &[],
+            context: &local_context,
             configured_mode: ToolExecutionMode::Parallel,
             cancellation: CancellationToken::new(),
         },
@@ -1816,12 +1835,13 @@ fn tool_length_truncated_calls_each_receive_error_result() {
     let mid_batch = CancellationToken::new();
     let mid_batch_send = block_on(async {
         let scheduler = ToolScheduler::default();
+        let context = send_run_context(&tools);
         let mut events = scheduler.execute_batch_events(
             &tools,
             ToolBatchRequest {
                 assistant: &message,
                 calls: &calls,
-                records: &[],
+                context: &context,
                 configured_mode: ToolExecutionMode::Parallel,
                 cancellation: mid_batch.clone(),
             },
@@ -1851,12 +1871,13 @@ fn tool_length_truncated_calls_each_receive_error_result() {
     let local_scheduler = LocalToolScheduler::default();
     let pre_cancelled = CancellationToken::new();
     pre_cancelled.cancel();
+    let local_context = local_run_context(&local_tools);
     let pre_cancelled_local = block_on(local_scheduler.execute_batch(
         &local_tools,
         ToolBatchRequest {
             assistant: &message,
             calls: &calls,
-            records: &[],
+            context: &local_context,
             configured_mode: ToolExecutionMode::Sequential,
             cancellation: pre_cancelled,
         },
@@ -1865,12 +1886,13 @@ fn tool_length_truncated_calls_each_receive_error_result() {
 
     let mid_batch = CancellationToken::new();
     let mid_batch_local = block_on(async {
+        let context = local_run_context(&local_tools);
         let mut events = local_scheduler.execute_batch_events(
             &local_tools,
             ToolBatchRequest {
                 assistant: &message,
                 calls: &calls,
-                records: &[],
+                context: &context,
                 configured_mode: ToolExecutionMode::Parallel,
                 cancellation: mid_batch.clone(),
             },
