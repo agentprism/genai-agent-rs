@@ -74,8 +74,13 @@ pub fn openai_sdk_platform_headers(timeout_ms: Option<f64>) -> Vec<(String, Stri
             .unwrap_or_else(|| "unknown".to_owned())
     });
     let mut headers = vec![("X-Stainless-Retry-Count".to_owned(), "0".to_owned())];
-    let timeout_ms = timeout_ms.unwrap_or(600_000.0);
-    if timeout_ms != 0.0 && !timeout_ms.is_nan() {
+    // The SDK reads the per-request options pi passes (client.js:578-618), and pi sets
+    // `timeout` only when `timeoutMs` is given (openai-completions.ts:308,
+    // openai-responses.ts:148); the client default never reaches this header.
+    if let Some(timeout_ms) = timeout_ms
+        && timeout_ms != 0.0
+        && !timeout_ms.is_nan()
+    {
         headers.push((
             "X-Stainless-Timeout".to_owned(),
             crate::utils::error_body::js_f64_string((timeout_ms / 1_000.0).trunc()),
@@ -116,7 +121,8 @@ mod tests {
         assert!(value.contains("; "));
     }
 
-    /// Pins OpenAI JavaScript SDK 6.40.0 `client.js:600-627` header semantics.
+    /// Pins OpenAI JavaScript SDK 6.40.0 `client.js:578-627` header semantics: the timeout header
+    /// exists only for a per-request timeout (pi `openai-completions.ts:308`).
     #[test]
     fn stainless_platform_headers_preserve_javascript_timeout_coercion() {
         let header = |timeout| {
@@ -124,7 +130,8 @@ mod tests {
                 .into_iter()
                 .find_map(|(name, value)| (name == "X-Stainless-Timeout").then_some(value))
         };
-        assert_eq!(header(None).as_deref(), Some("600"));
+        assert_eq!(header(None), None);
+        assert_eq!(header(Some(600_000.0)).as_deref(), Some("600"));
         assert_eq!(header(Some(1_500.9)).as_deref(), Some("1"));
         assert_eq!(header(Some(-500.0)).as_deref(), Some("0"));
         assert_eq!(header(Some(f64::INFINITY)).as_deref(), Some("Infinity"));

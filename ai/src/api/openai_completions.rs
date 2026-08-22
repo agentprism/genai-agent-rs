@@ -261,17 +261,41 @@ enum WireMessage {
     },
 }
 
+/// pi builds `{ id, type, function }` / `{ id, type, custom }` (openai-completions.ts:1291-1307);
+/// explicit structs keep that key order on the wire (an internally tagged enum puts `type` first).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(untagged)]
 enum WireAssistantToolCall {
-    Function {
-        id: String,
-        function: WireFunctionCall,
-    },
-    Custom {
-        id: String,
-        custom: WireCustomCall,
-    },
+    Function(WireAssistantFunctionCall),
+    Custom(WireAssistantCustomCall),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct WireAssistantFunctionCall {
+    id: String,
+    #[serde(rename = "type")]
+    kind: WireFunctionTag,
+    function: WireFunctionCall,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum WireFunctionTag {
+    #[serde(rename = "function")]
+    Function,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct WireAssistantCustomCall {
+    id: String,
+    #[serde(rename = "type")]
+    kind: WireCustomTag,
+    custom: WireCustomCall,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum WireCustomTag {
+    #[serde(rename = "custom")]
+    Custom,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2161,8 +2185,9 @@ fn convert_messages_wire(
                     })
                     .map(|call| {
                         if let Some(property) = grammar_tool_input_properties.get(&call.name) {
-                            Ok(WireAssistantToolCall::Custom {
+                            Ok(WireAssistantToolCall::Custom(WireAssistantCustomCall {
                                 id: call.id.clone(),
+                                kind: WireCustomTag::Custom,
                                 custom: WireCustomCall {
                                     name: call.name.clone(),
                                     input: sanitize_surrogates(
@@ -2174,16 +2199,17 @@ fn convert_messages_wire(
                                         .map_err(CompletionError::display)?,
                                     ),
                                 },
-                            })
+                            }))
                         } else {
-                            Ok(WireAssistantToolCall::Function {
+                            Ok(WireAssistantToolCall::Function(WireAssistantFunctionCall {
                                 id: call.id.clone(),
+                                kind: WireFunctionTag::Function,
                                 function: WireFunctionCall {
                                     name: call.name.clone(),
                                     arguments: serde_json::to_string(&call.arguments)
                                         .map_err(CompletionError::display)?,
                                 },
-                            })
+                            }))
                         }
                     })
                     .collect::<Result<Vec<_>, CompletionError>>()?;
