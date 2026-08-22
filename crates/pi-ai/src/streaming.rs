@@ -10,6 +10,7 @@ use crate::{
 };
 use futures_core::{Stream, stream::FusedStream};
 use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
 use std::{fmt, pin::Pin, task::Context, task::Poll};
 
@@ -332,7 +333,8 @@ fn literal_is_complete_or_prefix(remaining: &[u8], literal: &[u8]) -> bool {
 
 /// The canonical kind of a streamed content block (Architecture v2 part 2
 /// §1.3).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ContentBlockKind {
     /// Visible UTF-8 text.
     Text,
@@ -344,7 +346,8 @@ pub enum ContentBlockKind {
 
 /// A lossless normalized assistant-stream event (Architecture v2 part 2 §1.3).
 #[non_exhaustive]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum AssistantEvent {
     /// Establishes stable message identity before any content event.
     MessageStarted {
@@ -490,7 +493,8 @@ impl AssistantEvent {
 }
 
 /// An opaque replay-payload mutation (Architecture v2 part 2 §1.3).
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ReplayDataOperation {
     /// Replace the payload with UTF-8 data.
     ReplaceUtf8(String),
@@ -506,7 +510,7 @@ pub enum ReplayDataOperation {
 
 /// A portable display reason supplied when terminal assembly is cancelled
 /// (Architecture v2 part 2 §2.1).
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CancellationReason {
     /// Human-readable cancellation text.
     pub message: String,
@@ -1011,19 +1015,19 @@ impl AssistantAssembler {
 
     /// Returns an immutable view of stable identity plus owned canonical and
     /// replay snapshots. No parser scratch is exposed.
-    pub fn snapshot(&self) -> AssistantMessageSnapshot<'_> {
+    pub fn snapshot(&self) -> AssistantMessageSnapshot {
         AssistantMessageSnapshot {
-            id: &self.message.id,
-            provider: &self.message.provider,
-            api: &self.message.api,
-            requested_model: &self.message.requested_model,
-            response_model: self.message.response_model.as_ref(),
-            response_id: self.message.response_id.as_deref(),
+            id: self.message.id.clone(),
+            provider: self.message.provider.clone(),
+            api: self.message.api.clone(),
+            requested_model: self.message.requested_model.clone(),
+            response_model: self.message.response_model.clone(),
+            response_id: self.message.response_id.clone(),
             content: self.content_snapshot(true),
             replay: self.replay_snapshot(),
-            usage: &self.message.usage,
+            usage: self.message.usage.clone(),
             timestamp: self.message.timestamp,
-            terminal_message: self.terminal_message.as_ref(),
+            terminal_message: self.terminal_message.clone(),
         }
     }
 
@@ -1381,30 +1385,30 @@ impl AssistantAssembler {
 
 /// A scratch-free immutable assistant assembly view (Architecture v2 part 2
 /// §1.3 and §8.1).
-#[derive(Clone, Debug)]
-pub struct AssistantMessageSnapshot<'a> {
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AssistantMessageSnapshot {
     /// Stable message identifier, empty only before `MessageStarted`.
-    pub id: &'a MessageId,
+    pub id: MessageId,
     /// Serving provider, empty only before `MessageStarted`.
-    pub provider: &'a ProviderId,
+    pub provider: ProviderId,
     /// Serving API family, empty only before `MessageStarted`.
-    pub api: &'a ApiId,
+    pub api: ApiId,
     /// Requested model, empty only before `MessageStarted`.
-    pub requested_model: &'a ModelId,
+    pub requested_model: ModelId,
     /// Last concrete response model.
-    pub response_model: Option<&'a ModelId>,
+    pub response_model: Option<ModelId>,
     /// Last provider response identifier.
-    pub response_id: Option<&'a str>,
+    pub response_id: Option<String>,
     /// Canonical partial content without JSON or binary parser scratch.
     pub content: Vec<ContentBlock>,
     /// Ordered replay artifacts, with unfinished items marked incomplete.
     pub replay: ReplayEnvelope,
     /// Last authoritative cumulative usage.
-    pub usage: &'a Usage,
+    pub usage: Usage,
     /// Stable message timestamp.
     pub timestamp: Timestamp,
     /// Terminal record after applying a terminal event.
-    pub terminal_message: Option<&'a AssistantMessage>,
+    pub terminal_message: Option<AssistantMessage>,
 }
 
 /// Protocol or assembly failure from [`AssistantAssembler`].

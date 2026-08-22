@@ -16,6 +16,10 @@ use url::Url;
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningLevel {
+    /// Disable model reasoning. Agent state uses this explicit value while
+    /// simple request options may continue to use `None` for an unspecified
+    /// request-level preference.
+    Off,
     /// Smallest supported reasoning effort.
     Minimal,
     /// Low reasoning effort.
@@ -42,7 +46,7 @@ impl ReasoningLevel {
         let supported = match self {
             Self::Xhigh => native_xhigh,
             Self::Max => native_max,
-            Self::Minimal | Self::Low | Self::Medium | Self::High => true,
+            Self::Off | Self::Minimal | Self::Low | Self::Medium | Self::High => true,
         };
         if supported {
             return Ok(self);
@@ -98,6 +102,7 @@ impl ThinkingBudgets {
     /// Extended levels use the high token budget on budget-based APIs.
     pub fn budget_for(&self, level: ReasoningLevel) -> Option<u32> {
         match level {
+            ReasoningLevel::Off => None,
             ReasoningLevel::Minimal => self.minimal,
             ReasoningLevel::Low => self.low,
             ReasoningLevel::Medium => self.medium,

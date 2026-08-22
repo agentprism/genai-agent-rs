@@ -541,7 +541,7 @@ fn stream_partial_identity_is_stable() {
     let mut assembler = started("openai", "openai-completions", "gpt");
     start_block(&mut assembler, "text-0", 0, ContentBlockKind::Text);
     let first = assembler.snapshot();
-    assert_eq!(first.id, &MessageId::new("message-1"));
+    assert_eq!(first.id, MessageId::new("message-1"));
     assert_eq!(first.content[0].id(), &ContentBlockId::new("text-0"));
     assembler
         .apply(&AssistantEvent::TextDelta {
@@ -550,7 +550,7 @@ fn stream_partial_identity_is_stable() {
         })
         .unwrap();
     let second = assembler.snapshot();
-    assert_eq!(second.id, &MessageId::new("message-1"));
+    assert_eq!(second.id, MessageId::new("message-1"));
     assert_eq!(second.content[0].id(), &ContentBlockId::new("text-0"));
 
     assembler
@@ -637,7 +637,7 @@ fn stream_usage_is_cumulative() {
             cumulative: usage(10, 5),
         })
         .unwrap();
-    assert_eq!(assembler.snapshot().usage, &usage(10, 5));
+    assert_eq!(assembler.snapshot().usage, usage(10, 5));
     let message = assembler
         .finish_completed(successful_finish(AssistantFinishReason::Stop))
         .unwrap();
@@ -935,7 +935,7 @@ fn assembler_applies_finished_failed_and_cancelled_terminals() {
         .unwrap();
     assert_eq!(
         completed_consumer.snapshot().terminal_message,
-        Some(&completed)
+        Some(completed)
     );
     assert_eq!(
         completed_consumer.apply(&AssistantEvent::UsageUpdated {
@@ -957,7 +957,7 @@ fn assembler_applies_finished_failed_and_cancelled_terminals() {
             message: failed.clone(),
         })
         .unwrap();
-    assert_eq!(failed_consumer.snapshot().terminal_message, Some(&failed));
+    assert_eq!(failed_consumer.snapshot().terminal_message, Some(failed));
 
     let mut cancelled_source = started("openai", "openai-completions", "gpt-test");
     start_block(&mut cancelled_source, "text-0", 0, ContentBlockKind::Text);
@@ -974,7 +974,7 @@ fn assembler_applies_finished_failed_and_cancelled_terminals() {
         .unwrap();
     assert_eq!(
         cancelled_consumer.snapshot().terminal_message,
-        Some(&cancelled)
+        Some(cancelled)
     );
 }
 

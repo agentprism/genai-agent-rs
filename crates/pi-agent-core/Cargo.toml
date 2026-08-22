@@ -9,3 +9,9 @@ description = "pi-agent-core: the agent state machine over ModelRuntime, tools a
 publish = false
 
 [dependencies]
+pi-ai = { path = "../pi-ai" }
+serde = { version = "1.0.228", features = ["derive", "rc"] }
+serde_json = { version = "1.0.145", features = ["raw_value"] }
+
+[dev-dependencies]
+proptest = "1.8.0"

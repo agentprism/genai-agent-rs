@@ -101,7 +101,6 @@ fn assemble(events: &[AssistantEvent]) -> AssistantMessage {
         .snapshot()
         .terminal_message
         .expect("script must terminate")
-        .clone()
 }
 
 fn finish(reason: AssistantFinishReason) -> AssistantFinish {

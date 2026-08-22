@@ -1120,13 +1120,13 @@ milestone = "M6"
 
 [[mapping]]
 source = "packages/agent/test/agent-loop.test.ts"
-rust = []
+rust = ["agent_cancelled_assistant_is_committed", "agent_committed_event_replay_reproduces_final_state", "agent_event_envelope_and_outcomes_round_trip", "agent_event_replay_rejects_sequence_run_and_message_invariant_violations", "agent_failed_assistant_is_committed", "agent_partial_content_survives_failure", "agent_partial_usage_survives_failure"]
 status = "planned"
 milestone = "M2"
 
 [[mapping]]
 source = "packages/agent/test/agent.test.ts"
-rust = []
+rust = ["agent_restore_migrates_resolves_binds_and_validates", "agent_restore_rejects_schema_model_and_custom_kind_in_order", "agent_restore_supports_send_and_local_runtime_families", "agent_snapshot_round_trips"]
 status = "planned"
 milestone = "M2"
 
