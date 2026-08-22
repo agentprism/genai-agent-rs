@@ -1,5 +1,25 @@
-//! pi-ai: canonical messages and model descriptors, replay envelope and stream assembly, API-family lowering and wire encoders, the Models registry (auth, catalogs, retry configuration), and provider registrations. Architecture v2 part 1 §3, §5; part 2 §1–§6.
+//! Provider-neutral contracts for Pi model execution.
+//!
+//! This first milestone supplies the canonical messages, replay envelope, model
+//! descriptors, usage/pricing values, and credential value types from
+//! Architecture v2 part 1 §3 and part 2 §1, §2.1, §5.1–§5.2, and §6.6.
 //!
 //! Governing statement: `docs/porting-pi-ai-and-agent-core-docs/goal.md`. The architecture
 //! documents beside it are the authority for shape; pi's pinned source
 //! (`c49906ec77788625aacbdc53ebca6fbe65bd20f5`) is the reference for behavior.
+
+#![deny(missing_docs)]
+
+mod auth;
+mod ids;
+mod messages;
+mod model;
+mod replay;
+mod usage;
+
+pub use auth::*;
+pub use ids::*;
+pub use messages::*;
+pub use model::*;
+pub use replay::*;
+pub use usage::*;

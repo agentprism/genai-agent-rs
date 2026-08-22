@@ -1,0 +1,1000 @@
+# Initial parity inventory established by implementation package M1.1.
+# The dependency-free validator and CI wiring are delivered by M1.4.
+upstream_repository = "earendil-works/pi"
+upstream_commit = "c49906ec77788625aacbdc53ebca6fbe65bd20f5"
+
+[[mapping]]
+source = "packages/ai/src/types.ts"
+rust = ["all_api_model_config_variants_round_trip", "all_identifier_model_ref_and_timestamp_types_round_trip", "anthropic_compat_every_architecture_field_round_trips", "canonical_message_context_and_conversation_types_round_trip", "catalog_unknown_extensions_round_trip", "finish_and_public_error_types_round_trip", "model_descriptor_and_typed_compat_fields_round_trip", "openai_completions_compat_serialized_values_match_pi_contract", "openrouter_max_price_decimal_number_is_lossless_and_distinct_from_string", "pricing_types_round_trip_and_use_integer_arithmetic", "replay_helpers_reject_incomplete_and_cross_model_items", "replay_target_applicability_completeness_and_usage_sources_round_trip", "request_wide_pricing_uses_highest_strictly_exceeded_tier", "secret_types_are_not_serializable_and_redact_debug", "tool_call_spec_and_every_result_content_variant_round_trip", "tool_spec_constrained_sampling_serialized_values_match_pi_contract"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/ai/src/api/anthropic-messages.ts"
+rust = ["anthropic_signature_survives_message_round_trip", "persisted_anthropic_replay_item_json_matches_architecture", "persisted_anthropic_thinking_json_matches_architecture"]
+status = "deliberate-divergence"
+reason = "The §10.11 replay-envelope replacement makes Pi's silently mutated thinkingSignature explicit and persistable."
+
+[[mapping]]
+source = "packages/ai/src/api/openai-completions.ts"
+rust = ["openai_chat_reasoning_details_survive_round_trip"]
+status = "deliberate-divergence"
+reason = "The §10.11 replay-envelope replacement stores ordered reasoning details as explicit JSON-byte replay items."
+
+[[mapping]]
+source = "packages/ai/src/api/openai-responses-shared.ts"
+rust = ["responses_response_id_survives_round_trip"]
+status = "deliberate-divergence"
+reason = "The §10.11 replay-envelope replacement persists response identity alongside ordered provider output items."
+
+[[mapping]]
+source = "packages/ai/src/api/bedrock-converse-stream.ts"
+rust = ["bedrock_redacted_bytes_survive_json_round_trip"]
+status = "deliberate-divergence"
+reason = "The §10.11 replay-envelope replacement retains redacted reasoning as bytes and base64-encodes only at JSON boundaries."
+
+[[mapping]]
+source = "packages/ai/src/api/google-shared.ts"
+rust = ["google_tool_call_replay_target_round_trip"]
+status = "deliberate-divergence"
+reason = "The §10.11 replay-envelope replacement attaches thought signatures to stable canonical targets."
+
+[[mapping]]
+source = "packages/ai/src/auth/types.ts"
+rust = ["auth_provider_extra_fields_round_trip"]
+status = "semantic-parity"
+
+# Every pinned upstream test file starts planned until its package ports the full file.
+
+[[mapping]]
+source = "packages/ai/test/abort.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/anthropic-adaptive-thinking-models.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/anthropic-auth-token.test.ts"
+rust = []
+status = "planned"
+milestone = "M3.3"
+
+[[mapping]]
+source = "packages/ai/test/anthropic-cache-write-1h-cost.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/anthropic-eager-tool-input-compat.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/anthropic-eager-tool-input-e2e.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/anthropic-empty-thinking-signature-compat.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/anthropic-force-adaptive-thinking.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/anthropic-long-cache-retention-e2e.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/anthropic-oauth.test.ts"
+rust = []
+status = "planned"
+milestone = "M3.3"
+
+[[mapping]]
+source = "packages/ai/test/anthropic-opus-4-8-smoke.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/anthropic-sse-parsing.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/anthropic-temperature-compat.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/anthropic-thinking-disable.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/anthropic-tool-name-normalization.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/azure-openai-base-url.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/azure-openai-responses-reasoning-replay.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/azure-openai-tool-choice.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/baseten-models.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/bedrock-convert-messages.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/bedrock-credentials.test.ts"
+rust = []
+status = "planned"
+milestone = "M3.3"
+
+[[mapping]]
+source = "packages/ai/test/bedrock-custom-headers.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/bedrock-endpoint-resolution.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/bedrock-error-metadata.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/bedrock-models.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/bedrock-raw-stop-reason.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/bedrock-redacted-reasoning.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/bedrock-response-headers.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/bedrock-thinking-payload.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/cache-retention.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/cloudflare-gateway-binding.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/cloudflare-stream.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/compat-env.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/constrained-sampling.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/context-estimate.test.ts"
+rust = []
+status = "planned"
+milestone = "M3.4"
+
+[[mapping]]
+source = "packages/ai/test/context-overflow.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/cross-provider-handoff.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/deferred-tools.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/empty.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/env-api-keys.test.ts"
+rust = []
+status = "planned"
+milestone = "M3.3"
+
+[[mapping]]
+source = "packages/ai/test/error-body.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/faux-provider.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/fetch-option.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/fireworks-models.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/generate-models-strict.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/github-copilot-anthropic.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/github-copilot-oauth.test.ts"
+rust = []
+status = "planned"
+milestone = "M3.3"
+
+[[mapping]]
+source = "packages/ai/test/google-raw-stop-reason.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/google-shared-convert-tools.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/google-shared-gemini3-unsigned-tool-call.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/google-shared-image-tool-result-routing.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/google-shared-retry.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/google-shared-signed-empty-blocks.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/google-thinking-disable.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/google-thinking-level-map.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/google-thinking-signature.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/google-vertex-api-key-resolution.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/image-model-data.test.ts"
+rust = []
+status = "planned"
+milestone = "M3.2"
+
+[[mapping]]
+source = "packages/ai/test/image-tool-result.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/images-models.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/images.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/interleaved-thinking.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/kimi-coding-oauth.test.ts"
+rust = []
+status = "planned"
+milestone = "M3.3"
+
+[[mapping]]
+source = "packages/ai/test/lax-message-content.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/lazy-module-load.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/max-thinking.test.ts"
+rust = []
+status = "planned"
+milestone = "M3.4"
+
+[[mapping]]
+source = "packages/ai/test/mistral-http-transport.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/mistral-raw-stop-reason.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/mistral-reasoning-mode.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/mistral-tool-schema.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/model-catalog-types.test.ts"
+rust = []
+status = "planned"
+milestone = "M3.2"
+
+[[mapping]]
+source = "packages/ai/test/model-data-validation.test.ts"
+rust = []
+status = "planned"
+milestone = "M3.2"
+
+[[mapping]]
+source = "packages/ai/test/models-runtime.test.ts"
+rust = []
+status = "planned"
+milestone = "M3.2"
+
+[[mapping]]
+source = "packages/ai/test/node-http-proxy.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/oauth-auth.test.ts"
+rust = []
+status = "planned"
+milestone = "M3.3"
+
+[[mapping]]
+source = "packages/ai/test/oauth-device-code.test.ts"
+rust = []
+status = "planned"
+milestone = "M3.3"
+
+[[mapping]]
+source = "packages/ai/test/openai-codex-cache-affinity-e2e.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/openai-codex-oauth.test.ts"
+rust = []
+status = "planned"
+milestone = "M3.3"
+
+[[mapping]]
+source = "packages/ai/test/openai-codex-stream.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/openai-completions-cache-control-format.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/openai-completions-empty-tools.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/openai-completions-prompt-cache.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/openai-completions-raw-stop-reason.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/openai-completions-reasoning-details.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/openai-completions-response-model.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/openai-completions-retry.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/openai-completions-thinking-as-text.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/openai-completions-thinking-token-budget.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/openai-completions-tool-choice.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/openai-completions-tool-result-images.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/openai-responses-cache-affinity-e2e.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/openai-responses-compat.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/openai-responses-empty-tool-result.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/openai-responses-foreign-toolcall-id.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/openai-responses-message-id.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/openai-responses-namespace.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/openai-responses-partial-json-cleanup.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/openai-responses-reasoning-replay-e2e.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/openai-responses-terminal-event.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/openai-responses-tool-result-images.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/openrouter-cache-control-models.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/openrouter-cache-write-repro.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/openrouter-images.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/openrouter-oauth.test.ts"
+rust = []
+status = "planned"
+milestone = "M3.3"
+
+[[mapping]]
+source = "packages/ai/test/overflow.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/pi-messages.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/provider-error-body-passthrough.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/provider-error-body-regression.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/provider-retry.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/providers.test.ts"
+rust = []
+status = "planned"
+milestone = "M3.2"
+
+[[mapping]]
+source = "packages/ai/test/qwen-token-plan-models.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/radius-oauth.test.ts"
+rust = []
+status = "planned"
+milestone = "M3.3"
+
+[[mapping]]
+source = "packages/ai/test/reasoning-options.test.ts"
+rust = []
+status = "planned"
+milestone = "M3.4"
+
+[[mapping]]
+source = "packages/ai/test/responseid.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/retry.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/sampling-options.test.ts"
+rust = []
+status = "planned"
+milestone = "M3.4"
+
+[[mapping]]
+source = "packages/ai/test/stream.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/supports-xhigh.test.ts"
+rust = []
+status = "planned"
+milestone = "M3.4"
+
+[[mapping]]
+source = "packages/ai/test/telemetry-options.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/text.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/together-models.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/tokens.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/tool-call-id-normalization.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/tool-call-without-result.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/total-tokens.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/transform-messages-copilot-openai-to-anthropic.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/unicode-surrogate.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/uuid.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/validation.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/xai-oauth.test.ts"
+rust = []
+status = "planned"
+milestone = "M3.3"
+
+[[mapping]]
+source = "packages/ai/test/xai-responses.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/xhigh.test.ts"
+rust = []
+status = "planned"
+milestone = "M3.4"
+
+[[mapping]]
+source = "packages/ai/test/xiaomi-models.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/xiaomi-token-plan-ams-anthropic-empty-signature-smoke.test.ts"
+rust = []
+status = "planned"
+milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/zai-coding-plan-models.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/ai/test/zen.test.ts"
+rust = []
+status = "planned"
+milestone = "M6"
+
+[[mapping]]
+source = "packages/agent/test/agent-loop.test.ts"
+rust = []
+status = "planned"
+milestone = "M2"
+
+[[mapping]]
+source = "packages/agent/test/agent.test.ts"
+rust = []
+status = "planned"
+milestone = "M2"
+
+[[mapping]]
+source = "packages/agent/test/e2e.test.ts"
+rust = []
+status = "planned"
+milestone = "M2"
+
+[[mapping]]
+source = "packages/agent/test/harness/agent-harness-scaffold.test.ts"
+rust = []
+status = "planned"
+milestone = "M8"
+
+[[mapping]]
+source = "packages/agent/test/harness/branch-summarization.test.ts"
+rust = []
+status = "planned"
+milestone = "M8"
+
+[[mapping]]
+source = "packages/agent/test/harness/compaction.test.ts"
+rust = []
+status = "planned"
+milestone = "M8"
+
+[[mapping]]
+source = "packages/agent/test/harness/events.test.ts"
+rust = []
+status = "planned"
+milestone = "M8"
+
+[[mapping]]
+source = "packages/agent/test/harness/nodejs-env.test.ts"
+rust = []
+status = "planned"
+milestone = "M8"
+
+[[mapping]]
+source = "packages/agent/test/harness/prompt-templates.test.ts"
+rust = []
+status = "planned"
+milestone = "M8"
+
+[[mapping]]
+source = "packages/agent/test/harness/reducer.test.ts"
+rust = []
+status = "planned"
+milestone = "M8"
+
+[[mapping]]
+source = "packages/agent/test/harness/resource-formatting.test.ts"
+rust = []
+status = "planned"
+milestone = "M8"
+
+[[mapping]]
+source = "packages/agent/test/harness/session/context.test.ts"
+rust = []
+status = "planned"
+milestone = "M7"
+
+[[mapping]]
+source = "packages/agent/test/harness/session/jsonl-codec.test.ts"
+rust = []
+status = "planned"
+milestone = "M9"
+
+[[mapping]]
+source = "packages/agent/test/harness/session/jsonl-storage.test.ts"
+rust = []
+status = "planned"
+milestone = "M9"
+
+[[mapping]]
+source = "packages/agent/test/harness/session/jsonl.test.ts"
+rust = []
+status = "planned"
+milestone = "M9"
+
+[[mapping]]
+source = "packages/agent/test/harness/session/memory.test.ts"
+rust = []
+status = "planned"
+milestone = "M7"
+
+[[mapping]]
+source = "packages/agent/test/harness/session/search.test.ts"
+rust = []
+status = "planned"
+milestone = "M7"
+
+[[mapping]]
+source = "packages/agent/test/harness/skills.test.ts"
+rust = []
+status = "planned"
+milestone = "M8"
+
+[[mapping]]
+source = "packages/agent/test/harness/system-prompt.test.ts"
+rust = []
+status = "planned"
+milestone = "M8"
+
+[[mapping]]
+source = "packages/agent/test/harness/telemetry.test.ts"
+rust = []
+status = "planned"
+milestone = "M8"
+
+[[mapping]]
+source = "packages/agent/test/harness/tools.test.ts"
+rust = []
+status = "planned"
+milestone = "M8"
+
+[[mapping]]
+source = "packages/agent/test/harness/truncate.test.ts"
+rust = []
+status = "planned"
+milestone = "M8"
+
+[[mapping]]
+source = "packages/agent/test/proxy.test.ts"
+rust = []
+status = "planned"
+milestone = "M2"
