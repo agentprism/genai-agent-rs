@@ -1,10 +1,15 @@
 //! Ordered snapshot restoration from Architecture v2 part 1 §4.9.
 
 use crate::{
-    AGENT_INITIAL_SEQUENCE, AGENT_SNAPSHOT_SCHEMA_VERSION, AGENT_STATE_SCHEMA_VERSION, AgentError,
-    AgentRecord, AgentSnapshot, AgentState, LocalToolRegistry, ToolRegistry,
+    AGENT_INITIAL_SEQUENCE, AGENT_SNAPSHOT_SCHEMA_VERSION, AGENT_STATE_SCHEMA_VERSION,
+    AgentControl, AgentDefaults, AgentError, AgentRecord, AgentSnapshot, AgentState,
+    DefaultContextPolicy, DefaultTurnPolicy, LocalAgentDefaults, LocalContextPolicy,
+    LocalToolRegistry, LocalTurnPolicy, QueueReceiver, ToolExecutionMode, ToolRegistry,
 };
-use pi_ai::{AssistantMessageSnapshot, LocalModelRuntime, ModelRef, ModelRuntime, ToolCallId};
+use pi_ai::{
+    AssistantMessageSnapshot, LocalModelRuntime, ModelRef, ModelRuntime, PublicError,
+    SimpleGenerationOptions, ToolCallId,
+};
 use std::{collections::BTreeSet, rc::Rc, sync::Arc};
 
 /// Synchronous catalog capability used only to validate a persisted model
@@ -125,6 +130,17 @@ pub struct Agent {
     pub(crate) next_sequence: u64,
     pub(crate) streaming: Option<AssistantMessageSnapshot>,
     pub(crate) pending_tool_calls: Arc<[ToolCallId]>,
+    pub(crate) control: AgentControl,
+    pub(crate) queue_rx: QueueReceiver,
+    pub(crate) active_run: Option<pi_ai::RunId>,
+    pub(crate) phase: Option<crate::AgentPhase>,
+    pub(crate) last_error: Option<PublicError>,
+    pub(crate) options: SimpleGenerationOptions,
+    pub(crate) tool_execution: ToolExecutionMode,
+    pub(crate) context_policy: Arc<dyn crate::ContextPolicy>,
+    pub(crate) turn_policy: Arc<dyn crate::TurnPolicy>,
+    pub(crate) defaults: AgentDefaults,
+    pub(crate) next_identity: u64,
 }
 
 impl Agent {
@@ -145,6 +161,8 @@ impl Agent {
         }
         tools.validate()?;
         validate_custom_records(&snapshot.state, custom_kinds)?;
+        let (control, queue_rx) = AgentControl::channel(crate::DEFAULT_QUEUE_CAPACITY);
+        let defaults = AgentDefaults::new(&snapshot.state, &tools);
         Ok(Self {
             runtime,
             state: snapshot.state,
@@ -152,6 +170,17 @@ impl Agent {
             next_sequence: snapshot.next_sequence,
             streaming: snapshot.streaming,
             pending_tool_calls: snapshot.pending_tool_calls,
+            control,
+            queue_rx,
+            active_run: None,
+            phase: None,
+            last_error: None,
+            options: SimpleGenerationOptions::default(),
+            tool_execution: ToolExecutionMode::Parallel,
+            context_policy: Arc::new(DefaultContextPolicy),
+            turn_policy: Arc::new(DefaultTurnPolicy),
+            defaults,
+            next_identity: 1,
         })
     }
 
@@ -190,6 +219,17 @@ pub struct LocalAgent {
     pub(crate) next_sequence: u64,
     pub(crate) streaming: Option<AssistantMessageSnapshot>,
     pub(crate) pending_tool_calls: Arc<[ToolCallId]>,
+    pub(crate) control: AgentControl,
+    pub(crate) queue_rx: QueueReceiver,
+    pub(crate) active_run: Option<pi_ai::RunId>,
+    pub(crate) phase: Option<crate::AgentPhase>,
+    pub(crate) last_error: Option<PublicError>,
+    pub(crate) options: SimpleGenerationOptions,
+    pub(crate) tool_execution: ToolExecutionMode,
+    pub(crate) context_policy: Rc<dyn LocalContextPolicy>,
+    pub(crate) turn_policy: Rc<dyn LocalTurnPolicy>,
+    pub(crate) defaults: LocalAgentDefaults,
+    pub(crate) next_identity: u64,
 }
 
 impl LocalAgent {
@@ -210,6 +250,8 @@ impl LocalAgent {
         }
         tools.validate()?;
         validate_custom_records(&snapshot.state, custom_kinds)?;
+        let (control, queue_rx) = AgentControl::channel(crate::DEFAULT_QUEUE_CAPACITY);
+        let defaults = LocalAgentDefaults::new(&snapshot.state, &tools);
         Ok(Self {
             runtime,
             state: snapshot.state,
@@ -217,6 +259,17 @@ impl LocalAgent {
             next_sequence: snapshot.next_sequence,
             streaming: snapshot.streaming,
             pending_tool_calls: snapshot.pending_tool_calls,
+            control,
+            queue_rx,
+            active_run: None,
+            phase: None,
+            last_error: None,
+            options: SimpleGenerationOptions::default(),
+            tool_execution: ToolExecutionMode::Parallel,
+            context_policy: Rc::new(DefaultContextPolicy),
+            turn_policy: Rc::new(DefaultTurnPolicy),
+            defaults,
+            next_identity: 1,
         })
     }
 

@@ -9,9 +9,12 @@ description = "pi-agent-core: the agent state machine over ModelRuntime, tools a
 publish = false
 
 [dependencies]
+async-stream = "0.3.6"
+futures-util = { version = "0.3.31", default-features = false, features = ["alloc", "std"] }
 pi-ai = { path = "../pi-ai" }
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = { version = "1.0.145", features = ["raw_value"] }
 
 [dev-dependencies]
+futures-executor = "0.3.31"
 proptest = "1.8.0"

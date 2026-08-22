@@ -260,6 +260,10 @@ impl ToolRegistry {
         self.tools.len()
     }
 
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, &Arc<dyn Tool>)> {
+        self.tools.iter().map(|(name, tool)| (name.as_str(), tool))
+    }
+
     pub(crate) fn validate(&self) -> Result<(), AgentError> {
         if self.tools.keys().any(String::is_empty) {
             return Err(AgentError::InvalidToolName);
@@ -315,6 +319,10 @@ impl LocalToolRegistry {
     /// Returns the number of bound local tools.
     pub fn len(&self) -> usize {
         self.tools.len()
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, &Rc<dyn LocalTool>)> {
+        self.tools.iter().map(|(name, tool)| (name.as_str(), tool))
     }
 
     pub(crate) fn validate(&self) -> Result<(), AgentError> {

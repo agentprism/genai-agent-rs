@@ -196,7 +196,7 @@ proptest! {
 }
 
 #[test]
-fn agent_failed_assistant_is_committed() {
+fn agent_failed_assistant_commit_replays() {
     // §10.9 failure conformance. Pi basis: packages/agent/src/agent-loop.ts
     // streamAssistantResponse replaces the partial and emits message_end before
     // turn_end/agent_end for an error terminal.
@@ -222,7 +222,7 @@ fn agent_failed_assistant_is_committed() {
 }
 
 #[test]
-fn agent_cancelled_assistant_is_committed() {
+fn agent_cancelled_assistant_commit_replays() {
     // §10.9 failure conformance. Pi basis: packages/agent/src/agent-loop.ts
     // handles aborted terminals through the same message commitment path.
     let cancelled = assistant_message(
@@ -247,7 +247,7 @@ fn agent_cancelled_assistant_is_committed() {
 }
 
 #[test]
-fn agent_partial_content_survives_failure() {
+fn agent_failed_partial_content_round_trips() {
     // §10.9 failure conformance. Pi basis: packages/agent/src/agent-loop.ts
     // retains the partial assistant object when the stream terminates in error.
     let failed = assistant_message(
@@ -271,7 +271,7 @@ fn agent_partial_content_survives_failure() {
 }
 
 #[test]
-fn agent_partial_usage_survives_failure() {
+fn agent_failed_partial_usage_replays() {
     // §10.9 failure conformance. Pi basis: packages/agent/src/agent-loop.ts and
     // pi-ai's terminal assistant result retain the latest usage observation.
     let expected_usage = usage(19, 11);

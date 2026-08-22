@@ -6,16 +6,22 @@
 
 #![deny(missing_docs)]
 
+mod control;
 mod error;
 mod events;
+mod policy;
 mod replay;
 mod restore;
+mod run;
 mod state;
 mod tools;
 
+pub use control::*;
 pub use error::*;
 pub use events::*;
+pub use policy::*;
 pub use replay::*;
 pub use restore::*;
+pub use run::*;
 pub use state::*;
 pub use tools::*;

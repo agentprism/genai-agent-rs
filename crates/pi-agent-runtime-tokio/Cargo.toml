@@ -9,3 +9,10 @@ description = "pi-agent-runtime-tokio: Tokio environment implementation, the Sen
 publish = false
 
 [dependencies]
+futures-util = { version = "0.3.31", default-features = false, features = ["alloc", "std"] }
+pi-agent-core = { path = "../pi-agent-core" }
+pi-ai = { path = "../pi-ai" }
+tokio = { version = "1.47.1", features = ["macros", "rt", "sync"] }
+
+[dev-dependencies]
+tokio = { version = "1.47.1", features = ["macros", "rt", "sync"] }

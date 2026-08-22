@@ -75,7 +75,7 @@ reason = "Rust uses Result at request-start boundaries while preserving Pi's par
 
 [[mapping]]
 source = "packages/agent/src/agent.ts#continue"
-rust = []
+rust = ["agent_continue_rejects_assistant_tail", "agent_retry_last_turn_reuses_last_valid_request_boundary"]
 status = "deliberate-divergence"
 allowlist_row = "continue-retry-ambiguity"
 replacement = "Strict continue_run plus explicit retry_last_turn."
@@ -91,7 +91,7 @@ reason = "An explicitly injected runtime replaces mutable process-global request
 
 [[mapping]]
 source = "packages/ai/src/api/transform-messages.ts"
-rust = []
+rust = ["agent_failed_assistant_is_omitted_from_next_provider_projection"]
 status = "deliberate-divergence"
 allowlist_row = "silent-lossy-context-transformations"
 replacement = "HandoffReport and optional strict rejection."
@@ -277,7 +277,7 @@ milestone = "M4"
 
 [[mapping]]
 source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#9.2-9.5"
-rust = ["cancellation_child_propagates_from_parent", "cancellation_wakes_waiter"]
+rust = ["agent_local_run_matches_send_lifecycle", "cancellation_child_propagates_from_parent", "cancellation_wakes_waiter"]
 status = "deliberate-divergence"
 allowlist_row = "implicit-async-executor-environment"
 replacement = "Local executor-neutral core plus explicit Send/Tokio adapter."
@@ -1120,15 +1120,81 @@ milestone = "M6"
 
 [[mapping]]
 source = "packages/agent/test/agent-loop.test.ts"
-rust = ["agent_cancelled_assistant_is_committed", "agent_committed_event_replay_reproduces_final_state", "agent_event_envelope_and_outcomes_round_trip", "agent_event_replay_rejects_sequence_run_and_message_invariant_violations", "agent_failed_assistant_is_committed", "agent_partial_content_survives_failure", "agent_partial_usage_survives_failure"]
+rust = [
+  "agent_cancelled_assistant_is_committed",
+  "agent_cancelled_assistant_commit_replays",
+  "agent_committed_event_replay_reproduces_final_state",
+  "agent_continue_with_tools",
+  "agent_continue_without_tools",
+  "agent_event_envelope_and_outcomes_round_trip",
+  "agent_event_replay_rejects_sequence_run_and_message_invariant_violations",
+  "agent_failed_assistant_is_committed",
+  "agent_failed_assistant_commit_replays",
+  "agent_failed_assistant_is_omitted_from_next_provider_projection",
+  "agent_failed_turn_has_run_finished",
+  "agent_failed_turn_has_turn_finished",
+  "agent_no_tools_execute_after_failed_assistant",
+  "agent_partial_content_survives_failure",
+  "agent_failed_partial_content_round_trips",
+  "agent_partial_usage_survives_failure",
+  "agent_failed_partial_usage_replays",
+  "agent_prompt_with_multiple_tools",
+  "agent_prompt_with_one_tool",
+  "agent_prompt_without_tools",
+  "agent_run_finished_is_final_event",
+  "agent_run_accepts_agent_input",
+  "agent_should_stop_failure_commits_assistant",
+  "queue_followup_polled_only_when_agent_would_stop",
+  "queue_steering_not_polled_between_tools",
+  "queue_steering_not_polled_when_should_stop_returns_true",
+  "queue_steering_polled_after_completed_turn",
+  "queue_steering_polled_after_prepare_next_turn",
+  "queue_steering_polled_at_run_start",
+]
 status = "planned"
-milestone = "M2"
+milestone = "M2.3"
 
 [[mapping]]
 source = "packages/agent/test/agent.test.ts"
-rust = ["agent_restore_migrates_resolves_binds_and_validates", "agent_restore_rejects_schema_model_and_custom_kind_in_order", "agent_restore_supports_send_and_local_runtime_families", "agent_snapshot_round_trips"]
+rust = [
+  "agent_continue_drains_followup_after_steering",
+  "agent_continue_drains_steering_before_rejecting_assistant_tail",
+  "agent_continue_event_sequence",
+  "agent_continue_rejects_assistant_tail",
+  "agent_handle_event_sinks_are_barriers",
+  "agent_local_run_matches_send_lifecycle",
+  "agent_low_level_stream_is_observational",
+  "agent_prompt_message_batch_event_sequence",
+  "agent_prompt_message_event_sequence",
+  "agent_prompt_text_event_sequence",
+  "agent_reset_clears_error",
+  "agent_reset_clears_partial_state",
+  "agent_reset_clears_pending_tool_calls",
+  "agent_reset_clears_queues",
+  "agent_reset_clears_transcript",
+  "agent_reset_preserves_model",
+  "agent_reset_preserves_runtime_and_policies",
+  "agent_reset_preserves_system_prompt",
+  "agent_reset_preserves_tools",
+  "agent_reset_rejects_while_active",
+  "agent_restore_migrates_resolves_binds_and_validates",
+  "agent_restore_rejects_schema_model_and_custom_kind_in_order",
+  "agent_restore_supports_send_and_local_runtime_families",
+  "agent_request_start_failure_commits_empty_assistant",
+  "agent_reset_all_restores_builder_defaults",
+  "agent_retry_last_turn_reuses_last_valid_request_boundary",
+  "agent_snapshot_round_trips",
+  "agent_wait_for_idle_includes_run_finished_sinks",
+  "queue_all_mode_drains_all",
+  "queue_clear_all",
+  "queue_clear_followup",
+  "queue_clear_steering",
+  "queue_concurrent_producers_use_control_handle",
+  "queue_ingress_order_is_stable",
+  "queue_one_mode_drains_one",
+]
 status = "planned"
-milestone = "M2"
+milestone = "M2.3"
 
 [[mapping]]
 source = "packages/agent/test/e2e.test.ts"

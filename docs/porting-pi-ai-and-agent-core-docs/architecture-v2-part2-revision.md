@@ -4013,6 +4013,8 @@ if otherwise stopping: PollFollowUp
 
 A steering message does not interrupt an already executing tool batch. "Interrupt" in Pi means it changes the next model turn after current tools settle. The README describes this ordering explicitly. See `packages/agent/README.md:250–520`.
 
+> Correction: For a prompt run, `InitialQueuePoll` occurs after `RunStarted`, `TurnStarted`, and the initial prompt's message lifecycle and commitment, then its drained steering records are injected before `PrepareContext`. The phase list above is not chronological at that boundary. This matches pinned Pi, where `runAgentLoop` emits `agent_start`, `turn_start`, and prompt `message_start`/`message_end` before `runLoop` performs its initial `getSteeringMessages` poll (`packages/agent/src/agent-loop.ts:109–115,166`).
+
 ## 8.3 Event sequences
 
 ### `prompt()` without tools

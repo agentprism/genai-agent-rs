@@ -48,6 +48,14 @@ pub enum AgentError {
         /// Duplicate model-facing tool name.
         name: String,
     },
+    /// An operation requiring an idle agent was requested during a run.
+    RunActive,
+    /// Continue was requested without any durable transcript records.
+    ContinueWithoutMessages,
+    /// Continue was requested while an assistant record remained at the tail.
+    ContinueFromAssistant,
+    /// Retry requires an errored or aborted assistant at the durable tail.
+    RetryRequiresFailedAssistant,
     /// Event envelopes were not replayed in consecutive sequence order.
     EventSequenceMismatch {
         /// Required next sequence.
@@ -113,6 +121,15 @@ impl fmt::Display for AgentError {
             Self::DuplicateToolName { name } => {
                 write!(formatter, "tool {name} is registered more than once")
             }
+            Self::RunActive => formatter.write_str("agent is already processing a run"),
+            Self::ContinueWithoutMessages => {
+                formatter.write_str("cannot continue: no messages in transcript")
+            }
+            Self::ContinueFromAssistant => {
+                formatter.write_str("cannot continue from an assistant record")
+            }
+            Self::RetryRequiresFailedAssistant => formatter
+                .write_str("retry requires an error or aborted assistant at the transcript tail"),
             Self::EventSequenceMismatch { expected, actual } => write!(
                 formatter,
                 "agent event sequence mismatch: expected {expected}, received {actual}"
