@@ -10,16 +10,20 @@
 
 #![deny(missing_docs)]
 
+mod async_types;
 mod auth;
 mod ids;
 mod messages;
 mod model;
 mod replay;
+mod streaming;
 mod usage;
 
+pub use async_types::*;
 pub use auth::*;
 pub use ids::*;
 pub use messages::*;
 pub use model::*;
 pub use replay::*;
+pub use streaming::*;
 pub use usage::*;

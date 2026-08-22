@@ -245,9 +245,10 @@ fn persisted_anthropic_replay_item_json_matches_architecture() {
 }
 
 #[test]
-fn anthropic_signature_survives_message_round_trip() {
-    // §10.2 `anthropic_signature_survives_message_round_trip`; Pi basis:
-    // packages/ai/src/api/anthropic-messages.ts.
+fn anthropic_complete_replay_item_is_found_after_message_round_trip() {
+    // Architecture v2 part 2 §1.4 persistence and replay lookup; Pi basis:
+    // packages/ai/src/api/anthropic-messages.ts. The exact §10.2 assembly
+    // proof lives in m1_2_streaming.rs.
     let source = scope("anthropic", "anthropic-messages", "claude", "claude");
     let message = AssistantMessage {
         id: MessageId::new("m0"),
@@ -290,9 +291,10 @@ fn anthropic_signature_survives_message_round_trip() {
 }
 
 #[test]
-fn openai_chat_reasoning_details_survive_round_trip() {
-    // §10.2 `openai_chat_reasoning_details_survive_round_trip`; Pi basis:
-    // packages/ai/src/api/openai-completions.ts.
+fn persisted_openai_chat_reasoning_detail_json_matches_architecture() {
+    // Architecture v2 part 2 §1.5 persisted replay item; Pi basis:
+    // packages/ai/src/api/openai-completions.ts. The exact §10.2 assembly
+    // proof lives in m1_2_streaming.rs.
     let expected = concat!(
         r#"{"id":"r0","ordinal":0,"target":{"type":"content_block","id":"b0"},"#,
         r#""kind":"openai.chat.reasoning-detail","#,
@@ -309,9 +311,10 @@ fn openai_chat_reasoning_details_survive_round_trip() {
 }
 
 #[test]
-fn responses_response_id_survives_round_trip() {
-    // §10.2 `responses_response_id_survives_round_trip`; Pi basis:
-    // packages/ai/src/api/openai-responses-shared.ts.
+fn persisted_openai_responses_message_round_trip() {
+    // Architecture v2 part 2 §1.6 persisted Responses representation; Pi
+    // basis: packages/ai/src/api/openai-responses-shared.ts. The exact §10.2
+    // assembler proof lives in m1_2_streaming.rs.
     let source = scope("openai", "openai-responses", "gpt", "gpt");
     let message = AssistantMessage {
         id: MessageId::new("m-responses"),
@@ -348,9 +351,10 @@ fn responses_response_id_survives_round_trip() {
 }
 
 #[test]
-fn bedrock_redacted_bytes_survive_json_round_trip() {
-    // §10.2 `bedrock_redacted_bytes_survive_json_round_trip`; Pi basis:
-    // packages/ai/src/api/bedrock-converse-stream.ts.
+fn bedrock_opaque_bytes_json_encoding_matches_architecture() {
+    // Architecture v2 part 2 §1.7 persisted byte payload; Pi basis:
+    // packages/ai/src/api/bedrock-converse-stream.ts. The exact §10.2
+    // assembly proof lives in m1_2_streaming.rs.
     let payload = OpaquePayload::Bytes(vec![0x01, 0x02, 0xaf, 0x33]);
     let expected = r#"{"encoding":"bytes_base64","data":"AQKvMw=="}"#;
     assert_eq!(serde_json::to_string(&payload).unwrap(), expected);
