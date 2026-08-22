@@ -37,38 +37,36 @@ struct RadiusProvider {
     fetch: Arc<dyn FetchFunction>,
 }
 
-fn model_error(message: impl Into<String>) -> ModelsError {
-    ModelsError::new(ModelsErrorCode::ModelValidation, message, None)
+/// Converts gateway models into crate [`Model`]s.
+///
+/// pi keeps every model that passes `isRadiusGatewayModel` verbatim
+/// (`radius-config.ts:26-40,61-68`). `Model` is the crate-wide shape
+/// (`types.rs:1994-2008`): `contextWindow`/`maxTokens` are `u64` and `input`/`cost`
+/// are typed, so a gateway model whose values cannot be represented is dropped on
+/// its own; the rest of the catalog is still published.
+fn resolved_models(values: &[RadiusResolvedModel]) -> Vec<Model> {
+    values.iter().filter_map(resolved_model).collect()
 }
 
-fn resolved_models(values: &[RadiusResolvedModel]) -> Result<Vec<Model>, ModelsError> {
-    values
-        .iter()
-        .map(|value| {
-            let mut wire =
-                serde_json::to_value(value).map_err(|error| model_error(error.to_string()))?;
-            let object = wire
-                .as_object_mut()
-                .ok_or_else(|| model_error("Radius model did not serialize as an object"))?;
-            for (name, number) in [
-                ("contextWindow", value.model.context_window),
-                ("maxTokens", value.model.max_tokens),
-            ] {
-                if !number.is_finite()
-                    || number < 0.0
-                    || number.fract() != 0.0
-                    || number > u64::MAX as f64
-                {
-                    return Err(model_error(format!(
-                        "Radius model {} has an invalid {name}: {number}",
-                        value.model.id
-                    )));
-                }
-                object.insert(name.to_owned(), serde_json::Value::from(number as u64));
-            }
-            serde_json::from_value(wire).map_err(|error| model_error(error.to_string()))
-        })
-        .collect()
+fn resolved_model(value: &RadiusResolvedModel) -> Option<Model> {
+    let mut wire = serde_json::to_value(value).ok()?;
+    let object = wire.as_object_mut()?;
+    for (name, number) in [
+        ("contextWindow", value.model.context_window),
+        ("maxTokens", value.model.max_tokens),
+    ] {
+        object.insert(
+            name.to_owned(),
+            serde_json::Value::from(representable_u64(number)?),
+        );
+    }
+    serde_json::from_value(wire).ok()
+}
+
+/// JS numbers pi stores as-is that a `u64` field can hold exactly.
+fn representable_u64(number: f64) -> Option<u64> {
+    (number.is_finite() && number >= 0.0 && number.fract() == 0.0 && number < u64::MAX as f64)
+        .then_some(number as u64)
 }
 
 fn now_ms() -> f64 {
@@ -148,7 +146,7 @@ impl Provider for RadiusProvider {
             if context.stored.is_none()
                 && let Some(Credential::OAuth(credential)) = context.credential.as_ref()
             {
-                let legacy = resolved_models(&get_radius_models(&provider_id, Some(credential)))?;
+                let legacy = resolved_models(&get_radius_models(&provider_id, Some(credential)));
                 if !legacy.is_empty() {
                     let persisted = legacy.clone();
                     let update_models = models.clone();
@@ -193,7 +191,7 @@ impl Provider for RadiusProvider {
             if context.signal.is_aborted() {
                 return Ok(());
             }
-            let refreshed = resolved_models(&get_radius_models_from_config(&provider_id, &config))?;
+            let refreshed = resolved_models(&get_radius_models_from_config(&provider_id, &config));
             let persisted = refreshed.clone();
             let update_models = models;
             (context.publish)(ModelsPublication {
@@ -276,6 +274,7 @@ fn radius_provider_with_fetch(
 
 #[cfg(test)]
 mod tests {
+    use super::super::radius_config::{RadiusGatewayConfig, RadiusGatewayModel};
     use super::*;
     use crate::auth::oauth::test_support::{fetch, response};
     use crate::auth::{
@@ -366,12 +365,11 @@ mod tests {
         let provider = radius_provider(Default::default());
         let resolved = resolved_models(&get_radius_models_from_config(
             "radius",
-            &super::super::radius_config::RadiusGatewayConfig {
+            &RadiusGatewayConfig {
                 base_url: "https://api.radius.test".to_owned(),
                 models: vec![serde_json::from_value(model_json()).expect("gateway model")],
             },
-        ))
-        .expect("models");
+        ));
         let result = provider
             .stream_simple(
                 &resolved[0],
@@ -417,12 +415,11 @@ mod tests {
         let provider = radius_provider_with_fetch(Default::default(), fetcher);
         let mut restored = resolved_models(&get_radius_models_from_config(
             "radius",
-            &super::super::radius_config::RadiusGatewayConfig {
+            &RadiusGatewayConfig {
                 base_url: "https://stored.radius.test".to_owned(),
                 models: vec![serde_json::from_value(model_json()).expect("stored model")],
             },
-        ))
-        .expect("stored models");
+        ));
         restored[0].id = "stored".to_owned();
         let publication_order = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
         let captured_order = publication_order.clone();
@@ -481,5 +478,127 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].url, "https://radius.pi.dev/v1/config");
         assert_eq!(requests[0].headers["authorization"], "Bearer radius-key");
+    }
+
+    /// pi keeps every `typeof number` value and any `input`/`cost` shape
+    /// (`radius-config.ts:26-40`); the crate `Model` cannot, so only the unrepresentable
+    /// model is dropped — never the catalog around it.
+    #[test]
+    fn unrepresentable_gateway_models_are_dropped_individually() {
+        let gateway_model = |id: &str, context_window: f64, max_tokens: f64| {
+            let mut model: RadiusGatewayModel =
+                serde_json::from_value(model_json()).expect("gateway model");
+            model.id = id.to_owned();
+            model.context_window = context_window;
+            model.max_tokens = max_tokens;
+            model
+        };
+        let mut unknown_input = gateway_model("unknown-input", 1_000.0, 100.0);
+        unknown_input.input = vec![serde_json::Value::String("audio".to_owned())];
+        let config = RadiusGatewayConfig {
+            base_url: "https://api.radius.test".to_owned(),
+            models: vec![
+                gateway_model("first", 1_000.0, 100.0),
+                gateway_model("fractional", 1_000.5, 100.0),
+                gateway_model("negative", 1_000.0, -1.0),
+                gateway_model("nan", f64::NAN, 100.0),
+                gateway_model("infinite", f64::INFINITY, 100.0),
+                gateway_model("too-large", 18_446_744_073_709_551_616.0, 100.0),
+                unknown_input,
+                gateway_model("last", 2_000.0, 200.0),
+            ],
+        };
+        let resolved = resolved_models(&get_radius_models_from_config("radius", &config));
+        assert_eq!(
+            resolved
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "last"]
+        );
+        assert_eq!(resolved[1].context_window, 2_000);
+        assert_eq!(resolved[1].max_tokens, 200);
+    }
+
+    /// pi `radius.ts:69-77` publishes whatever the gateway returned; one model the crate
+    /// cannot represent must not turn that into a failed refresh.
+    #[tokio::test]
+    async fn network_refresh_publishes_the_representable_models_when_one_is_not() {
+        let fetcher = fetch(move |_request| {
+            Ok(response(
+                200,
+                serde_json::to_string(&json!({
+                    "baseUrl": "https://api.radius.test",
+                    "models": [
+                        {
+                            "id": "fractional",
+                            "name": "Fractional",
+                            "reasoning": false,
+                            "input": ["text"],
+                            "cost": {"input": 1, "output": 2, "cacheRead": 0, "cacheWrite": 0},
+                            "contextWindow": 1000.5,
+                            "maxTokens": 100
+                        },
+                        {
+                            "id": "good",
+                            "name": "Good",
+                            "reasoning": false,
+                            "input": ["text"],
+                            "cost": {"input": 1, "output": 2, "cacheRead": 0, "cacheWrite": 0},
+                            "contextWindow": 2000,
+                            "maxTokens": 200
+                        }
+                    ]
+                }))
+                .expect("response JSON"),
+            ))
+        });
+        let provider = radius_provider_with_fetch(Default::default(), fetcher);
+        let published = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let captured = published.clone();
+        provider
+            .refresh_models(RefreshModelsContext {
+                credential: Some(Credential::ApiKey(ApiKeyCredential {
+                    kind: ApiKeyCredentialType::ApiKey,
+                    key: Some("radius-key".to_owned()),
+                    env: None,
+                })),
+                stored: None,
+                publish: Arc::new(move |mut publication| {
+                    let captured = captured.clone();
+                    async move {
+                        if let ModelsPersistence::Write(entry) = &publication.persist {
+                            captured
+                                .lock()
+                                .expect("published")
+                                .push(entry.models.iter().map(|model| model.id.clone()).collect());
+                        }
+                        if let Some(update) = publication.update.take() {
+                            update();
+                        }
+                        Ok(true)
+                    }
+                    .boxed()
+                }),
+                allow_network: true,
+                force: None,
+                signal: AbortController::new().signal(),
+            })
+            .expect("refresh")
+            .await
+            .expect("refresh result");
+        assert_eq!(
+            *published.lock().expect("published"),
+            [vec!["good".to_owned()]]
+        );
+        assert_eq!(
+            provider
+                .get_models()
+                .expect("models")
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["good"]
+        );
     }
 }
