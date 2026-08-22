@@ -1,6 +1,6 @@
-# Provider API implementations — the definitive list
+# Provider API implementations — transport reference
 
-The Rust port implements the following subset of pi-ai's API implementations,
+The Rust port implements every pi-ai API implementation not excluded by owner ruling,
 preserving pi-ai's sourcing model: use the provider's native SDK where an
 equivalent exists in native Rust, find an equivalent community crate otherwise,
 and re-implement the underlying wire logic in idiomatic Rust only when neither
@@ -9,6 +9,8 @@ that wire.
 
 Transport facts below are from the verification report further down, run
 against pi commit `496185f6e4267b979e3663c45f7eb70b0c6a97b4` (2026-08-19).
+
+> **Status:** background, not authority ([`goal.md`](goal.md) governs; pi source decides). The "Ported subset" table below is historical: `anthropic-messages`, `google-generative-ai`, `google-vertex`, and `bedrock-converse-stream` (shown with future-tense "Rust port requirement") were ported in `pi-ai-full-port-v2` phases Q3–Q5 and are committed. The openai-oxide *transport* ruling on the completions/responses rows is superseded: the crate owns its own SSE transport (`ai/src/api/openai_sse.rs`) and uses openai-oxide for types only. The "Not ported" list remains the owner ruling. Everything under "Transport verification" is pi-source reference and stands.
 
 ## Ported subset
 

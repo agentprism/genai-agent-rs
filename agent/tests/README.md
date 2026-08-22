@@ -1,5 +1,7 @@
 # Parity and regression tests
 
+> **Legacy crate.** This documents `rust-genai-agent`, an earlier, deliberately partial agent loop built on the `genai` fork. It is **not** the pi-agent-core port defined by `docs/porting-pi-ai-and-agent-core-docs/goal.md`, which will be built on the `ai` crate to a full-parity standard; its scope exclusions, genai-foundation gap tables, and version pins are not that port's standard and may be stale. pi's pinned source — not this document — is authority.
+
 This directory ports the non-harness behavioral contract from
 `pi/packages/agent/test` case-for-case and adds Rust/genai-specific regression coverage.
 

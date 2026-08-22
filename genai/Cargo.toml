@@ -1,10 +1,10 @@
 [package]
 # Renamed from upstream `genai`: this is our owned fork republished under a distinct crates.io
-# name (the pi-ai equivalent). Code still refers to it as `genai` via `package = "genai-agentprism"`
+# name. Code still refers to it as `genai` via `package = "genai-agentprism"`
 # in dependents. Kept in sync with upstream jeremychone/rust-genai via `git subtree pull`.
 name = "genai-agentprism"
 # Fork-lineage version: upstream's 0.7.0-beta.20 WIP line plus the agentprism fork's APIs
-# (request-level exec-hook overrides, ToolResponse parts, ...) and the folded pi-ai layer
+# (request-level exec-hook overrides, ToolResponse parts, ...) and the folded assistant/stream layer
 # (assistant/stream contract, GenaiStreamFn, and the feature-gated `auth` and `codex` modules).
 # The numeric `.N` + `-agentprism` pre-release suffix keeps the artifact distinct from — and
 # ordered after — upstream's own `0.7.0-beta.20-WIP`. Published to crates.io as `genai-agentprism`.
@@ -15,7 +15,7 @@ rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 categories = ["api-bindings", "asynchronous", "web-programming"]
-description = "AgentPrism fork of genai (rust-genai): multi-AI-provider client plus the pi-ai layer — assistant/stream contract, GenaiStreamFn, and optional OAuth (auth) and ChatGPT-plan Codex backend."
+description = "AgentPrism fork of genai (rust-genai): multi-AI-provider client plus an assistant/stream contract, GenaiStreamFn, and optional OAuth (auth) and ChatGPT-plan Codex backend."
 keywords = ["generative-ai","openai","anthropic","gemini","agent"]
 homepage = "https://github.com/agentprism/genai-agent-rs"
 

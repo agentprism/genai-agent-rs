@@ -1,5 +1,7 @@
 # Harness port design study (hypothetical — out of scope by design)
 
+> **Legacy crate.** This documents `rust-genai-agent`, an earlier, deliberately partial agent loop built on the `genai` fork. It is **not** the pi-agent-core port defined by `docs/porting-pi-ai-and-agent-core-docs/goal.md`, which will be built on the `ai` crate to a full-parity standard; its scope exclusions, genai-foundation gap tables, and version pins are not that port's standard and may be stale. pi's pinned source — not this document — is authority.
+
 The TS package's `src/harness/**` and `src/node.ts` were **deliberately excluded** from this crate
 (see README). This document records the design study for how the harness *would* be faithfully
 ported if it were ever brought into scope. It condenses the 2026-08-06 investigation; it is a

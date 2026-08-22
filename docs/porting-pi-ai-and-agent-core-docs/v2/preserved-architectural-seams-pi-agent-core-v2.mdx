@@ -1,5 +1,7 @@
 # Preserved architectural seams — pi-agent-core (v2)
 
+> **Status:** background, not authority. The governing statement is [`goal.md`](../goal.md); pi's pinned source (`packages/agent`) is the only authority. Two entries in §1 were corrected after review — see the notes there. The pi-agent-core Rust port is built on the `ai` crate (the pi-ai port), not on the legacy `agent`/`genai` crates.
+
 Source: Q/A with agents in the pi repo (latest commit on main), following the pi-ai seams question; consolidated from two independent review passes over the same codebase.
 
 **Q:** Okay now building on this, assuming we have now built an idiomatic rust port of pi-ai along these seams and want to port pi-agent-core next, what are the architectural seams of pi-agent-core that I should preserve in an idiomatic rust port?
@@ -17,9 +19,9 @@ The agent loop depends on the LLM only through a narrow functional contract: `(m
 
 Three consequences follow from this contract:
 
-- **`proxy.ts` is the existence proof for the seam**: a complete `StreamFn` implemented over HTTP against a server that owns auth, speaking the event protocol with the `partial` snapshots stripped. Any Rust design that could not reimplement the proxy has broken this boundary.
+- **`proxy.ts` is the existence proof for the seam**: a complete `StreamFn` implemented over HTTP against a server that owns auth, speaking its own wire type (`ProxyAssistantMessageEvent`) with the `partial` snapshots stripped — that is the proxy's wire, not pi-ai's in-process event, which carries `partial` on every nonterminal member. Any Rust design that could not reimplement the proxy has broken this boundary.
 - **It fixes the crate graph**: `pi-agent-core` should depend only on the pi-ai types/protocol crate, never on provider API implementations.
-- **Skip the `setDefaultStreamFn()` process-global.** It exists as a JS host convenience; in Rust, pass the stream function explicitly.
+- **Keep `setDefaultStreamFn()` / `getDefaultStreamFn()` and the omit-`streamFn`-falls-back-to-default behavior.** They are public pi-agent-core surface (`index.ts` re-exports `setDefaultStreamFn`; `Agent` and the loop functions fall back to the default when no `streamFn` is given). Provide them idiomatically — a settable default holder — rather than making `streamFn` mandatory. *(Correction: an earlier revision said to skip this as a "JS host convenience"; that drops observable behavior and contradicts `goal.md`.)*
 
 ### 2. `AgentLoopConfig` — hook-based extensibility over the turn lifecycle
 Rather than subclassing, behavior is injected via optional callback hooks, each with an explicit non-throwing contract: `convertToLlm` (required message→LLM adapter), `transformContext` (pre-send pruning), `beforeToolCall`/`afterToolCall` (block/override individual tool calls), `shouldStopAfterTurn` (graceful stop), `prepareNextTurn` (swap context/model/thinking level between turns), `getSteeringMessages`/`getFollowUpMessages` (queue draining), and `getApiKey` (per-call dynamic credential refresh for long tool phases). [2](#3-1)  In Rust this maps to a struct of `Option<Box<dyn Fn...>>` fields or a trait with default no-op methods — the important invariant to preserve is "hooks must not throw/reject; return a safe fallback," which in Rust means these should return `Result` only where recoverable, and panics must not be allowed to unwind through the loop.

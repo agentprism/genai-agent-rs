@@ -1,5 +1,7 @@
 # Independent fidelity audit — openai-family port (2026-08-20)
 
+> **ARCHIVED — historical record.** Findings A–F are RESOLVED (see §D/§E/§F). Section G was consumed as Q1 of the completed `pi-ai-full-port-v2` run and is no longer "open". This document predates [`goal.md`](goal.md), which governs: under it the Rust event carries pi's `partial` — the "partial-free protocol" listed below as "verified clean" and as "seam-#5 canon" (A12) is superseded — and any Section G row Rust can achieve is a defect, not an accepted delta. The current audit is `parity-audit-<date>.md` in this folder.
+
 **Subject:** `agentprism-ai` crate at HEAD `2126c38` (all five phases of run `mt0ob9vi-y83ksa` committed).
 **Reference:** pi-ai at pin `496185f6e4267b979e3663c45f7eb70b0c6a97b4`.
 **Method:** six independent Opus auditors, launched after the run completed and independent of its per-phase reviewers. All read-only, adversarial charter (find infidelities, don't confirm; full reads of both sides; comments/test names not accepted as evidence). Scopes: P1 types+events, P2 helpers, P3 openai-completions, P4 openai-responses(+shared), P5 codex, plus one cross-cutting seam auditor over the v2 seam rulings and the crate's public surface.

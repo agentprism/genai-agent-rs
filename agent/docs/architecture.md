@@ -1,5 +1,7 @@
 # rust-genai-agent — Architecture and Implementation Record
 
+> **Legacy crate.** This documents `rust-genai-agent`, an earlier, deliberately partial agent loop built on the `genai` fork. It is **not** the pi-agent-core port defined by `docs/porting-pi-ai-and-agent-core-docs/goal.md`, which will be built on the `ai` crate to a full-parity standard; its scope exclusions, genai-foundation gap tables, and version pins are not that port's standard and may be stale. pi's pinned source — not this document — is authority.
+
 > Port of `pi/packages/agent` (`@earendil-works/pi-agent-core`, TypeScript) to Rust,
 > layered on the `genai` crate (rust-genai) the same way pi-agent-core is layered on `pi-ai`.
 >

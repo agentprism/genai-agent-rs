@@ -3,7 +3,7 @@
 > **This is the [AgentPrism fork](https://github.com/agentprism/genai-agent-rs) of
 > [jeremychone/rust-genai](https://github.com/jeremychone/rust-genai), published to crates.io as
 > [`genai-agentprism`](https://crates.io/crates/genai-agentprism).** It tracks upstream via
-> `git subtree` and adds the pi-ai layer: request-level exec hooks (`PayloadInterceptor` /
+> `git subtree` and adds the transport layer used by the workspace's legacy `agent` crate (this fork is **not** the pi-ai port — that is the `ai` crate, see the repo's `goal.md`): request-level exec hooks (`PayloadInterceptor` /
 > `ResponseObserver` / `ExecOptions`), `ToolResponse` binary parts, streaming-error response
 > headers, the assistant/stream contract (`StreamFn`, `AssistantMessage`, …), `GenaiStreamFn`,
 > and the feature-gated `auth` (OAuth) and `codex` (ChatGPT-plan backend) modules. To depend on

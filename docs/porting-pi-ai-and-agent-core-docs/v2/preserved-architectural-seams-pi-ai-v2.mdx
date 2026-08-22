@@ -1,5 +1,7 @@
 # Preserved architectural seams — pi-ai (v2)
 
+> **Status:** background, not authority. The governing statement is [`goal.md`](../goal.md); pi's pinned source is the only authority, and where this document disagrees with pi, pi wins. One entry in §5 (the `partial` snapshot) was corrected after it caused a consumer-visible regression — see the note there.
+
 Source: Q/A with agents in the pi repo (latest commit on main), consolidated from two independent review passes over the same codebase.
 
 **Q:** Lets say I was porting pi-ai to Rust, using the equivalent rust SDK's for the underlying inference like how pi-ai uses openai, anthropic messages, google vertex typescript sdks, what are the architectural seams of pi-ai that I should preserve in an idiomatic rust port?
@@ -350,7 +352,7 @@ Regardless of provider, all API implementations parse their provider-specific SS
 Three properties of the stream primitive to carry over:
 
 - **Events are `contentIndex`-addressed block deltas**: `start`, then `{text,thinking,toolcall}_{start,delta,end}` against an indexed content array, then a terminal `done`/`error`. This addressing is what makes the protocol renderable incrementally and serializable over a wire.
-- **Make the `partial` snapshot derived, not carried.** Each TS event carries a full `partial: AssistantMessage`, which is free under JS shared references but a clone per delta in Rust. The codebase already shows the snapshot is redundant: `pi-agent-core`'s proxy protocol (`ProxyAssistantMessageEvent` in `packages/agent/src/proxy.ts`) strips `partial` from every event and reconstructs the message client-side. Make the partial-free protocol canonical and provide an accumulator (`MessageBuilder::apply(event)`) for consumers that want snapshots — the in-process and wire protocols then become identical.
+- **Carry the `partial` snapshot on every nonterminal event, exactly as pi does** (`types.ts` `AssistantMessageEvent`: every `start`/`text_*`/`thinking_*`/`toolcall_*` member has `partial: AssistantMessage`; pi's README reads `event.partial.model` and `event.partial.content[event.contentIndex]` directly). Model it as `partial: Arc<AssistantMessage>` so it costs what a JS shared reference costs. An accumulator (`MessageBuilder`) may exist as an additional convenience, never as a replacement. The partial-free shape is legitimate only for pi-agent-core's separate proxy wire type (`ProxyAssistantMessageEvent` in `packages/agent/src/proxy.ts`), which is a distinct type from pi-ai's event. *(Correction: an earlier revision of this bullet said "make the partial-free protocol canonical" for efficiency and because the proxy strips it; that advice contradicted pi's observable contract and `goal.md`, the port followed it, and the crate is being remediated. Do not reintroduce it.)*
 - **Keep the single-consumer and terminal-value semantics**: one iteration pass, a `result()` future resolvable independently of iteration, and a terminal event that closes the stream.
 
 ## 6. Auth as a first-class, provider-owned but centrally-orchestrated concept
@@ -375,7 +377,7 @@ Two locking details matter for correctness:
 
 **Q:** For "Lazy SDK loading as an explicit wrapper, not incidental laziness", Rust doesn't need this because its already so small, and there's no web dependency, right?
 
-**A:** Right — the runtime mechanism solves a JS-specific problem (bundle size, tree-shaking, import cost) and should not be ported. What should survive is the property the mechanism provides: backends you don't use cost nothing, and a `Provider` is constructed from an API implementation *value*, so hosts and a `models.json`-equivalent can wire any enabled backend to any provider identity at runtime. Concretely: a lean core crate holding the types and event protocol (which `pi-agent-core` depends on), API implementations behind Cargo features or in sibling crates (each heavyweight SDK dependency — e.g. the AWS SigV4 stack for Bedrock — gated with its API), and `create_provider` accepting the implementation as a value exactly as `createProvider()` does. If a Rust design makes an API implementation reachable only through a compiled-in provider enum, this seam is gone even though "lazy loading" was never the goal.
+**A:** Right — the runtime mechanism solves a JS-specific problem (bundle size, tree-shaking, import cost) and should not be ported. What should survive is the property the mechanism provides: backends you don't use cost nothing, and a `Provider` is constructed from an API implementation *value*, so hosts and a `models.json`-equivalent can wire any enabled backend to any provider identity at runtime. Concretely: a lean core crate holding the types and event protocol (which `pi-agent-core` depends on), API implementations reachable as values (compile-time gating of heavyweight SDKs is optional — the crate as built is a single crate with no feature gates, which is fine), and `create_provider` accepting the implementation as a value exactly as `createProvider()` does. If a Rust design makes an API implementation reachable only through a compiled-in provider enum, this seam is gone even though "lazy loading" was never the goal.
 
 ## 8. `StreamOptions` / `ApiOptionsMap` — typed per-API options with a shared base
 
@@ -757,7 +759,7 @@ graph TD
     B --> C["Provider (id, auth, catalog, stream dispatch: single or by-api)"]
     C --> D["ProviderStreams / Api trait (wire protocol, compat-parameterized)"]
     D --> T["transformMessages (cross-provider lowering pass)"]
-    D --> E["Underlying SDK/HTTP client per API (feature-gated)"]
+    D --> E["Underlying SDK/HTTP client per API"]
     B --> F["CredentialStore (pluggable persistence)"]
     B --> G["OAuthAuth / ApiKeyAuth (per-provider login/refresh mechanics)"]
     D --> H["AssistantMessageEventStream (normalized event enum; errors as messages)"]

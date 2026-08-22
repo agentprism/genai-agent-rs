@@ -12,21 +12,20 @@ lto = true
 codegen-units = 1
 strip = "debuginfo"
 
-# genai-agent-rs — a two-crate workspace: our owned `genai` fork plus the first-party agent
-# crate built on it:
+# genai-agent-rs — four crates. The governing statement for the port is
+# docs/porting-pi-ai-and-agent-core-docs/goal.md (mirrored in AGENTS.md / CLAUDE.md).
 #
-#   genai   — genai-agentprism: vendored fork of jeremychone/rust-genai (git subtree; pull-only
-#             upstream sync via `git subtree pull --prefix=genai upstream main`). We own the fork's
-#             changes. This is the pi-ai equivalent: besides the multi-provider client it also
-#             carries the folded, feature-gated `auth` (OAuth login / token cache / refresh — the
-#             ChatGPT Codex flow, mirroring pi-ai's `auth/`) and `codex` (the ChatGPT-plan Codex
-#             backend StreamFn, mirroring pi-ai's `api/openai-codex-responses.ts`) modules. Both
-#             are off by default; enable with the `auth` / `loopback` / `codex` /
-#             `codex-auth-resolver` features. (The former standalone `auth/` and `codex/` crates
-#             were folded into these modules.)
-#   agent   — rust-genai-agent: provider-neutral streaming agent loops and tools (pi-agent-core).
+#   ai      — agentprism-ai (lib target `ai`): THE pi-ai port — idiomatic Rust with full
+#             behavioral parity to @earendil-works/pi-ai at the pinned commit. The pi-agent-core
+#             port will be built on this crate. publish = false until the first reviewed milestone.
+#   genai   — genai-agentprism: legacy owned fork of jeremychone/rust-genai (git subtree; pull-only
+#             upstream sync via `git subtree pull --prefix=genai upstream main`) carrying an
+#             assistant/stream contract, GenaiStreamFn, and feature-gated `auth`/`codex` modules
+#             used by the legacy agent crate. Not the pi-ai port.
+#   agent   — rust-genai-agent: legacy provider-neutral agent loop built on `genai`, with a
+#             deliberately partial scope. Not the pi-agent-core port.
+#   ffi     — genai-agent-ffi: UniFFI (Swift) bindings for the legacy agent crate.
 #
-# The agent crate depends on `genai` via Cargo's dual-source form (`path` for local builds,
-# exact `version` pin for the packaged form), so the whole workspace builds against the fork
-# with no registry, git, or [patch] indirection. Both crates are published to crates.io in
-# lockstep: `genai-agentprism` first, then `rust-genai-agent` (cargo enforces the order).
+# The legacy agent crate depends on `genai` via Cargo's dual-source form (`path` for local builds,
+# exact `version` pin for the packaged form). genai-agentprism and rust-genai-agent are published
+# to crates.io in lockstep (`genai-agentprism` first).

@@ -1,5 +1,7 @@
 # rust-genai-agent
 
+> **Legacy crate.** This documents `rust-genai-agent`, an earlier, deliberately partial agent loop built on the `genai` fork. It is **not** the pi-agent-core port defined by `docs/porting-pi-ai-and-agent-core-docs/goal.md`, which will be built on the `ai` crate to a full-parity standard; its scope exclusions, genai-foundation gap tables, and version pins are not that port's standard and may be stale. pi's pinned source — not this document — is authority.
+
 Provider-neutral, streaming agent loops and tools for Rust, built on
 [`genai-agentprism`](https://docs.rs/genai-agentprism) (the AgentPrism fork of
 [`genai`](https://github.com/jeremychone/rust-genai), consumed under the `genai` module path).
@@ -228,7 +230,7 @@ same 56 cases. The matrix tracks upstream: it pins the `earendil-works/pi` commi
 against (`upstream_commit` in `tests/parity_manifest.toml`) and, on each new pi-agent-core
 release, is deliberately re-synced — the pin fast-forwards, added/renamed vitest cases are ported
 one-for-one, and every entry must be `green` before release (see the workspace README's "Staying
-current with pi-agent-core" section and [`docs/parity-roadmap.md`](docs/parity-roadmap.md)).
+current with pi-agent-core" section and the crate changelog).
 
 With `proxy`, `ProxyStreamFn` is a drop-in `StreamFn`. It authenticates to the normalized
 `/api/stream` endpoint with a bearer token and reconstructs compact SSE events into the same

@@ -1,59 +1,57 @@
 # genai-agent-rs
 
-A Rust port of [pi](https://github.com/earendil-works)'s agent stack, structured the
-same way pi is: **two libraries**, one for the AI/transport layer and one for the
-provider‑neutral agent loop.
+A Rust port of [pi](https://github.com/earendil-works)'s agent stack. The governing
+statement — what the port is, and the standard it is held to — is
+[`docs/porting-pi-ai-and-agent-core-docs/goal.md`](docs/porting-pi-ai-and-agent-core-docs/goal.md)
+(mirrored verbatim in `AGENTS.md` and `CLAUDE.md`). In one line: **idiomatic Rust with full
+behavioral parity to pi**, pi's pinned source being the only authority.
 
-| pi package | this workspace | crate |
-|---|---|---|
-| `@earendil-works/pi-ai` | `genai/` | **`genai-agentprism`** |
-| `@earendil-works/pi-agent-core` | `agent/` | **`rust-genai-agent`** |
+| pi package | this workspace | crate | status |
+|---|---|---|---|
+| `@earendil-works/pi-ai` | `ai/` | **`agentprism-ai`** (lib target `ai`) | the pi-ai port; remediation toward `goal.md` in progress |
+| `@earendil-works/pi-agent-core` | *(next)* | built **on `ai`** | design pending (`workflows/pi-agent-core-design.workflow.js`) |
 
-Both are published to crates.io; everything else pi keeps private (its CLI) stays
-out of the published surface.
+## The pi-ai port — `ai/`
 
-## The two crates
+`agentprism-ai` mirrors pi-ai's `src/` file for file (`types.rs` ⇐ `types.ts`,
+`event_stream.rs` ⇐ `utils/event-stream.ts`, `api/<name>.rs` ⇐ `api/<name>.ts`, …). Provider
+SDKs are decided: openai-oxide (types) with the crate's own SSE transport for the OpenAI
+family, `adk-anthropic`, `adk-gemini`, `aws-sdk-bedrockruntime`. Owner rulings exclude lazy
+module loading, `azure-openai-responses`, `mistral-conversations`, `pi-messages`, image
+generation, the agent package's proxy protocol, and Windows. Start with
+`ai/examples/quickstart.rs` — pi's README Quick Start recreated on the crate.
 
-### `genai-agentprism` (= pi-ai)
+Reading order for anyone working on the port: `goal.md`, then the pinned pi source, then the
+background documents listed in
+[`docs/porting-pi-ai-and-agent-core-docs/README.md`](docs/porting-pi-ai-and-agent-core-docs/README.md).
 
-An **owned fork of [`genai`](https://github.com/jeremychone/rust-genai)** (jeremychone's
-multi‑provider client), kept in sync with upstream via `git subtree`, plus the pi‑ai
-layer folded in:
+## Legacy crates — `genai/`, `agent/`, `ffi/`
 
-- the **assistant / event / stream contract** — `AssistantMessage`,
-  `AssistantMessageEvent`, `AssistantMessageEventStream`, `StopReason`,
-  `AssistantAccumulator`, `StreamFn`, `StreamRequest`, `LlmContext`;
-- **`GenaiStreamFn`** — the default backend that drives any genai provider, with a
-  pi‑parity retry layer and request‑level exec hooks;
-- **`genai::auth`** *(feature `auth`)* — OAuth login / token cache / refresh (mirrors
-  pi‑ai's `auth/`); the first flow is ChatGPT Codex;
-- **`genai::codex`** *(feature `codex`)* — the ChatGPT‑subscription **Codex** backend
-  `StreamFn` (mirrors pi‑ai's `api/openai-codex-responses.ts`), WebSocket‑with‑SSE‑fallback.
+These predate the `ai` crate and are **not** the pi-ai / pi-agent-core ports described by
+`goal.md`. They still build and are kept for their existing consumers; their docs are marked
+legacy.
 
-The crate's library target is named `genai`, so code (and dependents, via
-`package = "genai-agentprism"`) keeps writing `use genai::…`. With no features it is a
-drop‑in `genai` provider client; the pi‑ai extras are additive.
-
-**Features:** `auth`, `loopback` (auth's local redirect‑capture server), `codex`,
-`codex-auth-resolver` (bridges `codex`'s token source to `auth`'s refreshing resolver),
-plus the upstream genai features (`rustls-tls` *(default)*, `native-tls`,
-`bedrock-sigv4`, `otel`). `rustls-tls` and `native-tls` are mutually exclusive.
-
-### `rust-genai-agent` (= pi-agent-core)
-
-The **provider‑neutral agent** — the streaming loop, tools, hooks, queues, `proxy`,
-testing doubles, and `set_default_stream_fn`. It depends on `genai-agentprism` and
-**re‑exports the stream contract**, so consumers write `rust_genai_agent::StreamFn`
-exactly like pi‑agent-core. A concrete `StreamFn` (e.g. `GenaiStreamFn` or a Codex
-backend) is injected; the loop itself is transport‑agnostic.
+- **`genai/`** — `genai-agentprism`, an owned fork of
+  [`jeremychone/rust-genai`](https://github.com/jeremychone/rust-genai) (synced via `git subtree`)
+  carrying an assistant/stream contract, `GenaiStreamFn`, and feature-gated `auth`/`codex` modules
+  used by the legacy agent crate. Lib target `genai`.
+- **`agent/`** — `rust-genai-agent`, an earlier provider-neutral agent loop built on `genai`
+  with a deliberately partial scope (no harness, sessions, compaction, …). The pi-agent-core port
+  will be built on `ai` instead, to the full-parity standard.
+- **`ffi/`** — `genai-agent-ffi`, UniFFI (Swift) bindings for `agent/` (see `docs/embedding.md`,
+  `docs/using-from-swift.md`).
 
 ## Workspace layout
 
 ```
 genai-agent-rs/
-├── Cargo.toml          # [workspace] members = ["genai", "agent"]
-├── genai/              # genai-agentprism  (pi-ai: fork + auth + codex)
-└── agent/              # rust-genai-agent  (pi-agent-core)
+├── Cargo.toml          # [workspace] members = ["genai", "agent", "ffi", "ai"]
+├── ai/                 # agentprism-ai   — the pi-ai port (goal.md)
+├── genai/              # genai-agentprism — legacy rust-genai fork
+├── agent/              # rust-genai-agent — legacy agent loop on genai
+├── ffi/                # genai-agent-ffi  — Swift bindings for agent/
+├── docs/               # goal.md + porting background; embedding/Swift docs
+└── workflows/          # AgentPrism workflow scripts (audit, remediation, design)
 ```
 
 ## Build & test
@@ -105,10 +103,12 @@ After every pull, before committing the merge result:
    `genai/CHANGELOG.md` — upstream entries keep their `.`/`-`/`+`/`^`/`!` markers; add ours the
    same way.
 
-## Staying current with pi-agent-core
+## Staying current with pi-agent-core (legacy `agent/` crate)
 
-`rust-genai-agent` is a port of `@earendil-works/pi-agent-core`, and the port **tracks the
-latest pi releases** — it is not a one-time snapshot. The tracking mechanism is the parity
+*This section describes the legacy `rust-genai-agent` crate's own tracking mechanism. It is not the parity standard for the pi-agent-core port on `ai` — that standard is `goal.md`.*
+
+`rust-genai-agent` is an earlier, partial port of `@earendil-works/pi-agent-core` that **tracks
+the latest pi releases** — it is not a one-time snapshot. The tracking mechanism is the parity
 matrix in [`agent/tests/parity_manifest.toml`](agent/tests/parity_manifest.toml): it pins the
 `earendil-works/pi` commit the matrix was last synced against (`upstream_commit`) and maps every
 concrete vitest case in the four non-harness test files of `pi/packages/agent`
@@ -129,7 +129,7 @@ When a new pi-agent-core release lands upstream, the matrix is re-synced deliber
 4. Port every added, removed, or renamed case: implement the mapped Rust parity test, update the
    manifest and its ordered fragments (`agent/tests/parity/*.toml`), and keep every entry
    `green` — a `divergence` status needs a documented reason in
-   [`agent/docs/parity-roadmap.md`](agent/docs/parity-roadmap.md).
+   the legacy crate's changelog.
 5. Refresh the count claims in `agent/README.md` and the roadmap so docs and matrix never
    disagree.
 
@@ -164,5 +164,6 @@ ffi/release_swift.sh                 # Swift package (macOS only; honors --dry-r
 
 MIT OR Apache‑2.0. `genai-agentprism` is a fork of
 [`jeremychone/rust-genai`](https://github.com/jeremychone/rust-genai) (MIT OR
-Apache‑2.0); the agent layer is a port of
-[`@earendil-works/pi-agent-core`](https://github.com/earendil-works).
+Apache‑2.0); `agentprism-ai` is a port of
+[`@earendil-works/pi-ai`](https://github.com/earendil-works) and the legacy agent layer is an
+earlier partial port of `@earendil-works/pi-agent-core`.

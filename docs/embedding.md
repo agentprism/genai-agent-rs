@@ -1,6 +1,6 @@
 # Embedding `rust-genai-agent` in non-Rust hosts
 
-**Status:** design proposal (for review before implementation)
+**Status:** implemented as the `ffi/` crate (`genai-agent-ffi`); kept as the design record. Concerns the **legacy** `agent`/`genai` crates, not the pi-ai / pi-agent-core ports defined by `docs/porting-pi-ai-and-agent-core-docs/goal.md`.
 **Audience:** consumers embedding the agent as an in-process orchestration core from
 Swift/Kotlin (e.g. a SwiftUI macOS/iOS app) rather than shelling out to a Rust binary.
 **Binding mechanism:** [UniFFI](https://mozilla.github.io/uniffi-rs/) — one Rust surface
@@ -17,7 +17,7 @@ layer. It is written as a contract to validate before code changes.
 
 1. **Additive, never a rewrite.** Every change here *adds* a trait/data-shaped path and
    leaves the existing Rust-native API (closures, `Stream`, `AgentConfig`) intact. The
-   core's pi-fidelity is untouched; Rust users notice nothing.
+   legacy core's behavior is untouched; Rust users notice nothing.
 2. **Behavior = trait objects; configuration = data.** Anything the host must *implement*
    is an object-safe trait → a UniFFI **callback interface** → a Swift/Kotlin protocol.
    Anything the host *declares* is a plain data record → a UniFFI **record** (serde-able).
