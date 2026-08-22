@@ -19,68 +19,52 @@ Reading order for anyone working on the port: `goal.md`, then the two architectu
 pinned source (`c49906ec7`), then the index in
 [`docs/porting-pi-ai-and-agent-core-docs/README.md`](docs/porting-pi-ai-and-agent-core-docs/README.md).
 
-## Legacy crates — `ai/`, `genai/`, `agent/`, `ffi/`
+## Legacy crates
 
-None of these is the port described by `goal.md`; they predate the adopted architecture and are not
-baselines. They still build and are kept for their existing consumers and as a quarry.
-
-- **`ai/`** — `agentprism-ai`, the earlier pi-ai port built to a retired standard (byte-observable
-  parity with pi's JavaScript behavior). Its wire encoders, SSE decoders, OAuth flows, 430+ hermetic
-  tests, and the TS-capture harness under `ai/examples/` are reusable material. Unreviewed remediation
-  work from that standard is on the `wip/parity-remediation-p01` branch.
-
-- **`genai/`** — `genai-agentprism`, an owned fork of
-  [`jeremychone/rust-genai`](https://github.com/jeremychone/rust-genai) (synced via `git subtree`)
-  carrying an assistant/stream contract, `GenaiStreamFn`, and feature-gated `auth`/`codex` modules
-  used by the legacy agent crate. Lib target `genai`.
-- **`agent/`** — `rust-genai-agent`, an earlier provider-neutral agent loop built on `genai`
-  with a deliberately partial scope (no harness, sessions, compaction, …). The pi-agent-core port
-  will be built on `ai` instead, to the full-parity standard.
-- **`ffi/`** — `genai-agent-ffi`, UniFFI (Swift) bindings for `agent/` (see `docs/embedding.md`,
-  `docs/using-from-swift.md`).
+The earlier crates — `ai/` (the pi-ai port built to the retired byte-observable standard), `genai/`
+(a rust-genai fork), `agent/` (an earlier partial agent loop), and `ffi/` (Swift bindings for it) —
+live on the [`legacy/pre-architecture-v2`](https://github.com/agentprism/genai-agent-rs/tree/legacy/pre-architecture-v2)
+branch with their docs. They are not baselines for the adopted architecture; `ai/` is a quarry for
+wire encoders, SSE decoders, OAuth flows, hermetic tests, and the pi-request capture harness.
+Unreviewed remediation work under the retired standard is on `wip/parity-remediation-p01`.
 
 ## Workspace layout
 
 ```
 genai-agent-rs/
-├── Cargo.toml          # [workspace] members = ["genai", "agent", "ffi", "ai"]
-├── ai/                 # agentprism-ai   — legacy pi-ai port (retired standard; quarry)
-├── genai/              # genai-agentprism — legacy rust-genai fork
-├── agent/              # rust-genai-agent — legacy agent loop on genai
-├── ffi/                # genai-agent-ffi  — Swift bindings for agent/
-├── docs/               # goal.md + porting background; embedding/Swift docs
-└── workflows/          # AgentPrism workflow scripts (archive/ holds retired-standard runs)
+├── Cargo.toml                      # [workspace] — see members
+├── crates/
+│   ├── pi-ai/                      # canonical model, replay/stream, lowering, Models control plane
+│   ├── pi-agent-core/              # agent state machine over ModelRuntime
+│   ├── pi-agent-session/           # entry tree, lanes, operation records, reducers, storage traits
+│   ├── pi-agent-harness/           # compaction, skills, templates, reference tools, telemetry
+│   ├── pi-agent-env/               # filesystem/process capability traits
+│   ├── pi-agent-runtime-tokio/     # Tokio environment, Send actor facade, process execution
+│   └── pi-agent-compat-pi-jsonl/   # pi v4 JSONL reader + constrained writer
+├── providers/                      # one crate per provider + pi-ai-providers-all (Milestone 4+)
+├── bindings/pi-ffi/                # opaque handles, versioned envelopes (Milestone 5)
+├── parity/                         # parity manifest + checker (Milestone 1)
+├── docs/porting-pi-ai-and-agent-core-docs/
+└── workflows/                      # AgentPrism milestone workflow (archive/ holds retired runs)
 ```
 
 ## Build & test
 
 ```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
 cargo build --workspace
-cargo test  --workspace                                   # default features
-cargo test  -p genai-agentprism --features "auth loopback codex codex-auth-resolver"
-cargo test  -p rust-genai-agent --all-features
+cargo test  --workspace          # hermetic: ScriptedRuntime and captured fixtures only
+bash parity/check.sh             # parity manifest (Part 2 §10), once Milestone 1 lands it
 ```
 
-> Some `genai/tests/tests_p_*.rs` are **live‑provider** tests and fail offline (no API
-> keys / network) — that is upstream genai's normal offline behavior, not a defect.
+## Running a milestone
 
-## Keeping the fork in sync with upstream
-
-We own the fork; upstream improvements are pulled in (pull‑only, never pushed):
-
-```bash
-git remote add upstream https://github.com/jeremychone/rust-genai   # once
-git subtree pull --prefix=genai upstream main                       # merge upstream
-```
-
-The subtree was added **without `--squash`** (full upstream history is in this repo), so pulls
-must stay plain `git subtree pull` — never add `--squash`, which would realign history against a
-different (squashed) upstream lineage. On a fresh clone the first pull recomputes the subtree
-split of our local `genai/`-touching commits; it can take minutes and looks idle — let it run
-(the result is cached afterwards).
-
-Our additions live in new modules (`genai/src/{assistant,stream_fn,auth,codex,…}`), so
-upstream merges mostly touch only `genai/src/lib.rs` and `genai/Cargo.toml`.
+`workflows/architecture-v2-milestones.workflow.js` builds one milestone per run (`--args
+'{"milestone":"M1"}'`; `M1`–`M9`, then `GATES`). Every package is implemented by a
+`codex/gpt-5.6-sol` xhigh agent, reviewed by an independent one against the architecture
+documents and pi's pinned source, and committed on approval. It requires a clean `main` and the
+pi worktree at the pinned commit.
 
 After every pull, before committing the merge result:
 
@@ -160,8 +144,5 @@ ffi/release_swift.sh                 # Swift package (macOS only; honors --dry-r
 
 ## License
 
-MIT OR Apache‑2.0. `genai-agentprism` is a fork of
-[`jeremychone/rust-genai`](https://github.com/jeremychone/rust-genai) (MIT OR
-Apache‑2.0); `agentprism-ai` is a port of
-[`@earendil-works/pi-ai`](https://github.com/earendil-works) and the legacy agent layer is an
-earlier partial port of `@earendil-works/pi-agent-core`.
+MIT OR Apache-2.0. The crates are a port of [`@earendil-works/pi`](https://github.com/earendil-works/pi)
+(`packages/ai`, `packages/agent`) at the pinned commit named in `goal.md`.

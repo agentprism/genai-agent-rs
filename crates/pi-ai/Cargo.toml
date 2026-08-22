@@ -1,0 +1,11 @@
+[package]
+name = "pi-ai"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/agentprism/genai-agent-rs"
+description = "pi-ai: canonical messages and model descriptors, replay envelope and stream assembly, API-family lowering and wire encoders, the Models registry (auth, catalogs, retry configuration), and provider registrations."
+publish = false
+
+[dependencies]

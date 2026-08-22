@@ -1,33 +1,31 @@
 [workspace]
 resolver = "2"
-members = ["genai", "agent", "ffi", "ai"]
+members = [
+    "crates/pi-ai",
+    "crates/pi-agent-core",
+    "crates/pi-agent-session",
+    "crates/pi-agent-harness",
+    "crates/pi-agent-env",
+    "crates/pi-agent-runtime-tokio",
+    "crates/pi-agent-compat-pi-jsonl",
+]
 
-# Release profile for the mobile/FFI artifact (see ffi/): small and symbolicated.
-# `debuginfo` strip keeps symbol tables (production crash reports stay symbolicated;
-# final stripping is the consuming app's link decision). panic=unwind is kept on
-# purpose: UniFFI catches panics at the FFI boundary and surfaces them as errors.
-[profile.release]
-opt-level = "z"
-lto = true
-codegen-units = 1
-strip = "debuginfo"
+# genai-agent-rs — the Rust port of pi's agent stack, built to the architecture in
+# docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part1-proposal.md and
+# architecture-v2-part2-revision.md, under the standard in goal.md (mirrored in AGENTS.md / CLAUDE.md).
+#
+# Workspace shape (part 1 §2, part 2 "Source baseline and revised architecture"):
+#   crates/      pi-ai, pi-agent-core, pi-agent-session, pi-agent-harness, pi-agent-env,
+#                pi-agent-runtime-tokio, pi-agent-compat-pi-jsonl
+#   providers/   one leaf crate per provider (pi-ai-openai, pi-ai-anthropic, …) plus
+#                pi-ai-providers-all — added in Milestone 4
+#   bindings/    pi-ffi — added in Milestone 5
+#   examples/
+#
+# The earlier crates (ai, genai, agent, ffi) live on the `legacy/pre-architecture-v2` branch.
 
-# genai-agent-rs — four legacy crates today; the adopted architecture's crates (pi-ai, pi-agent-core,
-# pi-agent-session, pi-agent-harness, pi-agent-env, pi-agent-runtime-tokio, pi-agent-compat-pi-jsonl,
-# provider crates, pi-ffi) are to be added per docs/porting-pi-ai-and-agent-core-docs/goal.md
-# (mirrored in AGENTS.md / CLAUDE.md).
-#
-#   ai      — agentprism-ai (lib target `ai`): the earlier pi-ai port, built to a standard retired
-#             on 2026-08-22 (see goal.md). Kept as a quarry for wire encoders, SSE decoders, OAuth
-#             flows, and fixtures; not a baseline for the adopted architecture. publish = false.
-#   genai   — genai-agentprism: legacy owned fork of jeremychone/rust-genai (git subtree; pull-only
-#             upstream sync via `git subtree pull --prefix=genai upstream main`) carrying an
-#             assistant/stream contract, GenaiStreamFn, and feature-gated `auth`/`codex` modules
-#             used by the legacy agent crate. Not the pi-ai port.
-#   agent   — rust-genai-agent: legacy provider-neutral agent loop built on `genai`, with a
-#             deliberately partial scope. Not the pi-agent-core port.
-#   ffi     — genai-agent-ffi: UniFFI (Swift) bindings for the legacy agent crate.
-#
-# The legacy agent crate depends on `genai` via Cargo's dual-source form (`path` for local builds,
-# exact `version` pin for the packaged form). genai-agentprism and rust-genai-agent are published
-# to crates.io in lockstep (`genai-agentprism` first).
+[workspace.package]
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/agentprism/genai-agent-rs"

@@ -2,20 +2,5 @@
 **/target/
 Cargo.lock.orig
 
-# ffi build artifacts
-ffi/bindings/
-ffi/apple/
-ffi/swiftpm/GenAIAgent.xcframework/
-ffi/swiftpm/.build/
-
-# SwiftPM/Xcode user state
-ffi/swiftpm/.swiftpm/
-
-# Root-level (distribution) SwiftPM state
-/.build/
-/Package.resolved
-
-# NOTE: ffi/swiftpm/Sources/GenAIAgent/genai_agent_ffi.swift IS committed (regenerated and
-# committed by ffi/release_swift.sh at each release) — the root distribution Package.swift
-# needs the generated bindings present for consumers building from a git tag.
+# local checkout/symlink of the pinned pi source (see goal.md for the pin)
 /pi
