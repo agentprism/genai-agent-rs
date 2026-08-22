@@ -44,8 +44,10 @@ const COMMON =
   "images-api-registry, providers/images/*, providers/openrouter-images.ts), the agent package's proxy protocol, " +
   "Windows. SDKs: openai-completions/openai-responses → openai-oxide; anthropic-messages → adk-anthropic; " +
   "google-generative-ai/google-vertex → adk-gemini; bedrock-converse-stream → aws-sdk-bedrockruntime + " +
-  "aws-config; other crates are free where faithfulness decides. Credential storage is host-pluggable and never " +
-  "shells out.\n\n" +
+  "aws-config; other crates are free where faithfulness decides. Ruled 2026-08-21: an SDK may be extended or " +
+  "narrowly forked (vendored) where pi's hook, header, or response-surface needs are not met by its public API — " +
+  "the bar stays observable equivalence with what pi does with its SDK. Credential storage is host-pluggable and " +
+  "never shells out.\n\n" +
   "CONSTRAINTS: work only inside " + REPO + "/ai (plus ai/Cargo.toml, the workspace Cargo.lock, and the docs " +
   "under " + REPO + "/docs/porting-pi-ai-and-agent-core-docs when a package says so). Never modify " + PI + ", " +
   REPO + "/genai, " + REPO + "/agent, or " + REPO + "/ffi. Layout mirrors pi file-for-file. Comments only for " +
