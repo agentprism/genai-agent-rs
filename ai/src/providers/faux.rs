@@ -6,12 +6,14 @@ use crate::event_stream::{
 use crate::models::{CreateProviderOptions, ProviderApi, ProviderRef, create_provider};
 use crate::types::{
     AssistantContent, AssistantMessage, CacheRetention, Context, DeferredCancelOptions,
-    DeferredFetchOptions, DeferredHandle, DeferredRequest, ErrorStopReason, ImageContent, Message,
-    Model, ModelCost, ModelCostRates, ModelInput, ProviderResponse, SimpleStreamOptions,
-    StopReason, SuccessfulStopReason, TextContent, ThinkingContent, ToolCall, ToolResultMessage,
-    Usage, UsageCost, UserContent, UserContentBlock,
+    DeferredFetchOptions, DeferredHandle, DeferredRequest, ErrorStopReason, ImageContent, JsString,
+    JsonObject, Message, Model, ModelCost, ModelCostRates, ModelInput, ProviderResponse,
+    SimpleStreamOptions, StopReason, SuccessfulStopReason, TextContent, ThinkingContent, ToolCall,
+    ToolResultMessage, Usage, UsageCost, UserContent, UserContentBlock,
 };
+use crate::utils::ecma_json::stringify_object;
 use futures::future::BoxFuture;
+#[cfg(test)]
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,8 +25,8 @@ const DEFAULT_PROVIDER: &str = "faux";
 const DEFAULT_MODEL_ID: &str = "faux-1";
 const DEFAULT_MODEL_NAME: &str = "Faux Model";
 const DEFAULT_BASE_URL: &str = "http://localhost:0";
-const DEFAULT_MIN_TOKEN_SIZE: usize = 3;
-const DEFAULT_MAX_TOKEN_SIZE: usize = 5;
+const DEFAULT_MIN_TOKEN_SIZE: f64 = 3.0;
+const DEFAULT_MAX_TOKEN_SIZE: f64 = 5.0;
 
 #[derive(Debug, Clone)]
 pub struct FauxModelDefinition {
@@ -33,8 +35,8 @@ pub struct FauxModelDefinition {
     pub reasoning: Option<bool>,
     pub input: Option<Vec<ModelInput>>,
     pub cost: Option<ModelCostRates>,
-    pub context_window: Option<u64>,
-    pub max_tokens: Option<u64>,
+    pub context_window: Option<f64>,
+    pub max_tokens: Option<f64>,
 }
 
 impl FauxModelDefinition {
@@ -51,21 +53,28 @@ impl FauxModelDefinition {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum FauxAssistantContent {
-    Text(String),
+    Text(JsString),
     Block(AssistantContent),
     Blocks(Vec<AssistantContent>),
 }
 
 impl From<&str> for FauxAssistantContent {
     fn from(value: &str) -> Self {
-        Self::Text(value.to_owned())
+        Self::Text(value.into())
     }
 }
 
 impl From<String> for FauxAssistantContent {
     fn from(value: String) -> Self {
+        Self::Text(value.into())
+    }
+}
+
+impl From<JsString> for FauxAssistantContent {
+    fn from(value: JsString) -> Self {
         Self::Text(value)
     }
 }
@@ -86,26 +95,26 @@ impl From<Vec<AssistantContent>> for FauxAssistantContent {
 pub struct FauxAssistantMessageOptions {
     pub stop_reason: Option<StopReason>,
     pub deferred: Option<DeferredHandle>,
-    pub error_message: Option<String>,
-    pub response_id: Option<String>,
-    pub timestamp: Option<i64>,
+    pub error_message: Option<JsString>,
+    pub response_id: Option<JsString>,
+    pub timestamp: Option<f64>,
 }
 
-pub fn faux_text(text: impl Into<String>) -> AssistantContent {
+pub fn faux_text(text: impl Into<JsString>) -> AssistantContent {
     AssistantContent::Text(TextContent::new(text))
 }
 
-pub fn faux_thinking(thinking: impl Into<String>) -> AssistantContent {
+pub fn faux_thinking(thinking: impl Into<JsString>) -> AssistantContent {
     AssistantContent::Thinking(ThinkingContent::new(thinking))
 }
 
 pub fn faux_tool_call(
-    name: impl Into<String>,
-    arguments: impl Into<Value>,
-    id: Option<String>,
+    name: impl Into<JsString>,
+    arguments: impl Into<JsonObject>,
+    id: Option<JsString>,
 ) -> AssistantContent {
     AssistantContent::ToolCall(ToolCall::new(
-        id.unwrap_or_else(|| random_id("tool")),
+        id.unwrap_or_else(|| random_id("tool").into()),
         name,
         arguments,
     ))
@@ -126,7 +135,7 @@ pub fn faux_assistant_message(
         DEFAULT_MODEL_ID,
         options.timestamp.unwrap_or_else(now_ms),
     );
-    message.content = content.into();
+    message.content = content;
     message.usage = default_usage();
     message.stop_reason = options.stop_reason.unwrap_or(StopReason::Stop);
     message.deferred = options.deferred;
@@ -184,14 +193,14 @@ impl From<AssistantMessage> for FauxResponseStep {
 
 #[derive(Debug, Clone, Default)]
 pub struct FauxDeferredOptions {
-    pub pending_fetches: Option<u64>,
-    pub poll_after_ms: Option<u64>,
+    pub pending_fetches: Option<f64>,
+    pub poll_after_ms: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct FauxTokenSizeOptions {
-    pub min: Option<usize>,
-    pub max: Option<usize>,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -211,7 +220,7 @@ struct DeferredEntry {
     context: Context,
     options: Option<SimpleStreamOptions>,
     model: Model,
-    pending_fetches: u64,
+    pending_fetches: f64,
     cancelled: bool,
     final_message: Option<AssistantMessage>,
 }
@@ -222,12 +231,12 @@ struct FauxCoreInner {
     models: Vec<Model>,
     pending_responses: Mutex<VecDeque<FauxResponseStep>>,
     tokens_per_second: Option<f64>,
-    min_token_size: usize,
-    max_token_size: usize,
+    min_token_size: f64,
+    max_token_size: f64,
     deferred_options: FauxDeferredOptions,
     state: Arc<FauxProviderState>,
-    prompt_cache: Mutex<HashMap<String, String>>,
-    deferred_responses: Mutex<HashMap<String, DeferredEntry>>,
+    prompt_cache: Mutex<HashMap<String, JsString>>,
+    deferred_responses: Mutex<HashMap<JsString, DeferredEntry>>,
 }
 
 #[derive(Clone)]
@@ -364,9 +373,9 @@ impl FauxCore {
         {
             let handle = DeferredHandle {
                 provider: request_model.provider.0.clone(),
-                model_id: request_model.id.clone(),
+                model_id: request_model.id.clone().into(),
                 api: request_model.api.0.clone(),
-                id: random_id("deferred"),
+                id: random_id("deferred").into(),
                 expires_at: None,
                 poll_after_ms: self.inner.deferred_options.poll_after_ms,
                 data: None,
@@ -383,11 +392,9 @@ impl FauxCore {
                         context,
                         options: stream_options.clone(),
                         model: request_model.clone(),
-                        pending_fetches: self
-                            .inner
-                            .deferred_options
-                            .pending_fetches
-                            .unwrap_or_default(),
+                        pending_fetches: normalize_pending_fetches(
+                            self.inner.deferred_options.pending_fetches,
+                        ),
                         cancelled: false,
                         final_message: None,
                     },
@@ -443,8 +450,8 @@ impl FauxCore {
         let prompt_tokens = estimate_tokens(&prompt_text);
         let output_tokens = estimate_tokens(&assistant_content_to_text(&message.content));
         let mut input = prompt_tokens;
-        let mut cache_read = 0;
-        let mut cache_write = 0;
+        let mut cache_read = 0.0;
+        let mut cache_write = 0.0;
 
         if let Some(session_id) = options
             .and_then(|options| options.stream.session_id.as_deref())
@@ -460,13 +467,10 @@ impl FauxCore {
                 .unwrap_or_else(PoisonError::into_inner);
             if let Some(previous) = prompt_cache.get(session_id) {
                 let cached_units = common_prefix_length(previous, &prompt_text);
-                cache_read = (cached_units as u64).div_ceil(4);
-                cache_write = (prompt_text
-                    .encode_utf16()
-                    .count()
-                    .saturating_sub(cached_units) as u64)
-                    .div_ceil(4);
-                input = prompt_tokens.saturating_sub(cache_read);
+                cache_read = (cached_units as f64 / 4.0).ceil();
+                cache_write =
+                    ((prompt_text.len().saturating_sub(cached_units)) as f64 / 4.0).ceil();
+                input = (prompt_tokens - cache_read).max(0.0);
             } else {
                 cache_write = prompt_tokens;
             }
@@ -474,13 +478,13 @@ impl FauxCore {
         }
 
         message.usage = Usage {
-            input: input.into(),
-            output: output_tokens.into(),
-            cache_read: cache_read.into(),
-            cache_write: cache_write.into(),
+            input,
+            output: output_tokens,
+            cache_read,
+            cache_write,
             cache_write_1h: None,
             reasoning: None,
-            total_tokens: (input + output_tokens + cache_read + cache_write).into(),
+            total_tokens: input + output_tokens + cache_read + cache_write,
             cost: UsageCost::default(),
         };
         message
@@ -493,7 +497,7 @@ impl FauxCore {
         signal: Option<Arc<dyn crate::types::AbortSignal>>,
     ) -> Result<(), String> {
         let mut partial = message.clone();
-        partial.content = Vec::new().into();
+        partial.content = Vec::new();
         partial.stop_reason = StopReason::Pending;
         if signal.as_ref().is_some_and(|signal| signal.is_aborted()) {
             let aborted = create_aborted_message(partial);
@@ -506,7 +510,9 @@ impl FauxCore {
             return Ok(());
         }
         sender
-            .send(AssistantMessageEvent::Start)
+            .send(AssistantMessageEvent::Start {
+                partial: Arc::new(partial.clone()),
+            })
             .map_err(|error| error.to_string())?;
 
         for (index, block) in message.content.iter().cloned().enumerate() {
@@ -520,10 +526,8 @@ impl FauxCore {
                         .push(AssistantContent::Thinking(ThinkingContent::new("")));
                     sender
                         .send(AssistantMessageEvent::ThinkingStart {
-                            content_index: index,
-                            thinking: None,
-                            thinking_signature: None,
-                            redacted: None,
+                            content_index: index as f64,
+                            partial: Arc::new(partial.clone()),
                         })
                         .map_err(|error| error.to_string())?;
                     for chunk in split_string_by_token_size(
@@ -540,18 +544,17 @@ impl FauxCore {
                         }
                         sender
                             .send(AssistantMessageEvent::ThinkingDelta {
-                                content_index: index,
+                                content_index: index as f64,
                                 delta: chunk,
-                                thinking_signature_delta: None,
+                                partial: Arc::new(partial.clone()),
                             })
                             .map_err(|error| error.to_string())?;
                     }
                     sender
                         .send(AssistantMessageEvent::ThinkingEnd {
-                            content_index: index,
+                            content_index: index as f64,
                             content: block.thinking,
-                            content_signature: block.thinking_signature,
-                            redacted: block.redacted,
+                            partial: Arc::new(partial.clone()),
                         })
                         .map_err(|error| error.to_string())?;
                 }
@@ -561,7 +564,8 @@ impl FauxCore {
                         .push(AssistantContent::Text(TextContent::new("")));
                     sender
                         .send(AssistantMessageEvent::TextStart {
-                            content_index: index,
+                            content_index: index as f64,
+                            partial: Arc::new(partial.clone()),
                         })
                         .map_err(|error| error.to_string())?;
                     for chunk in split_string_by_token_size(
@@ -578,16 +582,17 @@ impl FauxCore {
                         }
                         sender
                             .send(AssistantMessageEvent::TextDelta {
-                                content_index: index,
+                                content_index: index as f64,
                                 delta: chunk,
+                                partial: Arc::new(partial.clone()),
                             })
                             .map_err(|error| error.to_string())?;
                     }
                     sender
                         .send(AssistantMessageEvent::TextEnd {
-                            content_index: index,
+                            content_index: index as f64,
                             content: block.text,
-                            content_signature: block.text_signature,
+                            partial: Arc::new(partial.clone()),
                         })
                         .map_err(|error| error.to_string())?;
                 }
@@ -597,18 +602,15 @@ impl FauxCore {
                         .push(AssistantContent::ToolCall(ToolCall::new(
                             block.id.clone(),
                             block.name.clone(),
-                            Value::Object(Default::default()),
+                            serde_json::Map::new(),
                         )));
                     sender
                         .send(AssistantMessageEvent::ToolCallStart {
-                            content_index: index,
-                            id: block.id.clone(),
-                            tool_name: block.name.clone(),
-                            namespace: block.namespace.clone(),
+                            content_index: index as f64,
+                            partial: Arc::new(partial.clone()),
                         })
                         .map_err(|error| error.to_string())?;
-                    let arguments = serde_json::to_string(&block.arguments)
-                        .map_err(|error| error.to_string())?;
+                    let arguments = JsString::from(stringify_object(&block.arguments));
                     for chunk in split_string_by_token_size(
                         &arguments,
                         self.inner.min_token_size,
@@ -620,21 +622,20 @@ impl FauxCore {
                         }
                         sender
                             .send(AssistantMessageEvent::ToolCallDelta {
-                                content_index: index,
+                                content_index: index as f64,
                                 delta: chunk,
+                                partial: Arc::new(partial.clone()),
                             })
                             .map_err(|error| error.to_string())?;
                     }
                     partial.content[index] = AssistantContent::ToolCall(block.clone());
                     sender
                         .send(AssistantMessageEvent::ToolCallEnd {
-                            content_index: index,
+                            content_index: index as f64,
                             tool_call: block,
+                            partial: Arc::new(partial.clone()),
                         })
                         .map_err(|error| error.to_string())?;
-                }
-                AssistantContent::Unknown(value) => {
-                    partial.content.push(AssistantContent::Unknown(value));
                 }
             }
         }
@@ -718,8 +719,8 @@ impl FauxCore {
                     handle.id
                 ));
             }
-            if entry.pending_fetches > 0 {
-                entry.pending_fetches -= 1;
+            if entry.pending_fetches > 0.0 {
+                entry.pending_fetches -= 1.0;
                 (
                     Some(create_deferred_message(request_model, entry.handle.clone())),
                     None,
@@ -810,7 +811,7 @@ impl FauxCore {
         );
         message.usage = default_usage();
         message.stop_reason = StopReason::Error;
-        message.error_message = Some(error);
+        message.error_message = Some(error.into());
         message
     }
 }
@@ -914,8 +915,8 @@ pub fn create_faux_core(options: RegisterFauxProviderOptions) -> FauxCore {
     let token_size = options.token_size.unwrap_or_default();
     let requested_min = token_size.min.unwrap_or(DEFAULT_MIN_TOKEN_SIZE);
     let requested_max = token_size.max.unwrap_or(DEFAULT_MAX_TOKEN_SIZE);
-    let min_token_size = requested_min.min(requested_max).max(1);
-    let max_token_size = requested_max.max(min_token_size);
+    let min_token_size = js_math_max(1.0, js_math_min(requested_min, requested_max));
+    let max_token_size = js_math_max(min_token_size, requested_max);
     let definitions = options
         .models
         .filter(|models| !models.is_empty())
@@ -926,8 +927,8 @@ pub fn create_faux_core(options: RegisterFauxProviderOptions) -> FauxCore {
                 reasoning: Some(false),
                 input: Some(vec![ModelInput::Text, ModelInput::Image]),
                 cost: Some(ModelCostRates::default()),
-                context_window: Some(128_000),
-                max_tokens: Some(16_384),
+                context_window: Some(128_000.0),
+                max_tokens: Some(16_384.0),
             }]
         });
     let models = definitions
@@ -947,8 +948,8 @@ pub fn create_faux_core(options: RegisterFauxProviderOptions) -> FauxCore {
                 rates: definition.cost.unwrap_or_default(),
                 tiers: None,
             },
-            context_window: definition.context_window.unwrap_or(128_000),
-            max_tokens: definition.max_tokens.unwrap_or(16_384),
+            context_window: definition.context_window.unwrap_or(128_000.0),
+            max_tokens: definition.max_tokens.unwrap_or(16_384.0),
             sampling_params: None,
             headers: None,
             compat: None,
@@ -1017,7 +1018,7 @@ async fn call_on_response(
     if let Some(callback) = callback {
         callback(
             ProviderResponse {
-                status: 200,
+                status: 200.0,
                 headers: BTreeMap::new(),
             },
             model,
@@ -1058,7 +1059,7 @@ fn send_aborted(sender: &AssistantStreamSender, partial: AssistantMessage) -> Re
 
 fn create_aborted_message(mut partial: AssistantMessage) -> AssistantMessage {
     partial.stop_reason = StopReason::Aborted;
-    partial.error_message = Some("Request was aborted".to_owned());
+    partial.error_message = Some("Request was aborted".into());
     partial.timestamp = now_ms();
     partial
 }
@@ -1084,7 +1085,7 @@ fn clone_message(
 ) -> AssistantMessage {
     message.api = api.into();
     message.provider = provider.into();
-    message.model = model_id.to_owned();
+    message.model = model_id.into();
     message
 }
 
@@ -1101,56 +1102,51 @@ fn default_usage() -> Usage {
     }
 }
 
-fn estimate_tokens(text: &str) -> u64 {
-    (text.encode_utf16().count() as u64).div_ceil(4)
+fn estimate_tokens(text: &JsString) -> f64 {
+    (text.len() as f64 / 4.0).ceil()
 }
 
-fn user_content_to_text(content: &UserContent) -> String {
+fn user_content_to_text(content: &UserContent) -> JsString {
     match content {
         UserContent::Text(text) => text.clone(),
-        UserContent::Blocks(blocks) => blocks
-            .iter()
-            .map(user_content_block_to_text)
-            .collect::<Vec<_>>()
-            .join("\n"),
+        UserContent::Blocks(blocks) => join_js_strings(
+            blocks.iter().map(user_content_block_to_text),
+            &JsString::from("\n"),
+        ),
     }
 }
 
-fn user_content_block_to_text(content: &UserContentBlock) -> String {
+fn user_content_block_to_text(content: &UserContentBlock) -> JsString {
     match content {
         UserContentBlock::Text(text) => text.text.clone(),
         UserContentBlock::Image(ImageContent {
             mime_type, data, ..
-        }) => format!("[image:{mime_type}:{}]", data.encode_utf16().count()),
-        UserContentBlock::Unknown(_) => String::new(),
+        }) => format!("[image:{mime_type}:{}]", data.encode_utf16().count()).into(),
     }
 }
 
-fn assistant_content_to_text(content: &crate::types::AssistantMessageContent) -> String {
-    content
-        .iter()
-        .map(|block| match block {
+fn assistant_content_to_text(content: &crate::types::AssistantMessageContent) -> JsString {
+    join_js_strings(
+        content.iter().map(|block| match block {
             AssistantContent::Text(text) => text.text.clone(),
             AssistantContent::Thinking(thinking) => thinking.thinking.clone(),
-            AssistantContent::ToolCall(call) => format!(
-                "{}:{}",
-                call.name,
-                serde_json::to_string(&call.arguments).unwrap_or_default()
-            ),
-            AssistantContent::Unknown(_) => String::new(),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+            AssistantContent::ToolCall(call) => {
+                format!("{}:{}", call.name, stringify_object(&call.arguments)).into()
+            }
+        }),
+        &JsString::from("\n"),
+    )
 }
 
-fn tool_result_to_text(message: &ToolResultMessage) -> String {
-    std::iter::once(message.tool_name.clone())
-        .chain(message.content.iter().map(user_content_block_to_text))
-        .collect::<Vec<_>>()
-        .join("\n")
+fn tool_result_to_text(message: &ToolResultMessage) -> JsString {
+    join_js_strings(
+        std::iter::once(message.tool_name.clone())
+            .chain(message.content.iter().map(user_content_block_to_text)),
+        &JsString::from("\n"),
+    )
 }
 
-fn message_to_text(message: &Message) -> String {
+fn message_to_text(message: &Message) -> JsString {
     match message {
         Message::User(message) => user_content_to_text(&message.content),
         Message::Assistant(message) => assistant_content_to_text(&message.content),
@@ -1158,14 +1154,16 @@ fn message_to_text(message: &Message) -> String {
     }
 }
 
-fn serialize_context(context: &Context) -> String {
+fn serialize_context(context: &Context) -> JsString {
     let mut parts = Vec::new();
     if let Some(system_prompt) = context
         .system_prompt
         .as_ref()
         .filter(|system_prompt| !system_prompt.is_empty())
     {
-        parts.push(format!("system:{system_prompt}"));
+        let mut part = JsString::from("system:");
+        part.push_str(system_prompt);
+        parts.push(part);
     }
     for message in &context.messages {
         let role = match message {
@@ -1173,62 +1171,47 @@ fn serialize_context(context: &Context) -> String {
             Message::Assistant(_) => "assistant",
             Message::ToolResult(_) => "toolResult",
         };
-        parts.push(format!("{role}:{}", message_to_text(message)));
+        let mut part = JsString::from(format!("{role}:"));
+        part.push_str(message_to_text(message));
+        parts.push(part);
     }
     if let Some(tools) = context.tools.as_ref().filter(|tools| !tools.is_empty()) {
-        parts.push(format!(
-            "tools:{}",
-            serde_json::to_string(tools).unwrap_or_default()
-        ));
+        parts.push(format!("tools:{}", serde_json::to_string(tools).unwrap_or_default()).into());
     }
-    parts.join("\n\n")
+    join_js_strings(parts, &JsString::from("\n\n"))
 }
 
-fn common_prefix_length(left: &str, right: &str) -> usize {
-    left.encode_utf16()
-        .zip(right.encode_utf16())
+fn common_prefix_length(left: &JsString, right: &JsString) -> usize {
+    left.as_utf16()
+        .iter()
+        .zip(right.as_utf16())
         .take_while(|(left, right)| left == right)
         .count()
 }
 
-fn split_string_by_token_size(text: &str, min: usize, max: usize) -> Vec<String> {
+fn split_string_by_token_size(text: &JsString, min: f64, max: f64) -> Vec<JsString> {
     let mut chunks = Vec::new();
-    let mut start = 0;
-    while start < text.len() {
-        let token_size = min + random_usize(max - min + 1);
-        let char_size = token_size.saturating_mul(4).max(1);
-        let remaining = &text[start..];
-        let mut units = 0;
-        let mut end = text.len();
-        for (offset, character) in remaining.char_indices() {
-            let next_units = units + character.len_utf16();
-            if next_units > char_size {
-                end = if offset == 0 {
-                    start + character.len_utf8()
-                } else {
-                    start + offset
-                };
-                break;
-            }
-            units = next_units;
-            if units == char_size {
-                end = start + offset + character.len_utf8();
-                break;
-            }
-        }
-        chunks.push(text[start..end].to_owned());
+    let mut start = 0.0;
+    while start < text.len() as f64 {
+        let token_size = min + (random_unit() * (max - min + 1.0)).floor();
+        let char_size = js_math_max(1.0, token_size * 4.0);
+        let end = start + char_size;
+        chunks.push(text.slice(
+            ecma_slice_index(start, text.len()),
+            ecma_slice_index(end, text.len()),
+        ));
         start = end;
     }
     if chunks.is_empty() {
-        chunks.push(String::new());
+        chunks.push(JsString::default());
     }
     chunks
 }
 
-async fn schedule_chunk(chunk: &str, tokens_per_second: Option<f64>) {
+async fn schedule_chunk(chunk: &JsString, tokens_per_second: Option<f64>) {
     match tokens_per_second.filter(|value| *value > 0.0) {
         Some(tokens_per_second) => {
-            let delay_ms = estimate_tokens(chunk) as f64 / tokens_per_second * 1_000.0;
+            let delay_ms = estimate_tokens(chunk) / tokens_per_second * 1_000.0;
             if delay_ms.is_finite() && delay_ms > 0.0 {
                 tokio::time::sleep(std::time::Duration::from_secs_f64(delay_ms / 1_000.0)).await;
             } else {
@@ -1239,15 +1222,53 @@ async fn schedule_chunk(chunk: &str, tokens_per_second: Option<f64>) {
     }
 }
 
-fn random_usize(upper_exclusive: usize) -> usize {
-    if upper_exclusive <= 1 {
-        return 0;
+fn join_js_strings(values: impl IntoIterator<Item = JsString>, separator: &JsString) -> JsString {
+    let mut output = JsString::default();
+    for (index, value) in values.into_iter().enumerate() {
+        if index != 0 {
+            output.push_str(separator);
+        }
+        output.push_str(&value);
     }
+    output
+}
+
+fn random_unit() -> f64 {
     let mut bytes = [0_u8; 8];
     if getrandom::fill(&mut bytes).is_err() {
-        return 0;
+        return 0.0;
     }
-    (u64::from_ne_bytes(bytes) as usize) % upper_exclusive
+    ((u64::from_ne_bytes(bytes) >> 11) as f64) / ((1_u64 << 53) as f64)
+}
+
+fn js_math_min(left: f64, right: f64) -> f64 {
+    if left.is_nan() || right.is_nan() {
+        f64::NAN
+    } else {
+        left.min(right)
+    }
+}
+
+fn js_math_max(left: f64, right: f64) -> f64 {
+    if left.is_nan() || right.is_nan() {
+        f64::NAN
+    } else {
+        left.max(right)
+    }
+}
+
+fn normalize_pending_fetches(value: Option<f64>) -> f64 {
+    js_math_max(0.0, value.unwrap_or_default().floor())
+}
+
+fn ecma_slice_index(value: f64, len: usize) -> usize {
+    if value.is_nan() || value == f64::NEG_INFINITY {
+        0
+    } else if value == f64::INFINITY {
+        len
+    } else {
+        value.trunc().clamp(0.0, len as f64) as usize
+    }
 }
 
 fn random_id(prefix: &str) -> String {
@@ -1274,13 +1295,13 @@ fn base36(mut value: u64) -> String {
     String::from_utf8(encoded).expect("base36 is ASCII")
 }
 
-fn now_ms() -> i64 {
+fn now_ms() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
         .try_into()
-        .unwrap_or(i64::MAX)
+        .unwrap_or(i64::MAX) as f64
 }
 
 #[cfg(test)]
@@ -1295,8 +1316,8 @@ mod tests {
             system_prompt: None,
             messages: vec![Message::User(Box::new(UserMessage {
                 role: UserRole::User,
-                content: UserContent::Text(text.to_owned()),
-                timestamp: 0,
+                content: UserContent::Text((text.to_owned()).into()),
+                timestamp: 0.0,
             }))],
             tools: None,
         }
@@ -1337,7 +1358,7 @@ mod tests {
 
     fn event_name(event: &AssistantMessageEvent) -> &'static str {
         match event {
-            AssistantMessageEvent::Start => "start",
+            AssistantMessageEvent::Start { .. } => "start",
             AssistantMessageEvent::TextStart { .. } => "text_start",
             AssistantMessageEvent::TextDelta { .. } => "text_delta",
             AssistantMessageEvent::TextEnd { .. } => "text_end",
@@ -1357,7 +1378,7 @@ mod tests {
     fn empty_system_prompt_is_omitted_from_serialized_context() {
         let without_system_prompt = context("hi");
         let with_empty_system_prompt = Context {
-            system_prompt: Some(String::new()),
+            system_prompt: Some((String::new()).into()),
             ..context("hi")
         };
 
@@ -1379,13 +1400,98 @@ mod tests {
         );
     }
 
-    /// Pins pi `src/providers/faux.ts:269-278`; Rust strings keep surrogate pairs intact.
+    /// Pins pi `src/providers/faux.ts:269-278` exact UTF-16 `slice` boundaries.
     #[test]
-    fn token_sized_chunks_count_utf16_units_without_losing_scalars() {
-        let chunks = split_string_by_token_size("abc😀defg", 1, 1);
-        assert_eq!(chunks, ["abc", "😀de", "fg"]);
-        assert_eq!(chunks.concat(), "abc😀defg");
-        assert!(chunks.iter().all(|chunk| chunk.encode_utf16().count() <= 4));
+    fn token_sized_chunks_split_astral_pairs_exactly_like_pi() {
+        for (source, expected) in [
+            (
+                "ab😀X",
+                vec![&[0x61, 0x62, 0xd83d, 0xde00][..], &[0x58][..]],
+            ),
+            (
+                "abc😀defg",
+                vec![
+                    &[0x61, 0x62, 0x63, 0xd83d][..],
+                    &[0xde00, 0x64, 0x65, 0x66][..],
+                    &[0x67][..],
+                ],
+            ),
+            (
+                "abcd😀X",
+                vec![&[0x61, 0x62, 0x63, 0x64][..], &[0xd83d, 0xde00, 0x58][..]],
+            ),
+        ] {
+            let source = JsString::from(source);
+            let chunks = split_string_by_token_size(&source, 1.0, 1.0);
+            assert_eq!(
+                chunks
+                    .iter()
+                    .map(|chunk| chunk.as_utf16())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(join_js_strings(chunks, &JsString::from("")), source);
+        }
+        let split = split_string_by_token_size(&JsString::from("abc😀defg"), 1.0, 1.0);
+        assert_eq!(
+            serde_json::to_string(&split[0]).expect("high-surrogate JSON"),
+            r#""abc\ud83d""#
+        );
+        assert_eq!(
+            serde_json::to_string(&split[1]).expect("low-surrogate JSON"),
+            r#""\ude00def""#
+        );
+    }
+
+    /// Pins pi `src/providers/faux.ts:269-278,436-443,538`: public numeric
+    /// options retain JavaScript-number inputs and coerce only when consumed.
+    #[test]
+    fn fractional_nonfinite_and_signed_faux_numbers_follow_javascript_coercion() {
+        let source = JsString::from("abcdefghijkl");
+        assert_eq!(
+            split_string_by_token_size(&source, 1.5, 1.5)
+                .into_iter()
+                .map(|chunk| chunk.to_utf8().expect("ASCII chunk"))
+                .collect::<Vec<_>>(),
+            vec!["abcdef".to_owned(), "ghijkl".to_owned()]
+        );
+        assert_eq!(
+            split_string_by_token_size(&source, f64::INFINITY, f64::INFINITY),
+            vec![JsString::default()]
+        );
+        assert_eq!(
+            split_string_by_token_size(&source, f64::NAN, f64::NAN),
+            vec![JsString::default()]
+        );
+
+        assert_eq!(normalize_pending_fetches(Some(-1.0)), 0.0);
+        assert_eq!(normalize_pending_fetches(Some(1.9)), 1.0);
+        assert!(normalize_pending_fetches(Some(f64::NAN)).is_nan());
+        assert_eq!(
+            normalize_pending_fetches(Some(f64::INFINITY)),
+            f64::INFINITY
+        );
+
+        let core = create_faux_core(RegisterFauxProviderOptions {
+            token_size: Some(FauxTokenSizeOptions {
+                min: Some(-2.0),
+                max: Some(-1.0),
+            }),
+            deferred: Some(FauxDeferredOptions {
+                pending_fetches: Some(f64::NAN),
+                poll_after_ms: None,
+            }),
+            ..Default::default()
+        });
+        assert_eq!(core.inner.min_token_size, 1.0);
+        assert_eq!(core.inner.max_token_size, 1.0);
+        assert!(
+            core.inner
+                .deferred_options
+                .pending_fetches
+                .unwrap()
+                .is_nan()
+        );
     }
 
     /// Ports pi `test/faux-provider.test.ts:31-68`.
@@ -1397,7 +1503,12 @@ mod tests {
             faux_assistant_message(
                 vec![
                     faux_thinking("think"),
-                    faux_tool_call("echo", serde_json::json!({"text": "hi"}), None),
+                    faux_tool_call(
+                        "echo",
+                        JsonObject::try_from(serde_json::json!({"text": "hi"}))
+                            .expect("object arguments"),
+                        None,
+                    ),
                     faux_text("done"),
                 ],
                 FauxAssistantMessageOptions {
@@ -1411,7 +1522,7 @@ mod tests {
             &core,
             &model,
             &Context {
-                system_prompt: Some("Be concise.".to_owned()),
+                system_prompt: Some(("Be concise.".to_owned()).into()),
                 ..context("hi there")
             },
             SimpleStreamOptions::default(),
@@ -1419,11 +1530,11 @@ mod tests {
         .await;
         assert_eq!(response.content.len(), 3);
         assert_eq!(response.stop_reason, StopReason::ToolUse);
-        assert!(response.usage.input.as_number() > 0.0);
-        assert!(response.usage.output.as_number() > 0.0);
+        assert!(response.usage.input > 0.0);
+        assert!(response.usage.output > 0.0);
         assert_eq!(
-            response.usage.total_tokens.as_number(),
-            response.usage.input.as_number() + response.usage.output.as_number()
+            response.usage.total_tokens,
+            response.usage.input + response.usage.output
         );
         assert_eq!(core.state().call_count(), 1);
     }
@@ -1561,10 +1672,10 @@ mod tests {
         let usage = complete(&core, &model, &context("hello 😀"), Default::default()).await;
         let prompt = "user:hello 😀";
         assert_eq!(
-            usage.usage.input.as_number(),
+            usage.usage.input,
             prompt.encode_utf16().count().div_ceil(4) as f64
         );
-        assert_eq!(usage.usage.output.as_number(), 1.0);
+        assert_eq!(usage.usage.output, 1.0);
     }
 
     /// Ports pi `test/faux-provider.test.ts:266-345`.
@@ -1594,13 +1705,13 @@ mod tests {
             cached_options("session-1", CacheRetention::Short),
         )
         .await;
-        assert_eq!(first.usage.cache_read.as_number(), 0.0);
-        assert!(first.usage.cache_write.as_number() > 0.0);
+        assert_eq!(first.usage.cache_read, 0.0);
+        assert!(first.usage.cache_write > 0.0);
         ctx.messages.push(Message::Assistant(Box::new(first)));
         ctx.messages.push(Message::User(Box::new(UserMessage {
             role: UserRole::User,
-            content: UserContent::Text("follow up".to_owned()),
-            timestamp: 1,
+            content: UserContent::Text(("follow up".to_owned()).into()),
+            timestamp: 1.0,
         })));
         let second = complete(
             &core,
@@ -1609,7 +1720,7 @@ mod tests {
             cached_options("session-1", CacheRetention::Short),
         )
         .await;
-        assert!(second.usage.cache_read.as_number() > 0.0);
+        assert!(second.usage.cache_read > 0.0);
         let separate = complete(
             &core,
             &model,
@@ -1617,7 +1728,7 @@ mod tests {
             cached_options("session-2", CacheRetention::Short),
         )
         .await;
-        assert_eq!(separate.usage.cache_read.as_number(), 0.0);
+        assert_eq!(separate.usage.cache_read, 0.0);
         let none = complete(
             &core,
             &model,
@@ -1625,8 +1736,8 @@ mod tests {
             cached_options("session-1", CacheRetention::None),
         )
         .await;
-        assert_eq!(none.usage.cache_read.as_number(), 0.0);
-        assert_eq!(none.usage.cache_write.as_number(), 0.0);
+        assert_eq!(none.usage.cache_read, 0.0);
+        assert_eq!(none.usage.cache_write, 0.0);
     }
 
     /// Ports pi `test/faux-provider.test.ts:347-430`.
@@ -1634,8 +1745,8 @@ mod tests {
     async fn fixed_chunks_stream_exact_content_event_order() {
         let core = create_faux_core(RegisterFauxProviderOptions {
             token_size: Some(FauxTokenSizeOptions {
-                min: Some(1),
-                max: Some(1),
+                min: Some(1.0),
+                max: Some(1.0),
             }),
             ..Default::default()
         });
@@ -1645,7 +1756,7 @@ mod tests {
                 vec![
                     faux_thinking("go"),
                     faux_text("ok"),
-                    faux_tool_call("echo", serde_json::json!({}), Some("tool-1".to_owned())),
+                    faux_tool_call("echo", JsonObject::new(), Some("tool-1".into())),
                 ],
                 FauxAssistantMessageOptions {
                     stop_reason: Some(StopReason::ToolUse),
@@ -1684,6 +1795,45 @@ mod tests {
         );
     }
 
+    /// Pins pi `types.ts:536-546` and `src/providers/faux.ts:327-433`:
+    /// each emitted event exposes the exact snapshot after that transition.
+    #[tokio::test]
+    async fn emitted_partial_snapshots_track_faux_text_deltas() {
+        let core = create_faux_core(RegisterFauxProviderOptions {
+            token_size: Some(FauxTokenSizeOptions {
+                min: Some(1.0),
+                max: Some(1.0),
+            }),
+            ..Default::default()
+        });
+        let model = core.get_model(None).expect("model");
+        core.set_responses(vec![
+            faux_assistant_message(
+                vec![faux_text("abc😀defg")],
+                FauxAssistantMessageOptions::default(),
+            )
+            .into(),
+        ]);
+        let events = events(&core, &model, &context("hi"), Default::default()).await;
+        let mut accumulated = JsString::new();
+        for event in &events {
+            if let AssistantMessageEvent::TextDelta { delta, partial, .. } = event {
+                accumulated.push_str(delta);
+                let AssistantContent::Text(text) = &partial.content[0] else {
+                    panic!("text snapshot")
+                };
+                assert_eq!(text.text, accumulated);
+            }
+            if !matches!(
+                event,
+                AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. }
+            ) {
+                assert!(event.partial().is_some());
+            }
+        }
+        assert_eq!(accumulated, "abc😀defg");
+    }
+
     /// Ports pi `test/faux-provider.test.ts:432-503`.
     #[tokio::test]
     async fn explicit_errors_and_preaborted_requests_are_terminal_errors() {
@@ -1698,7 +1848,7 @@ mod tests {
                     "partial",
                     FauxAssistantMessageOptions {
                         stop_reason: Some(stop_reason),
-                        error_message: Some("terminal".to_owned()),
+                        error_message: Some("terminal".into()),
                         ..Default::default()
                     },
                 )
@@ -1748,15 +1898,18 @@ mod tests {
             faux_thinking("abcdefghijklmnopqrstuvwxyz"),
             faux_tool_call(
                 "echo",
-                serde_json::json!({"text": "abcdefghijklmnopqrstuvwxyz", "count": 123456789}),
-                Some("tool-1".to_owned()),
+                JsonObject::try_from(
+                    serde_json::json!({"text": "abcdefghijklmnopqrstuvwxyz", "count": 123456789}),
+                )
+                .expect("object arguments"),
+                Some("tool-1".into()),
             ),
         ] {
             let core = create_faux_core(RegisterFauxProviderOptions {
                 tokens_per_second: Some(100.0),
                 token_size: Some(FauxTokenSizeOptions {
-                    min: Some(3),
-                    max: Some(3),
+                    min: Some(3.0),
+                    max: Some(3.0),
                 }),
                 ..Default::default()
             });
@@ -1807,8 +1960,8 @@ mod tests {
     async fn deferred_responses_poll_replay_and_cancel() {
         let core = create_faux_core(RegisterFauxProviderOptions {
             deferred: Some(FauxDeferredOptions {
-                pending_fetches: Some(1),
-                poll_after_ms: Some(25),
+                pending_fetches: Some(1.0),
+                poll_after_ms: Some(25.0),
             }),
             ..Default::default()
         });
@@ -1823,7 +1976,7 @@ mod tests {
         let submitted = complete(&core, &model, &context("hi"), submit_options).await;
         assert_eq!(submitted.stop_reason, StopReason::Deferred);
         let handle = submitted.deferred.expect("deferred handle");
-        assert_eq!(handle.poll_after_ms, Some(25));
+        assert_eq!(handle.poll_after_ms, Some(25.0));
 
         let first = core
             .fetch_deferred(&model, &handle, DeferredFetchOptions::default())

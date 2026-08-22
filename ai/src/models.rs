@@ -508,9 +508,10 @@ impl Provider for CreatedProvider {
                     cancel.await.map_err(|message| {
                         ModelsError::new(
                             ModelsErrorCode::Provider,
-                            message
-                                .error_message
-                                .unwrap_or_else(|| "Deferred cancellation failed".to_owned()),
+                            message.error_message.map_or_else(
+                                || "Deferred cancellation failed".to_owned(),
+                                |message| message.to_utf8_lossy(),
+                            ),
                             None,
                         )
                     })
@@ -1242,7 +1243,9 @@ impl Models {
         let model = model.clone();
         let models = self.clone();
         Box::pin(async move {
-            let Some(mut result) = models.get_auth(model.provider.0.clone(), overrides).await?
+            let Some(mut result) = models
+                .get_auth(model.provider.0.to_utf8_lossy(), overrides)
+                .await?
             else {
                 return Ok(None);
             };
@@ -1698,10 +1701,10 @@ fn error_event(model: &Model, message: String) -> AssistantMessageEvent {
         model.api.clone(),
         model.provider.clone(),
         model.id.clone(),
-        now_ms() as i64,
+        now_ms(),
     );
     error.stop_reason = StopReason::Error;
-    error.error_message = Some(message);
+    error.error_message = Some(message.into());
     AssistantMessageEvent::Error {
         reason: ErrorStopReason::Error,
         error,
@@ -1754,8 +1757,7 @@ fn now_ms() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs_f64()
-        * 1_000.0
+        .as_millis() as f64
 }
 
 const EXTENDED_THINKING_LEVELS: [ModelThinkingLevel; 7] = [
@@ -1769,29 +1771,22 @@ const EXTENDED_THINKING_LEVELS: [ModelThinkingLevel; 7] = [
 ];
 
 pub fn calculate_cost<'a>(model: &Model, usage: &'a mut Usage) -> &'a UsageCost {
-    let input_tokens = usage
-        .input
-        .js_add(&usage.cache_read)
-        .js_add(&usage.cache_write)
-        .as_number();
+    let input_tokens = usage.input + usage.cache_read + usage.cache_write;
     let mut rates = &model.cost.rates;
     let mut matched_threshold = None;
     for tier in model.cost.tiers.iter().flatten() {
-        let threshold = tier.input_tokens_above as f64;
+        let threshold = tier.input_tokens_above;
         if input_tokens > threshold && matched_threshold.is_none_or(|matched| threshold > matched) {
             rates = &tier.rates;
             matched_threshold = Some(threshold);
         }
     }
 
-    let long_write = usage
-        .cache_write_1h
-        .as_ref()
-        .map_or(0.0, crate::types::UsageValue::as_number);
-    let short_write = usage.cache_write.as_number() - long_write;
-    usage.cost.input = rates.input / 1_000_000.0 * usage.input.as_number();
-    usage.cost.output = rates.output / 1_000_000.0 * usage.output.as_number();
-    usage.cost.cache_read = rates.cache_read / 1_000_000.0 * usage.cache_read.as_number();
+    let long_write = usage.cache_write_1h.as_ref().copied().unwrap_or(0.0);
+    let short_write = usage.cache_write - long_write;
+    usage.cost.input = rates.input / 1_000_000.0 * usage.input;
+    usage.cost.output = rates.output / 1_000_000.0 * usage.output;
+    usage.cost.cache_read = rates.cache_read / 1_000_000.0 * usage.cache_read;
     usage.cost.cache_write =
         (rates.cache_write * short_write + rates.input * 2.0 * long_write) / 1_000_000.0;
     usage.cost.total =
@@ -2162,8 +2157,8 @@ mod tests {
             thinking_level_map: None,
             input: vec![ModelInput::Text],
             cost: ModelCost::default(),
-            context_window: 10_000,
-            max_tokens: 1_000,
+            context_window: 10_000.0,
+            max_tokens: 1_000.0,
             sampling_params: None,
             headers: None,
             compat: None,
@@ -2231,11 +2226,12 @@ mod tests {
                 model.api.clone(),
                 model.provider.clone(),
                 model.id.clone(),
-                0,
+                0.0,
             );
+            let partial = Arc::new(message.clone());
             message.stop_reason = StopReason::Stop;
             AssistantMessageEventStream::from_events(vec![
-                AssistantMessageEvent::Start,
+                AssistantMessageEvent::Start { partial },
                 AssistantMessageEvent::Done {
                     reason: SuccessfulStopReason::Stop,
                     message,
@@ -2291,7 +2287,7 @@ mod tests {
                 cache_write: 6.25,
             },
             tiers: Some(vec![ModelCostTier {
-                input_tokens_above: 272_000,
+                input_tokens_above: 272_000.0,
                 rates: ModelCostRates {
                     input: 10.0,
                     output: 45.0,
@@ -2301,11 +2297,11 @@ mod tests {
             }]),
         };
         let usage = |cache_write: u64| Usage {
-            input: 200_000.into(),
-            output: 100_000.into(),
-            cache_read: 72_000.into(),
-            cache_write: cache_write.into(),
-            total_tokens: (372_000 + cache_write).into(),
+            input: 200_000.0,
+            output: 100_000.0,
+            cache_read: 72_000.0,
+            cache_write: cache_write as f64,
+            total_tokens: 372_000.0 + cache_write as f64,
             ..Default::default()
         };
         let mut short = usage(0);

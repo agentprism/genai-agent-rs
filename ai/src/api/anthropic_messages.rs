@@ -15,14 +15,15 @@ use crate::event_stream::{
 use crate::models::calculate_cost;
 use crate::types::{
     AnthropicAllowedFallbackModel, AssistantContent, AssistantMessage, CacheRetention, Context,
-    ErrorStopReason, FetchFunction, Message, Model, ProviderBodyStream, ProviderEnv,
-    ProviderHeaders, ProviderHttpRequest, ProviderHttpResponse, ProviderResponse,
+    ErrorStopReason, FetchFunction, JsonObject, JsonValue, Message, Model, ProviderBodyStream,
+    ProviderEnv, ProviderHeaders, ProviderHttpRequest, ProviderHttpResponse, ProviderResponse,
     SimpleStreamOptions, StopReason, StreamOptions, SuccessfulStopReason, TextContent,
-    ThinkingContent, ThinkingLevel, Tool, ToolCall, ToolChoice, ToolResultMessage, UsageValue,
-    UserContent, UserContentBlock,
+    ThinkingContent, ThinkingLevel, Tool, ToolCall, ToolChoice, ToolResultMessage, UserContent,
+    UserContentBlock,
 };
 use crate::utils::deferred_tools::split_deferred_tools;
-use crate::utils::json_parse::{parse_json_with_repair, parse_streaming_json};
+use crate::utils::ecma_json::provider_string;
+use crate::utils::json_parse::parse_json_with_repair;
 use crate::utils::pi_user_agent::get_pi_user_agent;
 use crate::utils::provider_env::get_provider_env_value;
 use crate::utils::provider_retry::{
@@ -147,7 +148,7 @@ pub struct AnthropicOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking_budget_tokens: Option<u64>,
+    pub thinking_budget_tokens: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<AnthropicEffort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -352,51 +353,57 @@ fn from_claude_code_name(name: &str, tools: Option<&[Tool]>) -> String {
         .map_or_else(|| name.to_owned(), |tool| tool.name.clone())
 }
 
-fn convert_content_blocks(content: &[UserContentBlock]) -> Value {
+fn convert_content_blocks(content: &[UserContentBlock]) -> JsonValue {
     let has_images = content
         .iter()
         .any(|block| matches!(block, UserContentBlock::Image(_)));
     if !has_images {
-        return Value::String(sanitize_surrogates(
-            &content
-                .iter()
-                .filter_map(|block| match block {
-                    UserContentBlock::Text(text) => Some(text.text.as_str()),
-                    UserContentBlock::Image(_) | UserContentBlock::Unknown(_) => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ));
+        return JsonValue::String(
+            sanitize_surrogates(&crate::types::JsString::join_refs(
+                content.iter().filter_map(|block| match block {
+                    UserContentBlock::Text(text) => Some(&text.text),
+                    UserContentBlock::Image(_) => None,
+                }),
+                "\n",
+            ))
+            .into(),
+        );
     }
     let mut blocks = content
         .iter()
-        .filter_map(|block| match block {
+        .map(|block| match block {
             UserContentBlock::Text(text) => {
-                Some(json!({"type":"text", "text":sanitize_surrogates(&text.text)}))
+                JsonValue::from(json!({"type":"text", "text":sanitize_surrogates(&text.text)}))
             }
-            UserContentBlock::Image(image) => Some(json!({
-                "type":"image",
-                "source":{
-                    "type":"base64",
-                    "media_type":image.mime_type,
-                    "data":image.data,
-                }
-            })),
-            UserContentBlock::Unknown(_) => None,
+            UserContentBlock::Image(image) => {
+                let mut source = JsonObject::new();
+                source.insert("type", "base64");
+                source.insert("media_type", image.mime_type.clone());
+                source.insert("data", image.data.clone());
+                let mut block = JsonObject::new();
+                block.insert("type", "image");
+                block.insert("source", JsonValue::Object(source));
+                JsonValue::Object(block)
+            }
         })
         .collect::<Vec<_>>();
-    if !blocks
-        .iter()
-        .any(|block| block.get("type").and_then(Value::as_str) == Some("text"))
-    {
-        blocks.insert(0, json!({"type":"text", "text":"(see attached image)"}));
+    if !blocks.iter().any(|block| {
+        block
+            .get("type")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|kind| kind == "text")
+    }) {
+        blocks.insert(
+            0,
+            JsonValue::from(json!({"type":"text", "text":"(see attached image)"})),
+        );
     }
-    Value::Array(blocks)
+    JsonValue::Array(blocks)
 }
 
-fn add_cache_control(block: &mut Value, cache_control: &Value) {
+fn add_ecma_cache_control(block: &mut JsonValue, cache_control: &Value) {
     if let Some(block) = block.as_object_mut() {
-        block.insert("cache_control".to_owned(), cache_control.clone());
+        block.insert("cache_control", JsonValue::from(cache_control.clone()));
     }
 }
 
@@ -406,7 +413,7 @@ fn convert_tool_result(
     deferred_tool_names: &IndexSet<String>,
     loaded_tool_names: &mut IndexSet<String>,
     normalize_tool_name: &dyn Fn(&str) -> String,
-) -> (Value, Vec<Value>) {
+) -> (JsonValue, Vec<JsonValue>) {
     let mut references = Vec::new();
     for name in message.added_tool_names.iter().flatten() {
         let normalized = normalize_tool_name(name);
@@ -414,48 +421,45 @@ fn convert_tool_result(
             continue;
         }
         loaded_tool_names.insert(normalized);
-        references.push(json!({
-            "type":"tool_reference",
-            "tool_name":if is_oauth { to_claude_code_name(name) } else { name.clone() },
-        }));
+        let mut reference = JsonObject::new();
+        reference.insert("type", "tool_reference");
+        reference.insert(
+            "tool_name",
+            if is_oauth {
+                JsonValue::from(to_claude_code_name(name))
+            } else {
+                provider_string(name)
+            },
+        );
+        references.push(JsonValue::Object(reference));
     }
     let converted_content = convert_content_blocks(&message.content);
+    let has_references = !references.is_empty();
     let content = if references.is_empty() {
         converted_content.clone()
     } else {
-        Value::Array(references)
+        JsonValue::Array(references)
     };
-    let tool_result = json!({
-        "type":"tool_result",
-        "tool_use_id":message.tool_call_id,
-        "content":content,
-        "is_error":message.is_error,
-    });
-    let sibling_content = if references_are_empty(&tool_result) {
+    let mut tool_result = JsonObject::new();
+    tool_result.insert("type", "tool_result");
+    tool_result.insert("tool_use_id", provider_string(&message.tool_call_id));
+    tool_result.insert("content", content);
+    tool_result.insert("is_error", message.is_error);
+    let sibling_content = if !has_references {
         Vec::new()
     } else {
         match converted_content {
-            Value::String(text) => vec![json!({"type":"text", "text":text})],
-            Value::Array(blocks) => blocks,
+            JsonValue::String(text) => {
+                let mut block = JsonObject::new();
+                block.insert("type", "text");
+                block.insert("text", text);
+                vec![JsonValue::Object(block)]
+            }
+            JsonValue::Array(blocks) => blocks,
             _ => Vec::new(),
         }
     };
-    (tool_result, sibling_content)
-}
-
-fn references_are_empty(tool_result: &Value) -> bool {
-    tool_result
-        .get("content")
-        .and_then(Value::as_array)
-        .is_none_or(Vec::is_empty)
-        || tool_result
-            .get("content")
-            .and_then(Value::as_array)
-            .is_some_and(|blocks| {
-                !blocks.iter().any(|block| {
-                    block.get("type").and_then(Value::as_str) == Some("tool_reference")
-                })
-            })
+    (JsonValue::Object(tool_result), sibling_content)
 }
 
 fn convert_messages(
@@ -465,40 +469,46 @@ fn convert_messages(
     allow_empty_signature: bool,
     deferred_tool_names: &IndexSet<String>,
     normalize_tool_name: &dyn Fn(&str) -> String,
-) -> Vec<Value> {
+) -> Vec<JsonValue> {
     let mut params = Vec::new();
     let mut loaded_tool_names = IndexSet::new();
     let mut index = 0;
     while index < messages.len() {
         match &messages[index] {
             Message::User(message) => match &message.content {
-                UserContent::Text(text) if !text.trim().is_empty() => params.push(json!({
-                    "role":"user",
-                    "content":sanitize_surrogates(text),
-                })),
+                UserContent::Text(text) if !text.is_blank() => {
+                    params.push(JsonValue::from(json!({
+                        "role":"user",
+                        "content":sanitize_surrogates(text),
+                    })))
+                }
                 UserContent::Text(_) => {}
                 UserContent::Blocks(content) => {
                     let blocks = content
                         .iter()
                         .filter_map(|block| match block {
-                            UserContentBlock::Text(text) if text.text.trim().is_empty() => None,
-                            UserContentBlock::Text(text) => Some(json!({
+                            UserContentBlock::Text(text) if text.text.is_blank() => None,
+                            UserContentBlock::Text(text) => Some(JsonValue::from(json!({
                                 "type":"text",
                                 "text":sanitize_surrogates(&text.text),
-                            })),
-                            UserContentBlock::Image(image) => Some(json!({
-                                "type":"image",
-                                "source":{
-                                    "type":"base64",
-                                    "media_type":image.mime_type,
-                                    "data":image.data,
-                                }
-                            })),
-                            UserContentBlock::Unknown(_) => None,
+                            }))),
+                            UserContentBlock::Image(image) => {
+                                let mut source = JsonObject::new();
+                                source.insert("type", "base64");
+                                source.insert("media_type", image.mime_type.clone());
+                                source.insert("data", image.data.clone());
+                                let mut image_block = JsonObject::new();
+                                image_block.insert("type", "image");
+                                image_block.insert("source", JsonValue::Object(source));
+                                Some(JsonValue::Object(image_block))
+                            }
                         })
                         .collect::<Vec<_>>();
                     if !blocks.is_empty() {
-                        params.push(json!({"role":"user", "content":blocks}));
+                        let mut message = JsonObject::new();
+                        message.insert("role", "user");
+                        message.insert("content", JsonValue::Array(blocks));
+                        params.push(JsonValue::Object(message));
                     }
                 }
             },
@@ -506,50 +516,61 @@ fn convert_messages(
                 let mut blocks = Vec::new();
                 for block in &message.content {
                     match block {
-                        AssistantContent::Text(text) if !text.text.trim().is_empty() => blocks.push(
-                            json!({"type":"text", "text":sanitize_surrogates(&text.text)}),
-                        ),
+                        AssistantContent::Text(text) if !text.text.is_blank() => {
+                            blocks.push(JsonValue::from(
+                                json!({"type":"text", "text":sanitize_surrogates(&text.text)}),
+                            ))
+                        }
                         AssistantContent::Text(_) => {}
                         AssistantContent::Thinking(thinking) if thinking.redacted == Some(true) => {
-                            let mut redacted = Map::from_iter([(
-                                "type".to_owned(),
-                                Value::String("redacted_thinking".to_owned()),
-                            )]);
+                            let mut redacted = JsonObject::new();
+                            redacted.insert("type", "redacted_thinking");
                             if let Some(signature) = &thinking.thinking_signature {
-                                redacted.insert("data".to_owned(), Value::String(signature.clone()));
+                                redacted.insert("data", provider_string(signature));
                             }
-                            blocks.push(Value::Object(redacted));
+                            blocks.push(JsonValue::Object(redacted));
                         }
                         AssistantContent::Thinking(thinking) => {
-                            let signature = thinking.thinking_signature.as_deref();
-                            let has_signature = signature.is_some_and(|value| !value.trim().is_empty());
-                            if thinking.thinking.trim().is_empty() && !has_signature {
+                            let signature = thinking.thinking_signature.as_ref();
+                            let has_signature = signature.is_some_and(|value| !value.is_blank());
+                            if thinking.thinking.is_blank() && !has_signature {
                                 continue;
                             }
                             if has_signature || allow_empty_signature {
-                                blocks.push(json!({
-                                    "type":"thinking",
-                                    "thinking":sanitize_surrogates(&thinking.thinking),
-                                    "signature":signature.unwrap_or_default(),
-                                }));
+                                let mut block = JsonObject::new();
+                                block.insert("type", "thinking");
+                                block.insert("thinking", sanitize_surrogates(&thinking.thinking));
+                                block.insert("signature", signature.cloned().unwrap_or_default());
+                                blocks.push(JsonValue::Object(block));
                             } else {
-                                blocks.push(json!({
+                                blocks.push(JsonValue::from(json!({
                                     "type":"text",
                                     "text":sanitize_surrogates(&thinking.thinking),
-                                }));
+                                })));
                             }
                         }
-                        AssistantContent::ToolCall(call) => blocks.push(json!({
-                            "type":"tool_use",
-                            "id":call.id,
-                            "name":if is_oauth { to_claude_code_name(&call.name) } else { call.name.clone() },
-                            "input":if call.arguments.is_null() { Value::Object(Map::new()) } else { call.arguments.clone() },
-                        })),
-                        AssistantContent::Unknown(_) => {}
+                        AssistantContent::ToolCall(call) => {
+                            let mut block = JsonObject::new();
+                            block.insert("type", "tool_use");
+                            block.insert("id", provider_string(&call.id));
+                            block.insert(
+                                "name",
+                                if is_oauth {
+                                    JsonValue::from(to_claude_code_name(&call.name))
+                                } else {
+                                    provider_string(&call.name)
+                                },
+                            );
+                            block.insert("input", call.arguments.to_provider_json());
+                            blocks.push(JsonValue::Object(block));
+                        }
                     }
                 }
                 if !blocks.is_empty() {
-                    params.push(json!({"role":"assistant", "content":blocks}));
+                    let mut message = JsonObject::new();
+                    message.insert("role", "assistant");
+                    message.insert("content", JsonValue::Array(blocks));
+                    params.push(JsonValue::Object(message));
                 }
             }
             Message::ToolResult(_) => {
@@ -569,7 +590,10 @@ fn convert_messages(
                     next += 1;
                 }
                 tool_results.extend(sibling_content);
-                params.push(json!({"role":"user", "content":tool_results}));
+                let mut message = JsonObject::new();
+                message.insert("role", "user");
+                message.insert("content", JsonValue::Array(tool_results));
+                params.push(JsonValue::Object(message));
                 index = next - 1;
             }
         }
@@ -578,29 +602,32 @@ fn convert_messages(
 
     if let Some(cache_control) = cache_control
         && let Some(last) = params.last_mut()
-        && last.get("role").and_then(Value::as_str) == Some("user")
+        && last
+            .get("role")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|role| role == "user")
         && let Some(content) = last
             .as_object_mut()
             .and_then(|message| message.get_mut("content"))
     {
         match content {
-            Value::Array(blocks) => {
+            JsonValue::Array(blocks) => {
                 if let Some(block) = blocks.last_mut()
                     && matches!(
-                        block.get("type").and_then(Value::as_str),
-                        Some("text" | "image" | "tool_result")
+                        block.get("type").and_then(JsonValue::as_str),
+                        Some(kind) if matches!(kind.as_str(), "text" | "image" | "tool_result")
                     )
                 {
-                    add_cache_control(block, cache_control);
+                    add_ecma_cache_control(block, cache_control);
                 }
             }
-            Value::String(text) => {
+            JsonValue::String(text) => {
                 let text = text.clone();
-                *content = Value::Array(vec![json!({
-                    "type":"text",
-                    "text":text,
-                    "cache_control":cache_control,
-                })]);
+                let mut block = JsonObject::new();
+                block.insert("type", "text");
+                block.insert("text", text);
+                block.insert("cache_control", JsonValue::from(cache_control.clone()));
+                *content = JsonValue::Array(vec![JsonValue::Object(block)]);
             }
             _ => {}
         }
@@ -686,13 +713,13 @@ fn build_params(
     context: &Context,
     is_oauth: bool,
     options: &AnthropicOptions,
-) -> Result<Value, AnthropicError> {
+) -> Result<JsonValue, AnthropicError> {
     let cache_control = cache_control(model, options);
     let compat = get_anthropic_compat(model);
     let transformed = transform_messages(
         &context.messages,
         model,
-        Some(&|id, _, _| normalize_anthropic_tool_call_id(id)),
+        Some(&|id, _, _| normalize_anthropic_tool_call_id(&id.to_utf8_lossy()).into()),
     );
     let normalize_tool_name = |name: &str| {
         if is_oauth {
@@ -728,15 +755,14 @@ fn build_params(
         &deferred_names,
         &normalize_tool_name,
     );
-    let mut params = Map::from_iter([
-        ("model".to_owned(), Value::String(model.id.clone())),
-        ("messages".to_owned(), Value::Array(messages)),
-        (
-            "max_tokens".to_owned(),
-            Value::from(options.stream.max_tokens.unwrap_or(model.max_tokens)),
-        ),
-        ("stream".to_owned(), Value::Bool(true)),
-    ]);
+    let mut params = JsonObject::new();
+    params.insert("model", model.id.clone());
+    params.insert("messages", JsonValue::Array(messages));
+    params.insert(
+        "max_tokens",
+        options.stream.max_tokens.unwrap_or(model.max_tokens),
+    );
+    params.insert("stream", true);
 
     if is_oauth {
         let mut system = vec![system_block(CLAUDE_CODE_IDENTITY, cache_control.as_ref())];
@@ -747,15 +773,21 @@ fn build_params(
         {
             system.push(system_block(prompt, cache_control.as_ref()));
         }
-        params.insert("system".to_owned(), Value::Array(system));
+        params.insert(
+            "system",
+            JsonValue::Array(system.into_iter().map(JsonValue::from).collect()),
+        );
     } else if let Some(prompt) = context
         .system_prompt
         .as_deref()
         .filter(|prompt| !prompt.is_empty())
     {
         params.insert(
-            "system".to_owned(),
-            Value::Array(vec![system_block(prompt, cache_control.as_ref())]),
+            "system",
+            JsonValue::Array(vec![JsonValue::from(system_block(
+                prompt,
+                cache_control.as_ref(),
+            ))]),
         );
     }
 
@@ -763,10 +795,7 @@ fn build_params(
         && options.thinking_enabled != Some(true)
         && compat.supports_temperature
     {
-        params.insert(
-            "temperature".to_owned(),
-            serde_json::Number::from_f64(temperature).map_or(Value::Null, Value::Number),
-        );
+        params.insert("temperature", temperature);
     }
 
     if !immediate.is_empty() || !deferred.is_empty() {
@@ -776,7 +805,10 @@ fn build_params(
             .flatten();
         let mut tools = convert_tools(&immediate, is_oauth, &compat, immediate_cache, false)?;
         tools.extend(convert_tools(&deferred, is_oauth, &compat, None, true)?);
-        params.insert("tools".to_owned(), Value::Array(tools));
+        params.insert(
+            "tools",
+            JsonValue::Array(tools.into_iter().map(JsonValue::from).collect()),
+        );
     }
 
     if model.reasoning {
@@ -786,20 +818,24 @@ fn build_params(
                 .unwrap_or(AnthropicThinkingDisplay::Summarized);
             if compat.force_adaptive_thinking {
                 params.insert(
-                    "thinking".to_owned(),
-                    json!({"type":"adaptive", "display":display}),
+                    "thinking",
+                    JsonValue::from(json!({"type":"adaptive", "display":display})),
                 );
                 if let Some(effort) = options.effort {
-                    params.insert("output_config".to_owned(), json!({"effort":effort}));
+                    params.insert("output_config", JsonValue::from(json!({"effort":effort})));
                 }
             } else {
                 params.insert(
-                    "thinking".to_owned(),
-                    json!({
+                    "thinking",
+                    JsonValue::from(json!({
                         "type":"enabled",
-                        "budget_tokens":options.thinking_budget_tokens.filter(|budget| *budget != 0).unwrap_or(1_024),
+                        "budget_tokens":crate::types::js_f64_value(
+                            options.thinking_budget_tokens
+                                .filter(|budget| *budget != 0.0)
+                                .unwrap_or(1_024.0)
+                        ),
                         "display":display,
-                    }),
+                    })),
                 );
             }
         } else if options.thinking_enabled == Some(false)
@@ -809,7 +845,7 @@ fn build_params(
                 .and_then(|map| map.off.as_ref())
                 .is_none_or(Option::is_some)
         {
-            params.insert("thinking".to_owned(), json!({"type":"disabled"}));
+            params.insert("thinking", JsonValue::from(json!({"type":"disabled"})));
         }
     }
 
@@ -820,7 +856,7 @@ fn build_params(
         .and_then(|metadata| metadata.get("user_id"))
         .and_then(Value::as_str)
     {
-        params.insert("metadata".to_owned(), json!({"user_id":user_id}));
+        params.insert("metadata", JsonValue::from(json!({"user_id":user_id})));
     }
     if let Some(tool_choice) = &options.tool_choice {
         let value = match tool_choice {
@@ -829,27 +865,29 @@ fn build_params(
                 serde_json::to_value(tool_choice).map_err(AnthropicError::display)?
             }
         };
-        params.insert("tool_choice".to_owned(), value);
+        params.insert("tool_choice", JsonValue::from(value));
     }
     if !compat.allowed_fallback_models.is_empty() {
         params.insert(
-            "fallbacks".to_owned(),
-            Value::Array(
+            "fallbacks",
+            JsonValue::Array(
                 compat
                     .allowed_fallback_models
                     .iter()
-                    .map(|fallback| json!({"model":fallback.model}))
+                    .map(|fallback| JsonValue::from(json!({"model":fallback.model})))
                     .collect(),
             ),
         );
     }
-    Ok(Value::Object(params))
+    Ok(JsonValue::Object(params))
 }
 
 fn system_block(text: &str, cache_control: Option<&Value>) -> Value {
     let mut block = json!({"type":"text", "text":sanitize_surrogates(text)});
-    if let Some(cache_control) = cache_control {
-        add_cache_control(&mut block, cache_control);
+    if let Some(cache_control) = cache_control
+        && let Some(block) = block.as_object_mut()
+    {
+        block.insert("cache_control".to_owned(), cache_control.clone());
     }
     block
 }
@@ -907,18 +945,18 @@ pub fn stream_simple(
         return stream(model, context, base);
     }
     let adjusted = adjust_max_tokens_for_thinking(
-        base.stream.max_tokens.map(|value| value as f64),
-        model.max_tokens as f64,
+        base.stream.max_tokens,
+        model.max_tokens,
         reasoning,
         options.thinking_budgets.as_ref(),
     );
-    let max_tokens = clamp_max_tokens_to_context(model, context, adjusted.max_tokens as u64);
+    let max_tokens = clamp_max_tokens_to_context(model, context, adjusted.max_tokens);
     base.stream.max_tokens = Some(max_tokens);
     base.thinking_enabled = Some(true);
     base.thinking_budget_tokens = Some(
         adjusted
             .thinking_budget
-            .min(max_tokens.saturating_sub(1_024) as f64) as u64,
+            .min((max_tokens - 1_024.0).max(0.0)),
     );
     stream(model, context, base)
 }
@@ -959,7 +997,7 @@ fn fallback_effort(level: ThinkingLevel) -> AnthropicEffort {
 fn terminal_setup_error(model: &Model, message: &str) -> AssistantMessageEventStream {
     let mut output = pending_message(model);
     output.stop_reason = StopReason::Error;
-    output.error_message = Some(message.to_owned());
+    output.error_message = Some(message.into());
     AssistantMessageEventStream::from_events(vec![AssistantMessageEvent::Error {
         reason: ErrorStopReason::Error,
         error: output,
@@ -975,12 +1013,11 @@ fn pending_message(model: &Model) -> AssistantMessage {
     )
 }
 
-fn now_millis() -> i64 {
+fn now_millis() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
-        .unwrap_or(i64::MAX)
+        .unwrap_or_default()
+        .as_millis() as f64
 }
 
 async fn run_stream(
@@ -1017,7 +1054,7 @@ async fn run_stream(
         } else {
             StopReason::Error
         };
-        output.error_message = Some(error.message);
+        output.error_message = Some(error.message.into());
         let reason = if output.stop_reason == StopReason::Aborted {
             ErrorStopReason::Aborted
         } else {
@@ -1085,7 +1122,7 @@ async fn run_stream_inner(
         url: messages_url
             .unwrap_or_else(|| format!("{}/v1/messages", base_url.trim_end_matches('/'))),
         headers,
-        body: serde_json::to_vec(&params).map_err(AnthropicError::display)?,
+        body: crate::utils::ecma_json::stringify_provider_json(&params).into_bytes(),
         fetch,
         signal: options.stream.request.signal.clone(),
         timeout_ms: options.stream.request.timeout_ms,
@@ -1104,7 +1141,9 @@ async fn run_stream_inner(
             .map_err(AnthropicError::new)?;
     }
     sender
-        .send(AssistantMessageEvent::Start)
+        .send(AssistantMessageEvent::Start {
+            partial: Arc::new(output.clone()),
+        })
         .map_err(AnthropicError::display)?;
     process_sse_body(
         acquired.body,
@@ -1133,10 +1172,10 @@ async fn run_stream_inner(
     }
     if matches!(output.stop_reason, StopReason::Aborted | StopReason::Error) {
         return Err(AnthropicError::new(
-            output
-                .error_message
-                .clone()
-                .unwrap_or_else(|| "An unknown error occurred".to_owned()),
+            output.error_message.as_ref().map_or_else(
+                || "An unknown error occurred".to_owned(),
+                |message| message.to_utf8_lossy(),
+            ),
         ));
     }
     let reason = successful_stop_reason(output.stop_reason)
@@ -1428,7 +1467,7 @@ async fn acquire_sse(request: &AnthropicSseRequest) -> Result<AcquiredSse, Anthr
         return Err(AnthropicHttpError::http(status, headers, &body));
     }
     let metadata = ProviderResponse {
-        status: response.status,
+        status: f64::from(response.status),
         headers: response.headers,
     };
     Ok(AcquiredSse {
@@ -1826,19 +1865,22 @@ fn process_message_start(
     let Some(message) = event.get("message") else {
         return;
     };
-    output.response_id = message.get("id").and_then(Value::as_str).map(str::to_owned);
+    output.response_id = message.get("id").and_then(Value::as_str).map(Into::into);
     if let Some(response_model) = message.get("model").and_then(Value::as_str) {
-        output.model = response_model.to_owned();
+        output.model = response_model.into();
     }
     if output.model == model.id {
         usage_model.clone_from(model);
     } else if let Some(fallback) = compat
         .allowed_fallback_models
         .iter()
-        .find(|fallback| fallback.provider == model.provider && fallback.model == output.model)
+        .find(|fallback| fallback.provider == model.provider && output.model == fallback.model)
     {
         usage_model.clone_from(model);
-        usage_model.id.clone_from(&output.model);
+        usage_model.id = output
+            .model
+            .to_utf8()
+            .expect("provider response model originated as UTF-8");
         usage_model.cost.clone_from(&fallback.cost);
     } else {
         usage_model.clone_from(model);
@@ -1855,13 +1897,8 @@ fn process_message_start(
     update_usage_totals(usage_model, output);
 }
 
-fn js_or_zero(value: Option<&Value>) -> UsageValue {
-    let value: UsageValue = value.cloned().unwrap_or(Value::Null).into();
-    if value.is_truthy() {
-        value
-    } else {
-        0_u64.into()
-    }
+fn js_or_zero(value: Option<&Value>) -> f64 {
+    value.and_then(Value::as_f64).unwrap_or_default()
 }
 
 fn process_content_block_start(
@@ -1890,7 +1927,10 @@ fn process_content_block_start(
             )));
             blocks.insert(wire_index, ActiveBlock::Text { content_index });
             sender
-                .send(AssistantMessageEvent::TextStart { content_index })
+                .send(AssistantMessageEvent::TextStart {
+                    content_index: content_index as f64,
+                    partial: Arc::new(output.clone()),
+                })
                 .map_err(AnthropicError::display)?;
         }
         Some("thinking") => {
@@ -1905,31 +1945,27 @@ fn process_content_block_start(
                 .unwrap_or_default()
                 .to_owned();
             let mut content = ThinkingContent::new(&thinking);
-            content.thinking_signature = Some(signature.clone());
+            content.thinking_signature = Some(signature.clone().into());
             output.content.push(AssistantContent::Thinking(content));
             blocks.insert(wire_index, ActiveBlock::Thinking { content_index });
             sender
                 .send(AssistantMessageEvent::ThinkingStart {
-                    content_index,
-                    thinking: Some(thinking),
-                    thinking_signature: Some(signature),
-                    redacted: None,
+                    content_index: content_index as f64,
+                    partial: Arc::new(output.clone()),
                 })
                 .map_err(AnthropicError::display)?;
         }
         Some("redacted_thinking") => {
             let signature = block.get("data").and_then(Value::as_str).map(str::to_owned);
             let mut content = ThinkingContent::new("[Reasoning redacted]");
-            content.thinking_signature = signature.clone();
+            content.thinking_signature = signature.clone().map(Into::into);
             content.redacted = Some(true);
             output.content.push(AssistantContent::Thinking(content));
             blocks.insert(wire_index, ActiveBlock::Thinking { content_index });
             sender
                 .send(AssistantMessageEvent::ThinkingStart {
-                    content_index,
-                    thinking: Some("[Reasoning redacted]".to_owned()),
-                    thinking_signature: signature,
-                    redacted: Some(true),
+                    content_index: content_index as f64,
+                    partial: Arc::new(output.clone()),
                 })
                 .map_err(AnthropicError::display)?;
         }
@@ -1956,7 +1992,9 @@ fn process_content_block_start(
             output
                 .content
                 .push(AssistantContent::ToolCall(ToolCall::new(
-                    &id, &name, arguments,
+                    &id,
+                    &name,
+                    crate::types::JsonObject::try_from(arguments).unwrap_or_default(),
                 )));
             blocks.insert(
                 wire_index,
@@ -1967,10 +2005,8 @@ fn process_content_block_start(
             );
             sender
                 .send(AssistantMessageEvent::ToolCallStart {
-                    content_index,
-                    id,
-                    tool_name: name,
-                    namespace: None,
+                    content_index: content_index as f64,
+                    partial: Arc::new(output.clone()),
                 })
                 .map_err(AnthropicError::display)?;
         }
@@ -2005,8 +2041,9 @@ fn process_content_block_delta(
                 block.text.push_str(text);
                 sender
                     .send(AssistantMessageEvent::TextDelta {
-                        content_index: *content_index,
-                        delta: text.to_owned(),
+                        content_index: *content_index as f64,
+                        delta: text.into(),
+                        partial: Arc::new(output.clone()),
                     })
                     .map_err(AnthropicError::display)?;
             }
@@ -2025,9 +2062,9 @@ fn process_content_block_delta(
                 block.thinking.push_str(thinking);
                 sender
                     .send(AssistantMessageEvent::ThinkingDelta {
-                        content_index: *content_index,
-                        delta: thinking.to_owned(),
-                        thinking_signature_delta: None,
+                        content_index: *content_index as f64,
+                        delta: thinking.into(),
+                        partial: Arc::new(output.clone()),
                     })
                     .map_err(AnthropicError::display)?;
             }
@@ -2047,11 +2084,13 @@ fn process_content_block_delta(
             partial_json.push_str(partial);
             if let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(*content_index)
             {
-                block.arguments = parse_streaming_json(Some(partial_json));
+                block.arguments =
+                    crate::utils::json_parse::parse_streaming_json_object(Some(partial_json));
                 sender
                     .send(AssistantMessageEvent::ToolCallDelta {
-                        content_index: *content_index,
-                        delta: partial.to_owned(),
+                        content_index: *content_index as f64,
+                        delta: partial.into(),
+                        partial: Arc::new(output.clone()),
                     })
                     .map_err(AnthropicError::display)?;
             }
@@ -2069,7 +2108,7 @@ fn process_content_block_delta(
             {
                 block
                     .thinking_signature
-                    .get_or_insert_with(String::new)
+                    .get_or_insert_with(Default::default)
                     .push_str(signature);
             }
         }
@@ -2095,9 +2134,9 @@ fn process_content_block_stop(
             if let Some(AssistantContent::Text(block)) = output.content.get(content_index) {
                 sender
                     .send(AssistantMessageEvent::TextEnd {
-                        content_index,
+                        content_index: content_index as f64,
                         content: block.text.clone(),
-                        content_signature: None,
+                        partial: Arc::new(output.clone()),
                     })
                     .map_err(AnthropicError::display)?;
             }
@@ -2106,10 +2145,9 @@ fn process_content_block_stop(
             if let Some(AssistantContent::Thinking(block)) = output.content.get(content_index) {
                 sender
                     .send(AssistantMessageEvent::ThinkingEnd {
-                        content_index,
+                        content_index: content_index as f64,
                         content: block.thinking.clone(),
-                        content_signature: block.thinking_signature.clone(),
-                        redacted: block.redacted,
+                        partial: Arc::new(output.clone()),
                     })
                     .map_err(AnthropicError::display)?;
             }
@@ -2119,11 +2157,13 @@ fn process_content_block_stop(
             partial_json,
         } => {
             if let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(content_index) {
-                block.arguments = parse_streaming_json(Some(&partial_json));
+                block.arguments =
+                    crate::utils::json_parse::parse_streaming_json_object(Some(&partial_json));
                 sender
                     .send(AssistantMessageEvent::ToolCallEnd {
-                        content_index,
+                        content_index: content_index as f64,
                         tool_call: block.clone(),
+                        partial: Arc::new(output.clone()),
                     })
                     .map_err(AnthropicError::display)?;
             }
@@ -2142,7 +2182,7 @@ fn process_message_delta(
         .and_then(|delta| delta.get("stop_reason"))
         .and_then(Value::as_str)
     {
-        output.raw_stop_reason = Some(stop_reason.to_owned());
+        output.raw_stop_reason = Some(stop_reason.into());
         let (reason, message) = map_stop_reason(
             stop_reason,
             event
@@ -2151,7 +2191,7 @@ fn process_message_delta(
         )?;
         output.stop_reason = reason;
         if message.is_some() {
-            output.error_message = message;
+            output.error_message = message.map(Into::into);
         }
     }
     if let Some(usage) = event.get("usage").filter(|usage| !usage.is_null()) {
@@ -2172,26 +2212,24 @@ fn process_message_delta(
             .and_then(|details| details.get("thinking_tokens"))
             .filter(|value| !value.is_null())
         {
-            output.usage.reasoning = Some(thinking.clone().into());
+            output.usage.reasoning = Some(thinking.as_f64().unwrap_or_default());
         }
         update_usage_totals(usage_model, output);
     }
     Ok(())
 }
 
-fn update_usage_value(usage: &Value, key: &str, target: &mut UsageValue) {
+fn update_usage_value(usage: &Value, key: &str, target: &mut f64) {
     if let Some(value) = usage.get(key).filter(|value| !value.is_null()) {
-        *target = value.clone().into();
+        *target = value.as_f64().unwrap_or_default();
     }
 }
 
 fn update_usage_totals(model: &Model, output: &mut AssistantMessage) {
-    output.usage.total_tokens = output
-        .usage
-        .input
-        .js_add(&output.usage.output)
-        .js_add(&output.usage.cache_read)
-        .js_add(&output.usage.cache_write);
+    output.usage.total_tokens = output.usage.input
+        + output.usage.output
+        + output.usage.cache_read
+        + output.usage.cache_write;
     calculate_cost(model, &mut output.usage);
 }
 
@@ -2254,8 +2292,8 @@ mod tests {
                 },
                 tiers: None,
             },
-            context_window: 200_000,
-            max_tokens: 64_000,
+            context_window: 200_000.0,
+            max_tokens: 64_000.0,
             sampling_params: None,
             headers: None,
             compat: None,
@@ -2265,14 +2303,14 @@ mod tests {
     fn user(text: &str) -> Message {
         Message::User(Box::new(UserMessage {
             role: UserRole::User,
-            content: UserContent::Text(text.to_owned()),
-            timestamp: 1,
+            content: UserContent::Text((text.to_owned()).into()),
+            timestamp: 1.0,
         }))
     }
 
     fn context() -> Context {
         Context {
-            system_prompt: Some("system".to_owned()),
+            system_prompt: Some(("system".to_owned()).into()),
             messages: vec![user("hello")],
             tools: None,
         }
@@ -2408,22 +2446,28 @@ mod tests {
         let events = stream(&model(), &context(), options)
             .collect::<Vec<_>>()
             .await;
-        assert!(matches!(events.first(), Some(AssistantMessageEvent::Start)));
+        assert!(matches!(
+            events.first(),
+            Some(AssistantMessageEvent::Start { .. })
+        ));
         assert!(matches!(
             events.get(1),
-            Some(AssistantMessageEvent::TextStart { content_index: 0 })
+            Some(AssistantMessageEvent::TextStart {
+                content_index: 0.0,
+                ..
+            })
         ));
         let Some(AssistantMessageEvent::Done { message, .. }) = events.last() else {
             panic!("missing done event: {events:?}");
         };
         assert_eq!(message.response_id.as_deref(), Some("msg_1"));
-        assert_eq!(message.usage.input, 10_u64);
-        assert_eq!(message.usage.output, 4_u64);
-        assert_eq!(message.usage.cache_read, 2_u64);
-        assert_eq!(message.usage.cache_write, 3_u64);
-        assert_eq!(message.usage.cache_write_1h, Some(2_u64.into()));
-        assert_eq!(message.usage.reasoning, Some(2_u64.into()));
-        assert_eq!(message.usage.total_tokens, 19_u64);
+        assert_eq!(message.usage.input, 10.0);
+        assert_eq!(message.usage.output, 4.0);
+        assert_eq!(message.usage.cache_read, 2.0);
+        assert_eq!(message.usage.cache_write, 3.0);
+        assert_eq!(message.usage.cache_write_1h, Some(2.0));
+        assert_eq!(message.usage.reasoning, Some(2.0));
+        assert_eq!(message.usage.total_tokens, 19.0);
         assert_eq!(message.usage.cost.cache_write, 0.000_015_75);
         let request = &requests.lock().unwrap_or_else(PoisonError::into_inner)[0];
         assert_eq!(request.url, "https://example.test/v1/messages");
@@ -2522,7 +2566,10 @@ mod tests {
         let AssistantContent::ToolCall(call) = &message.content[2] else {
             panic!("missing tool call");
         };
-        assert_eq!(call.arguments, json!({"value":1}));
+        assert_eq!(
+            call.arguments,
+            JsonObject::try_from(json!({"value":1})).expect("object arguments")
+        );
 
         assert_eq!(
             map_stop_reason("pause_turn", None).expect("pause").0,
@@ -2628,7 +2675,7 @@ mod tests {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let response = response.as_ref().expect("response hook");
-        assert_eq!(response.status, 201);
+        assert_eq!(response.status, 201.0);
         assert_eq!(
             response
                 .headers
@@ -2636,6 +2683,98 @@ mod tests {
                 .map(String::as_str),
             Some("real")
         );
+    }
+
+    /// Pins pi `src/types.ts:350-380` and
+    /// `src/api/anthropic-messages.ts:1201-1257`: payload hooks receive the
+    /// actual ECMAScript object, while the HTTP JSON source escapes isolated
+    /// UTF-16 code units without reserving user object keys.
+    #[tokio::test]
+    async fn payload_hook_and_wire_preserve_surrogates_and_sentinel_shaped_user_objects() {
+        let fetch = StaticFetch::sse(&successful_sse());
+        let requests = fetch.requests.clone();
+        let observed = Arc::new(Mutex::new(None::<JsonValue>));
+        let hook_observed = Arc::clone(&observed);
+
+        let mut arguments = JsonObject::new();
+        arguments.insert("\0agentprism.ecma-json.object", r#"{"ordinary":true}"#);
+        let mut thinking = ThinkingContent::new("reasoning");
+        thinking.thinking_signature = Some(crate::types::JsString::from_utf16(vec![0xd83d]));
+        let call = ToolCall::new(
+            crate::types::JsString::from_utf16(vec![0xde00]),
+            crate::types::JsString::from_utf16(vec![0xd83d]),
+            arguments,
+        );
+        let current_model = model();
+        let mut assistant =
+            AssistantMessage::pending("anthropic-messages", "anthropic", &current_model.id, 1.0);
+        assistant.stop_reason = StopReason::ToolUse;
+        assistant.content = vec![
+            AssistantContent::Thinking(thinking),
+            AssistantContent::ToolCall(call),
+        ];
+        let replay = Context {
+            system_prompt: None,
+            messages: vec![Message::Assistant(Box::new(assistant))],
+            tools: None,
+        };
+
+        let mut options = SimpleStreamOptions::default();
+        options.stream.request.api_key = Some("key".to_owned());
+        options.stream.request.fetch = Some(Arc::new(fetch));
+        options.stream.request.on_payload = Some(Arc::new(move |payload, _| {
+            let observed = Arc::clone(&hook_observed);
+            Box::pin(async move {
+                *observed.lock().unwrap_or_else(PoisonError::into_inner) = Some(payload.clone());
+                Ok(None)
+            })
+        }));
+
+        let events = stream_simple(&current_model, &replay, options)
+            .collect::<Vec<_>>()
+            .await;
+        assert!(matches!(
+            events.last(),
+            Some(AssistantMessageEvent::Done { .. })
+        ));
+
+        let observed = observed.lock().unwrap_or_else(PoisonError::into_inner);
+        let payload = observed.as_ref().expect("payload hook");
+        assert_eq!(
+            payload["messages"][0]["content"][0]["signature"]
+                .as_str()
+                .expect("thinking signature")
+                .as_utf16(),
+            &[0xd83d]
+        );
+        assert_eq!(
+            payload["messages"][0]["content"][1]["id"]
+                .as_str()
+                .expect("tool id")
+                .as_utf16(),
+            &[0xde00]
+        );
+        assert_eq!(
+            payload["messages"][0]["content"][1]["name"]
+                .as_str()
+                .expect("tool name")
+                .as_utf16(),
+            &[0xd83d]
+        );
+        assert_eq!(
+            payload["messages"][0]["content"][1]["input"]["\0agentprism.ecma-json.object"],
+            r#"{"ordinary":true}"#
+        );
+        drop(observed);
+
+        let requests = requests.lock().unwrap_or_else(PoisonError::into_inner);
+        let wire =
+            std::str::from_utf8(requests[0].body.as_deref().expect("Anthropic request body"))
+                .expect("UTF-8 JSON source");
+        assert!(wire.contains(r#""signature":"\ud83d""#));
+        assert!(wire.contains(r#""id":"\ude00""#));
+        assert!(wire.contains(r#""name":"\ud83d""#));
+        assert!(wire.contains(r#""\u0000agentprism.ecma-json.object":"{\"ordinary\":true}""#));
     }
 
     /// Ports the pre-built/alternative client seam at pi
@@ -3117,7 +3256,7 @@ mod tests {
             false,
             &AnthropicOptions {
                 thinking_enabled: Some(true),
-                thinking_budget_tokens: Some(0),
+                thinking_budget_tokens: Some(0.0),
                 tool_choice: Some(AnthropicToolChoice::Mode(AnthropicToolChoiceMode::Any)),
                 ..Default::default()
             },
@@ -3149,9 +3288,9 @@ mod tests {
     #[test]
     fn empty_thinking_signature_downgrades_unless_compat_allows_it() {
         let mut previous =
-            AssistantMessage::pending("anthropic-messages", "anthropic", "claude-sonnet-4-5", 1);
+            AssistantMessage::pending("anthropic-messages", "anthropic", "claude-sonnet-4-5", 1.0);
         previous.role = AssistantRole::Assistant;
-        previous.content = vec![AssistantContent::Thinking(ThinkingContent::new("thought"))].into();
+        previous.content = vec![AssistantContent::Thinking(ThinkingContent::new("thought"))];
         previous.stop_reason = StopReason::Stop;
         let messages = vec![Message::Assistant(Box::new(previous))];
         let normal = convert_messages(
@@ -3175,15 +3314,14 @@ mod tests {
         assert_eq!(compatible[0]["content"][0]["signature"], "");
 
         let mut replay =
-            AssistantMessage::pending("anthropic-messages", "anthropic", "claude-sonnet-4-5", 1);
+            AssistantMessage::pending("anthropic-messages", "anthropic", "claude-sonnet-4-5", 1.0);
         replay.role = AssistantRole::Assistant;
         let mut redacted = ThinkingContent::new("[Reasoning redacted]");
         redacted.redacted = Some(true);
         replay.content = vec![
             AssistantContent::Thinking(redacted),
-            AssistantContent::ToolCall(ToolCall::new("call", "lookup", Value::Null)),
-        ]
-        .into();
+            AssistantContent::ToolCall(ToolCall::new("call", "lookup", JsonObject::new())),
+        ];
         replay.stop_reason = StopReason::ToolUse;
         let converted = convert_messages(
             &[Message::Assistant(Box::new(replay))],
@@ -3195,6 +3333,83 @@ mod tests {
         );
         assert!(converted[0]["content"][0].get("data").is_none());
         assert_eq!(converted[0]["content"][1]["input"], json!({}));
+    }
+
+    /// Pins pi `types.ts:372-380` and
+    /// `src/api/anthropic-messages.ts:1252-1258`: replay preserves the complete
+    /// dynamic argument map; JSON serialization nulls only non-finite leaves.
+    #[test]
+    fn replay_preserves_dynamic_tool_arguments_around_nonfinite_leaves() {
+        let mut arguments = JsonObject::new();
+        arguments.insert("before", -1e20_f64);
+        arguments.insert("nan", f64::NAN);
+        arguments.insert(
+            "nested",
+            crate::types::JsonValue::Array(vec![true.into(), f64::INFINITY.into(), "after".into()]),
+        );
+        let mut replay =
+            AssistantMessage::pending("anthropic-messages", "anthropic", "claude", 1.0);
+        replay.content = vec![AssistantContent::ToolCall(ToolCall::new(
+            "call", "lookup", arguments,
+        ))];
+        replay.stop_reason = StopReason::ToolUse;
+        let converted = convert_messages(
+            &[Message::Assistant(Box::new(replay))],
+            false,
+            None,
+            false,
+            &IndexSet::new(),
+            &str::to_owned,
+        );
+        let input = &converted[0]["content"][0]["input"];
+        assert_eq!(input["before"].as_f64(), Some(-1e20_f64));
+        assert!(input["nan"].as_f64().is_some_and(f64::is_nan));
+        assert_eq!(input["nested"][1].as_f64(), Some(f64::INFINITY));
+        assert_eq!(
+            crate::utils::ecma_json::stringify_provider_json(input),
+            r#"{"before":-100000000000000000000,"nan":null,"nested":[true,null,"after"]}"#
+        );
+    }
+
+    /// Pins pi `src/api/anthropic-messages.ts:1252-1258` at the HTTP body
+    /// boundary, including ECMAScript integer-index ordering and lone UTF-16
+    /// code units in identifiers, keys, and values.
+    #[tokio::test]
+    async fn request_wire_replays_lossless_ordered_tool_arguments() {
+        let mut arguments = JsonObject::new();
+        arguments.insert("10", "ten");
+        arguments.insert("2", "two");
+        arguments.insert(
+            crate::types::JsString::from_utf16(vec![0xd83d]),
+            crate::types::JsonValue::String(crate::types::JsString::from_utf16(vec![0xde00])),
+        );
+        let mut replay =
+            AssistantMessage::pending("anthropic-messages", "anthropic", "claude-sonnet-4-5", 1.0);
+        replay.content = vec![AssistantContent::ToolCall(ToolCall::new(
+            crate::types::JsString::from_utf16(vec![0xd801]),
+            crate::types::JsString::from_utf16(vec![0xdc01]),
+            arguments,
+        ))];
+        replay.stop_reason = StopReason::ToolUse;
+        let request_context = Context {
+            system_prompt: None,
+            messages: vec![Message::Assistant(Box::new(replay))],
+            tools: None,
+        };
+        let fetch = StaticFetch::sse(&successful_sse());
+        let requests = fetch.requests.clone();
+        let mut options = AnthropicOptions::default();
+        options.stream.request.api_key = Some("key".to_owned());
+        options.stream.request.fetch = Some(Arc::new(fetch));
+        let _ = stream(&model(), &request_context, options)
+            .collect::<Vec<_>>()
+            .await;
+        let requests = requests.lock().unwrap_or_else(PoisonError::into_inner);
+        let wire = std::str::from_utf8(requests[0].body.as_deref().expect("request body"))
+            .expect("ASCII JSON escapes");
+        assert!(wire.contains(
+            r#""id":"\ud801","name":"\udc01","input":{"2":"two","10":"ten","\ud83d":"\ude00"}"#
+        ));
     }
 
     /// Ports the hermetic assertions in pi `test/deferred-tools.test.ts:80-343`.
@@ -3217,14 +3432,14 @@ mod tests {
         let marker = |id: &str| {
             Message::ToolResult(Box::new(ToolResultMessage {
                 role: ToolResultRole::ToolResult,
-                tool_call_id: id.to_owned(),
-                tool_name: "base".to_owned(),
+                tool_call_id: id.into(),
+                tool_name: "base".into(),
                 content: vec![UserContentBlock::Text(TextContent::new("ordinary"))],
                 details: None,
                 usage: None,
-                added_tool_names: Some(vec!["late".to_owned()]),
+                added_tool_names: Some(vec!["late".into()]),
                 is_error: false,
-                timestamp: 2,
+                timestamp: 2.0,
             }))
         };
         let context = Context {
@@ -3259,7 +3474,10 @@ mod tests {
         let events = stream(&model(), &context(), options)
             .collect::<Vec<_>>()
             .await;
-        assert!(matches!(events.first(), Some(AssistantMessageEvent::Start)));
+        assert!(matches!(
+            events.first(),
+            Some(AssistantMessageEvent::Start { .. })
+        ));
         let Some(AssistantMessageEvent::Error { error, .. }) = events.last() else {
             panic!("missing error");
         };
@@ -3276,7 +3494,10 @@ mod tests {
         let events = stream(&model(), &context(), options)
             .collect::<Vec<_>>()
             .await;
-        assert!(matches!(events.first(), Some(AssistantMessageEvent::Start)));
+        assert!(matches!(
+            events.first(),
+            Some(AssistantMessageEvent::Start { .. })
+        ));
         assert!(matches!(
             events.last(),
             Some(AssistantMessageEvent::Error { .. })

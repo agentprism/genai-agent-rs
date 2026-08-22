@@ -1,6 +1,9 @@
 //! Constrained tool sampling ⇐ pi `src/api/constrained-sampling.ts`.
 
-use crate::types::{ConstrainedSamplingConfig, StrictPreference, Tool, ToolConstrainedSampling};
+use crate::types::{
+    ConstrainedSamplingConfig, JsonObject, JsonValue, StrictPreference, Tool,
+    ToolConstrainedSampling,
+};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -260,13 +263,13 @@ pub struct GrammarToolInputJsonBuffer {
 
 pub fn get_grammar_tool_input(
     tool_name: &str,
-    arguments: &Value,
+    arguments: &JsonObject,
     input_property: &str,
 ) -> Result<String, ConstrainedSamplingError> {
     arguments
         .get(input_property)
-        .and_then(Value::as_str)
-        .map(str::to_owned)
+        .and_then(JsonValue::as_str)
+        .map(crate::utils::sanitize_unicode::sanitize_surrogates)
         .ok_or_else(|| {
             ConstrainedSamplingError::invalid(format!(
                 "Grammar tool call \"{tool_name}\" requires argument \"{input_property}\" to be a string."
@@ -661,15 +664,23 @@ mod tests {
             Some("payload")
         );
         assert_eq!(
-            get_grammar_tool_input("sample_tool", &json!({"payload":"abc"}), "payload")
-                .expect("input"),
+            get_grammar_tool_input(
+                "sample_tool",
+                &JsonObject::try_from(json!({"payload":"abc"})).expect("object"),
+                "payload",
+            )
+            .expect("input"),
             "abc"
         );
         assert!(
-            get_grammar_tool_input("sample_tool", &json!({}), "payload")
-                .expect_err("missing")
-                .to_string()
-                .contains("requires argument \"payload\" to be a string")
+            get_grammar_tool_input(
+                "sample_tool",
+                &JsonObject::try_from(json!({})).expect("object"),
+                "payload",
+            )
+            .expect_err("missing")
+            .to_string()
+            .contains("requires argument \"payload\" to be a string")
         );
 
         let no_variants = Tool {

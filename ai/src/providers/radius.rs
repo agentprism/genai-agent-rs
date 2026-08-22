@@ -80,11 +80,11 @@ fn unavailable_stream(model: &Model) -> AssistantMessageEventStream {
         model.api.clone(),
         model.provider.clone(),
         model.id.clone(),
-        now_ms() as i64,
+        now_ms(),
     );
     error.stop_reason = StopReason::Error;
     error.error_message =
-        Some("The pi-messages wire protocol is excluded from this port by owner ruling".to_owned());
+        Some("The pi-messages wire protocol is excluded from this port by owner ruling".into());
     AssistantMessageEventStream::from_events(vec![AssistantMessageEvent::Error {
         reason: ErrorStopReason::Error,
         error,
@@ -516,8 +516,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["first", "last"]
         );
-        assert_eq!(resolved[1].context_window, 2_000);
-        assert_eq!(resolved[1].max_tokens, 200);
+        assert_eq!(resolved[1].context_window, 2_000.0);
+        assert_eq!(resolved[1].max_tokens, 200.0);
     }
 
     /// pi `radius.ts:69-77` publishes whatever the gateway returned; one model the crate

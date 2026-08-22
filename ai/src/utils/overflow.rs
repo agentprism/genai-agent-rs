@@ -69,16 +69,12 @@ pub fn is_context_overflow(message: &AssistantMessage, context_window: Option<f6
         return true;
     }
     if let Some(window) = context_window.filter(|window| *window != 0.0) {
-        let input = message
-            .usage
-            .input
-            .js_add(&message.usage.cache_read)
-            .as_number();
+        let input = message.usage.input + message.usage.cache_read;
         if message.stop_reason == StopReason::Stop && input > window {
             return true;
         }
         if message.stop_reason == StopReason::Length
-            && message.usage.output == 0
+            && message.usage.output == 0.0
             && input >= window * 0.99
         {
             return true;
@@ -90,7 +86,7 @@ pub fn is_context_overflow(message: &AssistantMessage, context_window: Option<f6
 pub fn is_recoverable_length(message: &AssistantMessage, desired_max_output: f64) -> bool {
     message.stop_reason == StopReason::Length
         && desired_max_output > 0.0
-        && message.usage.output.as_number() < desired_max_output
+        && message.usage.output < desired_max_output
 }
 
 pub fn get_overflow_patterns() -> Vec<Regex> {
@@ -109,13 +105,13 @@ mod tests {
         cache: f64,
         output: f64,
     ) -> AssistantMessage {
-        let mut message = AssistantMessage::pending("openai-completions", "test", "model", 1);
+        let mut message = AssistantMessage::pending("openai-completions", "test", "model", 1.0);
         message.stop_reason = reason;
-        message.error_message = error.map(str::to_owned);
-        message.usage.input = input.into();
-        message.usage.cache_read = cache.into();
-        message.usage.output = output.into();
-        message.usage.total_tokens = (input + cache + output).into();
+        message.error_message = error.map(Into::into);
+        message.usage.input = input;
+        message.usage.cache_read = cache;
+        message.usage.output = output;
+        message.usage.total_tokens = input + cache + output;
         message
     }
 
@@ -159,9 +155,5 @@ mod tests {
         let far_below = message(StopReason::Length, None, 100.0, 0.0, 0.0);
         assert!(is_recoverable_length(&far_below, 128_000.0));
         assert!(!is_context_overflow(&far_below, Some(200_000.0)));
-
-        let mut off_spec = message(StopReason::Length, None, 200_000.0, 0.0, 0.0);
-        off_spec.usage.output = serde_json::json!("0").into();
-        assert!(!is_context_overflow(&off_spec, Some(200_000.0)));
     }
 }

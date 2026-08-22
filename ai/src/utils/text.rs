@@ -1,25 +1,27 @@
 //! Text extraction ⇐ pi `src/utils/text.ts`.
 
-use crate::types::{AssistantContent, AssistantMessageContent, UserContent, UserContentBlock};
+use crate::types::{
+    AssistantContent, AssistantMessageContent, JsString, UserContent, UserContentBlock,
+};
 
 pub trait ContentText {
-    fn append_text(&self, output: &mut Vec<String>);
+    fn append_text(&self, output: &mut Vec<JsString>);
 }
 
 impl ContentText for str {
-    fn append_text(&self, output: &mut Vec<String>) {
-        output.push(self.to_owned());
+    fn append_text(&self, output: &mut Vec<JsString>) {
+        output.push(self.into());
     }
 }
 
 impl ContentText for String {
-    fn append_text(&self, output: &mut Vec<String>) {
-        output.push(self.clone());
+    fn append_text(&self, output: &mut Vec<JsString>) {
+        output.push(self.into());
     }
 }
 
 impl ContentText for UserContent {
-    fn append_text(&self, output: &mut Vec<String>) {
+    fn append_text(&self, output: &mut Vec<JsString>) {
         match self {
             Self::Text(text) => output.push(text.clone()),
             Self::Blocks(blocks) => blocks.as_slice().append_text(output),
@@ -28,35 +30,41 @@ impl ContentText for UserContent {
 }
 
 impl ContentText for [UserContentBlock] {
-    fn append_text(&self, output: &mut Vec<String>) {
+    fn append_text(&self, output: &mut Vec<JsString>) {
         output.extend(self.iter().filter_map(|block| match block {
             UserContentBlock::Text(text) => Some(text.text.clone()),
-            UserContentBlock::Image(_) | UserContentBlock::Unknown(_) => None,
+            UserContentBlock::Image(_) => None,
         }));
     }
 }
 
 impl ContentText for [AssistantContent] {
-    fn append_text(&self, output: &mut Vec<String>) {
+    fn append_text(&self, output: &mut Vec<JsString>) {
         output.extend(self.iter().filter_map(|block| match block {
             AssistantContent::Text(text) => Some(text.text.clone()),
-            AssistantContent::Thinking(_)
-            | AssistantContent::ToolCall(_)
-            | AssistantContent::Unknown(_) => None,
+            AssistantContent::Thinking(_) | AssistantContent::ToolCall(_) => None,
         }));
     }
 }
 
 impl ContentText for AssistantMessageContent {
-    fn append_text(&self, output: &mut Vec<String>) {
+    fn append_text(&self, output: &mut Vec<JsString>) {
         self.as_slice().append_text(output);
     }
 }
 
-pub fn content_text(content: &(impl ContentText + ?Sized), separator: Option<&str>) -> String {
+pub fn content_text(content: &(impl ContentText + ?Sized), separator: Option<&str>) -> JsString {
     let mut text = Vec::new();
     content.append_text(&mut text);
-    text.join(separator.unwrap_or("\n"))
+    let separator = JsString::from(separator.unwrap_or("\n"));
+    let mut joined = JsString::new();
+    for (index, part) in text.iter().enumerate() {
+        if index != 0 {
+            joined.push_str(&separator);
+        }
+        joined.push_str(part);
+    }
+    joined
 }
 
 #[cfg(test)]

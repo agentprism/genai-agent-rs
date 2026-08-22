@@ -180,10 +180,10 @@ where
         }
 
         attempt += 1;
-        let error = response
-            .error_message
-            .clone()
-            .unwrap_or_else(|| "Unknown error".to_owned());
+        let error = response.error_message.as_ref().map_or_else(
+            || "Unknown error".to_owned(),
+            |message| message.to_utf8_lossy(),
+        );
         last_retry = Some((attempt, error.clone()));
         let delay_ms = policy.expect("retry policy enabled").base_delay_ms
             * 2_f64.powf(attempt.saturating_sub(1) as f64);
@@ -216,9 +216,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn response(reason: StopReason, error: Option<&str>) -> AssistantMessage {
-        let mut message = AssistantMessage::pending("test", "test", "test", 1);
+        let mut message = AssistantMessage::pending("test", "test", "test", 1.0);
         message.stop_reason = reason;
-        message.error_message = error.map(str::to_owned);
+        message.error_message = error.map(Into::into);
         message
     }
 

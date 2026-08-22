@@ -1,22 +1,16 @@
-//! Partial-free assistant events, terminal settlement, and snapshot reconstruction.
+//! Assistant events, partial snapshots, and terminal settlement.
 
-use crate::types::{
-    AssistantContent, AssistantMessage, ErrorStopReason, SuccessfulStopReason, TextContent,
-    ThinkingContent, ToolCall,
-};
-use crate::utils::json_parse::parse_streaming_json;
+use crate::types::{AssistantMessage, ErrorStopReason, JsString, SuccessfulStopReason, ToolCall};
 use futures::Stream;
 use futures::stream::FusedStream;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
 use tokio::sync::{mpsc, watch};
 
-/// The canonical Rust event wire omits pi's shared-reference `partial` snapshots.
+/// pi `types.ts:536-545`: every nonterminal event carries the current assistant message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -24,60 +18,62 @@ use tokio::sync::{mpsc, watch};
     rename_all_fields = "camelCase"
 )]
 pub enum AssistantMessageEvent {
-    Start,
+    Start {
+        partial: Arc<AssistantMessage>,
+    },
     TextStart {
-        content_index: usize,
+        #[serde(serialize_with = "crate::types::serialize_js_f64")]
+        content_index: f64,
+        partial: Arc<AssistantMessage>,
     },
     TextDelta {
-        content_index: usize,
-        delta: String,
+        #[serde(serialize_with = "crate::types::serialize_js_f64")]
+        content_index: f64,
+        delta: JsString,
+        partial: Arc<AssistantMessage>,
     },
     TextEnd {
-        content_index: usize,
-        content: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        content_signature: Option<String>,
+        #[serde(serialize_with = "crate::types::serialize_js_f64")]
+        content_index: f64,
+        content: JsString,
+        partial: Arc<AssistantMessage>,
     },
     ThinkingStart {
-        content_index: usize,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        thinking: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        thinking_signature: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        redacted: Option<bool>,
+        #[serde(serialize_with = "crate::types::serialize_js_f64")]
+        content_index: f64,
+        partial: Arc<AssistantMessage>,
     },
     ThinkingDelta {
-        content_index: usize,
-        delta: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        thinking_signature_delta: Option<String>,
+        #[serde(serialize_with = "crate::types::serialize_js_f64")]
+        content_index: f64,
+        delta: JsString,
+        partial: Arc<AssistantMessage>,
     },
     ThinkingEnd {
-        content_index: usize,
-        content: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        content_signature: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        redacted: Option<bool>,
+        #[serde(serialize_with = "crate::types::serialize_js_f64")]
+        content_index: f64,
+        content: JsString,
+        partial: Arc<AssistantMessage>,
     },
     #[serde(rename = "toolcall_start")]
     ToolCallStart {
-        content_index: usize,
-        id: String,
-        tool_name: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        namespace: Option<String>,
+        #[serde(serialize_with = "crate::types::serialize_js_f64")]
+        content_index: f64,
+        partial: Arc<AssistantMessage>,
     },
     #[serde(rename = "toolcall_delta")]
     ToolCallDelta {
-        content_index: usize,
-        delta: String,
+        #[serde(serialize_with = "crate::types::serialize_js_f64")]
+        content_index: f64,
+        delta: JsString,
+        partial: Arc<AssistantMessage>,
     },
     #[serde(rename = "toolcall_end")]
     ToolCallEnd {
-        content_index: usize,
+        #[serde(serialize_with = "crate::types::serialize_js_f64")]
+        content_index: f64,
         tool_call: ToolCall,
+        partial: Arc<AssistantMessage>,
     },
     Done {
         reason: SuccessfulStopReason,
@@ -90,6 +86,22 @@ pub enum AssistantMessageEvent {
 }
 
 impl AssistantMessageEvent {
+    pub fn partial(&self) -> Option<&AssistantMessage> {
+        match self {
+            Self::Start { partial }
+            | Self::TextStart { partial, .. }
+            | Self::TextDelta { partial, .. }
+            | Self::TextEnd { partial, .. }
+            | Self::ThinkingStart { partial, .. }
+            | Self::ThinkingDelta { partial, .. }
+            | Self::ThinkingEnd { partial, .. }
+            | Self::ToolCallStart { partial, .. }
+            | Self::ToolCallDelta { partial, .. }
+            | Self::ToolCallEnd { partial, .. } => Some(partial),
+            Self::Done { .. } | Self::Error { .. } => None,
+        }
+    }
+
     pub fn terminal_message(&self) -> Option<&AssistantMessage> {
         match self {
             Self::Done { message, .. } => Some(message),
@@ -99,8 +111,10 @@ impl AssistantMessageEvent {
     }
 }
 
-#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, Clone, thiserror::Error, PartialEq)]
 pub enum MessageBuilderError {
+    #[error("content index {index} is not a non-negative safe integer")]
+    InvalidContentIndex { index: f64 },
     #[error("content index {index} is not contiguous; next content index is {next}")]
     NonContiguousContentIndex { index: usize, next: usize },
     #[error("received {event} for non-{expected} content at index {index}")]
@@ -117,7 +131,6 @@ pub enum MessageBuilderError {
 #[derive(Debug, Clone)]
 pub struct MessageBuilder {
     message: AssistantMessage,
-    raw_tool_arguments: BTreeMap<usize, String>,
     terminal: bool,
 }
 
@@ -125,7 +138,6 @@ impl MessageBuilder {
     pub fn new(message: AssistantMessage) -> Self {
         Self {
             message,
-            raw_tool_arguments: BTreeMap::new(),
             terminal: false,
         }
     }
@@ -138,7 +150,6 @@ impl MessageBuilder {
         self.terminal
     }
 
-    /// Applies the proxy reconstruction rules from pi `packages/agent/src/proxy.ts:240-362`.
     pub fn apply(
         &mut self,
         event: &AssistantMessageEvent,
@@ -148,130 +159,17 @@ impl MessageBuilder {
         }
 
         match event {
-            AssistantMessageEvent::Start => {}
-            AssistantMessageEvent::TextStart { content_index } => {
-                self.set_content(*content_index, AssistantContent::Text(TextContent::new("")))?;
-            }
-            AssistantMessageEvent::TextDelta {
-                content_index,
-                delta,
-            } => match self.message.content.get_mut(*content_index) {
-                Some(AssistantContent::Text(content)) => content.text.push_str(delta),
-                _ => {
-                    return Err(Self::type_mismatch("text_delta", "text", *content_index));
-                }
-            },
-            AssistantMessageEvent::TextEnd {
-                content_index,
-                content,
-                content_signature,
-            } => match self.message.content.get_mut(*content_index) {
-                Some(AssistantContent::Text(block)) => {
-                    block.text.clone_from(content);
-                    block.text_signature.clone_from(content_signature);
-                }
-                _ => {
-                    return Err(Self::type_mismatch("text_end", "text", *content_index));
-                }
-            },
-            AssistantMessageEvent::ThinkingStart {
-                content_index,
-                thinking,
-                thinking_signature,
-                redacted,
-            } => {
-                let mut block = ThinkingContent::new(thinking.as_deref().unwrap_or_default());
-                block.thinking_signature.clone_from(thinking_signature);
-                block.redacted = *redacted;
-                self.set_content(*content_index, AssistantContent::Thinking(block))?;
-            }
-            AssistantMessageEvent::ThinkingDelta {
-                content_index,
-                delta,
-                thinking_signature_delta,
-            } => match self.message.content.get_mut(*content_index) {
-                Some(AssistantContent::Thinking(content)) => {
-                    content.thinking.push_str(delta);
-                    if let Some(signature_delta) = thinking_signature_delta {
-                        content
-                            .thinking_signature
-                            .get_or_insert_with(String::new)
-                            .push_str(signature_delta);
-                    }
-                }
-                _ => {
-                    return Err(Self::type_mismatch(
-                        "thinking_delta",
-                        "thinking",
-                        *content_index,
-                    ));
-                }
-            },
-            AssistantMessageEvent::ThinkingEnd {
-                content_index,
-                content,
-                content_signature,
-                redacted,
-            } => match self.message.content.get_mut(*content_index) {
-                Some(AssistantContent::Thinking(block)) => {
-                    block.thinking.clone_from(content);
-                    if let Some(content_signature) = content_signature {
-                        block.thinking_signature = Some(content_signature.clone());
-                    }
-                    if redacted.is_some() {
-                        block.redacted = *redacted;
-                    }
-                }
-                _ => {
-                    return Err(Self::type_mismatch(
-                        "thinking_end",
-                        "thinking",
-                        *content_index,
-                    ));
-                }
-            },
-            AssistantMessageEvent::ToolCallStart {
-                content_index,
-                id,
-                tool_name,
-                namespace,
-            } => {
-                let mut tool_call = ToolCall::new(id, tool_name, Value::Object(Default::default()));
-                tool_call.namespace.clone_from(namespace);
-                self.set_content(*content_index, AssistantContent::ToolCall(tool_call))?;
-                self.raw_tool_arguments
-                    .insert(*content_index, String::new());
-            }
-            AssistantMessageEvent::ToolCallDelta {
-                content_index,
-                delta,
-            } => match self.message.content.get_mut(*content_index) {
-                Some(AssistantContent::ToolCall(call)) => {
-                    let raw = self.raw_tool_arguments.entry(*content_index).or_default();
-                    raw.push_str(delta);
-                    call.arguments = parse_proxy_streaming_arguments(raw);
-                }
-                _ => {
-                    return Err(Self::type_mismatch(
-                        "toolcall_delta",
-                        "toolCall",
-                        *content_index,
-                    ));
-                }
-            },
-            AssistantMessageEvent::ToolCallEnd {
-                content_index,
-                tool_call,
-            } => {
-                // pi's proxy ignores a tool-call end when its start block was not retained.
-                if matches!(
-                    self.message.content.get(*content_index),
-                    Some(AssistantContent::ToolCall(_))
-                ) {
-                    self.message.content[*content_index] =
-                        AssistantContent::ToolCall(tool_call.clone());
-                    self.raw_tool_arguments.remove(content_index);
-                }
+            AssistantMessageEvent::Start { partial }
+            | AssistantMessageEvent::TextStart { partial, .. }
+            | AssistantMessageEvent::TextDelta { partial, .. }
+            | AssistantMessageEvent::TextEnd { partial, .. }
+            | AssistantMessageEvent::ThinkingStart { partial, .. }
+            | AssistantMessageEvent::ThinkingDelta { partial, .. }
+            | AssistantMessageEvent::ThinkingEnd { partial, .. }
+            | AssistantMessageEvent::ToolCallStart { partial, .. }
+            | AssistantMessageEvent::ToolCallDelta { partial, .. }
+            | AssistantMessageEvent::ToolCallEnd { partial, .. } => {
+                self.message.clone_from(partial);
             }
             AssistantMessageEvent::Done { message, .. } => {
                 self.message.clone_from(message);
@@ -283,43 +181,6 @@ impl MessageBuilder {
             }
         }
         Ok(&self.message)
-    }
-
-    fn set_content(
-        &mut self,
-        index: usize,
-        content: AssistantContent,
-    ) -> Result<(), MessageBuilderError> {
-        match index.cmp(&self.message.content.len()) {
-            std::cmp::Ordering::Less => self.message.content[index] = content,
-            std::cmp::Ordering::Equal => self.message.content.push(content),
-            std::cmp::Ordering::Greater => {
-                return Err(MessageBuilderError::NonContiguousContentIndex {
-                    index,
-                    next: self.message.content.len(),
-                });
-            }
-        }
-        Ok(())
-    }
-
-    fn type_mismatch(
-        event: &'static str,
-        expected: &'static str,
-        index: usize,
-    ) -> MessageBuilderError {
-        MessageBuilderError::ContentTypeMismatch {
-            event,
-            expected,
-            index,
-        }
-    }
-}
-
-fn parse_proxy_streaming_arguments(raw: &str) -> Value {
-    match parse_streaming_json(Some(raw)) {
-        Value::Null => Value::Object(Default::default()),
-        value => value,
     }
 }
 
@@ -558,16 +419,22 @@ impl Drop for AssistantStreamSender {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Api, AssistantRole, ProviderId, StopReason, Usage};
+    use crate::types::{
+        Api, AssistantContent, AssistantRole, ProviderId, StopReason, TextContent, Usage,
+    };
     use futures::StreamExt;
     use serde_json::json;
     use tokio::sync::Barrier;
 
     fn message(reason: StopReason, label: &str) -> AssistantMessage {
-        let mut message = AssistantMessage::pending("test-api", "test-provider", "test-model", 1);
+        let mut message = AssistantMessage::pending("test-api", "test-provider", "test-model", 1.0);
         message.stop_reason = reason;
-        message.content = vec![AssistantContent::Text(TextContent::new(label))].into();
+        message.content = vec![AssistantContent::Text(TextContent::new(label))];
         message
+    }
+
+    fn partial() -> Arc<AssistantMessage> {
+        Arc::new(message(StopReason::Pending, "partial"))
     }
 
     /// Pins pi `types.ts:528-552` and `utils/event-stream.ts:19-38`: terminals own `result()`.
@@ -575,14 +442,17 @@ mod tests {
     async fn terminal_event_is_authoritative_result() {
         let expected = message(StopReason::Stop, "authoritative");
         let mut stream = AssistantMessageEventStream::from_events(vec![
-            AssistantMessageEvent::Start,
+            AssistantMessageEvent::Start { partial: partial() },
             AssistantMessageEvent::Done {
                 reason: SuccessfulStopReason::Stop,
                 message: expected.clone(),
             },
         ]);
         let result = stream.result();
-        assert_eq!(stream.next().await, Some(AssistantMessageEvent::Start));
+        assert!(matches!(
+            stream.next().await,
+            Some(AssistantMessageEvent::Start { .. })
+        ));
         assert!(matches!(
             stream.next().await,
             Some(AssistantMessageEvent::Done { .. })
@@ -637,8 +507,9 @@ mod tests {
                 message: terminal,
             },
             AssistantMessageEvent::TextDelta {
-                content_index: 0,
+                content_index: 0.0,
                 delta: "late".into(),
+                partial: partial(),
             },
         ]);
         assert!(matches!(
@@ -654,9 +525,14 @@ mod tests {
     #[tokio::test]
     async fn close_without_terminal_leaves_result_pending() {
         let mut stream =
-            AssistantMessageEventStream::from_events(vec![AssistantMessageEvent::Start]);
+            AssistantMessageEventStream::from_events(vec![AssistantMessageEvent::Start {
+                partial: partial(),
+            }]);
         let result = stream.result_handle();
-        assert_eq!(stream.next().await, Some(AssistantMessageEvent::Start));
+        assert!(matches!(
+            stream.next().await,
+            Some(AssistantMessageEvent::Start { .. })
+        ));
         assert_eq!(stream.next().await, None);
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(10), result.get())
@@ -671,7 +547,9 @@ mod tests {
         let (sender, stream) = AssistantMessageEventStream::channel();
         let second = sender.clone();
         let result = stream.result();
-        sender.send(AssistantMessageEvent::Start).unwrap();
+        sender
+            .send(AssistantMessageEvent::Start { partial: partial() })
+            .unwrap();
         let left = tokio::spawn(async move { drop(sender) });
         let right = tokio::spawn(async move { drop(second) });
         left.await.unwrap();
@@ -688,7 +566,9 @@ mod tests {
     async fn channel_result_does_not_require_iteration_and_events_remain_ordered() {
         let (sender, mut stream) = AssistantMessageEventStream::channel();
         let expected = message(StopReason::Length, "limit");
-        sender.send(AssistantMessageEvent::Start).unwrap();
+        sender
+            .send(AssistantMessageEvent::Start { partial: partial() })
+            .unwrap();
         sender
             .send(AssistantMessageEvent::Done {
                 reason: SuccessfulStopReason::Length,
@@ -697,7 +577,10 @@ mod tests {
             .unwrap();
         assert!(sender.is_closed());
         assert_eq!(stream.result().await.unwrap(), expected);
-        assert_eq!(stream.next().await, Some(AssistantMessageEvent::Start));
+        assert!(matches!(
+            stream.next().await,
+            Some(AssistantMessageEvent::Start { .. })
+        ));
         assert!(matches!(
             stream.next().await,
             Some(AssistantMessageEvent::Done { .. })
@@ -705,275 +588,10 @@ mod tests {
         assert_eq!(stream.next().await, None);
     }
 
-    /// Pins pi `proxy.ts:240-356`: text, thinking, and parallel streamed calls rebuild by index.
-    #[test]
-    fn message_builder_reconstructs_interleaved_content_and_partial_arguments() {
-        let base = AssistantMessage::pending("api", "provider", "model", 7);
-        let mut builder = MessageBuilder::new(base);
-        let first_arguments = json!({"city":"Paris"});
-        let second_arguments = json!({"days":2});
-        let events = vec![
-            AssistantMessageEvent::Start,
-            AssistantMessageEvent::ThinkingStart {
-                content_index: 0,
-                thinking: None,
-                thinking_signature: None,
-                redacted: None,
-            },
-            AssistantMessageEvent::ThinkingDelta {
-                content_index: 0,
-                delta: "plan".into(),
-                thinking_signature_delta: None,
-            },
-            AssistantMessageEvent::TextStart { content_index: 1 },
-            AssistantMessageEvent::TextDelta {
-                content_index: 1,
-                delta: "Calling tools".into(),
-            },
-            AssistantMessageEvent::ToolCallStart {
-                content_index: 2,
-                id: "a".into(),
-                tool_name: "weather".into(),
-                namespace: None,
-            },
-            AssistantMessageEvent::ToolCallStart {
-                content_index: 3,
-                id: "b".into(),
-                tool_name: "calendar".into(),
-                namespace: None,
-            },
-            AssistantMessageEvent::ToolCallDelta {
-                content_index: 2,
-                delta: "{\"city\":\"Par".into(),
-            },
-            AssistantMessageEvent::ToolCallDelta {
-                content_index: 3,
-                delta: "{\"days\":".into(),
-            },
-            AssistantMessageEvent::ToolCallDelta {
-                content_index: 2,
-                delta: "is\"}".into(),
-            },
-            AssistantMessageEvent::ToolCallDelta {
-                content_index: 3,
-                delta: "2}".into(),
-            },
-            AssistantMessageEvent::ThinkingEnd {
-                content_index: 0,
-                content: "plan".into(),
-                content_signature: Some("thinking-sig".into()),
-                redacted: Some(false),
-            },
-            AssistantMessageEvent::TextEnd {
-                content_index: 1,
-                content: "Calling tools".into(),
-                content_signature: Some("text-sig".into()),
-            },
-            AssistantMessageEvent::ToolCallEnd {
-                content_index: 2,
-                tool_call: ToolCall {
-                    thought_signature: Some("tool-sig".into()),
-                    ..ToolCall::new("a", "weather", first_arguments.clone())
-                },
-            },
-            AssistantMessageEvent::ToolCallEnd {
-                content_index: 3,
-                tool_call: ToolCall::new("b", "calendar", second_arguments.clone()),
-            },
-        ];
-
-        for event in &events {
-            builder.apply(event).unwrap();
-        }
-        assert_eq!(builder.snapshot().content.len(), 4);
-        assert!(matches!(
-            &builder.snapshot().content[0],
-            AssistantContent::Thinking(content)
-                if content.thinking == "plan"
-                    && content.thinking_signature.as_deref() == Some("thinking-sig")
-        ));
-        assert!(matches!(
-            &builder.snapshot().content[1],
-            AssistantContent::Text(content)
-                if content.text == "Calling tools"
-                    && content.text_signature.as_deref() == Some("text-sig")
-        ));
-        assert!(matches!(
-            &builder.snapshot().content[2],
-            AssistantContent::ToolCall(call) if call.arguments == first_arguments
-        ));
-        assert!(matches!(
-            &builder.snapshot().content[3],
-            AssistantContent::ToolCall(call) if call.arguments == second_arguments
-        ));
-    }
-
-    /// Pins pi `src/utils/json-parse.ts:104-123` and `packages/agent/src/proxy.ts:322-327`.
-    #[test]
-    fn message_builder_uses_pi_streaming_json_values_without_a_depth_cap() {
-        fn arguments(builder: &MessageBuilder) -> &Value {
-            let AssistantContent::ToolCall(call) = &builder.snapshot().content[0] else {
-                panic!("tool call")
-            };
-            &call.arguments
-        }
-
-        let mut builder =
-            MessageBuilder::new(AssistantMessage::pending("api", "provider", "model", 1));
-        builder
-            .apply(&AssistantMessageEvent::ToolCallStart {
-                content_index: 0,
-                id: "call".into(),
-                tool_name: "run".into(),
-                namespace: None,
-            })
-            .unwrap();
-        builder
-            .apply(&AssistantMessageEvent::ToolCallDelta {
-                content_index: 0,
-                delta: "{\"path\":\"A\\".into(),
-            })
-            .unwrap();
-        assert_eq!(arguments(&builder), &json!({"path":"A"}));
-        builder
-            .apply(&AssistantMessageEvent::ToolCallDelta {
-                content_index: 0,
-                delta: "H\"}".into(),
-            })
-            .unwrap();
-        assert_eq!(arguments(&builder), &json!({"path":"A\\H"}));
-
-        for (raw, expected) in [
-            ("[1,2", json!([1, 2])),
-            ("true", json!(true)),
-            ("false", json!(false)),
-            ("12", json!(12)),
-        ] {
-            let mut builder =
-                MessageBuilder::new(AssistantMessage::pending("api", "provider", "model", 1));
-            builder
-                .apply(&AssistantMessageEvent::ToolCallStart {
-                    content_index: 0,
-                    id: "call".into(),
-                    tool_name: "run".into(),
-                    namespace: None,
-                })
-                .unwrap();
-            builder
-                .apply(&AssistantMessageEvent::ToolCallDelta {
-                    content_index: 0,
-                    delta: raw.into(),
-                })
-                .unwrap();
-            assert_eq!(arguments(&builder), &expected, "{raw}");
-        }
-
-        let mut builder =
-            MessageBuilder::new(AssistantMessage::pending("api", "provider", "model", 1));
-        builder
-            .apply(&AssistantMessageEvent::ToolCallStart {
-                content_index: 0,
-                id: "call".into(),
-                tool_name: "run".into(),
-                namespace: None,
-            })
-            .unwrap();
-        builder
-            .apply(&AssistantMessageEvent::ToolCallDelta {
-                content_index: 0,
-                delta: format!("{}0", "[".repeat(129)),
-            })
-            .unwrap();
-        let mut nested = arguments(&builder);
-        for _ in 0..129 {
-            nested = &nested.as_array().expect("nested array")[0];
-        }
-        assert_eq!(nested, &json!(0));
-    }
-
-    /// Pins pi `src/api/anthropic-messages.ts:620-638,691-697` and
-    /// `src/api/openai-responses-shared.ts:485-527` snapshot state.
-    #[test]
-    fn message_builder_carries_early_thinking_and_tool_namespace_state() {
-        let mut builder =
-            MessageBuilder::new(AssistantMessage::pending("api", "provider", "model", 1));
-        builder
-            .apply(&AssistantMessageEvent::ThinkingStart {
-                content_index: 0,
-                thinking: Some("[Reasoning redacted]".into()),
-                thinking_signature: Some("sig-".into()),
-                redacted: Some(true),
-            })
-            .unwrap();
-        builder
-            .apply(&AssistantMessageEvent::ThinkingDelta {
-                content_index: 0,
-                delta: String::new(),
-                thinking_signature_delta: Some("tail".into()),
-            })
-            .unwrap();
-        builder
-            .apply(&AssistantMessageEvent::ThinkingEnd {
-                content_index: 0,
-                content: "[Reasoning redacted]".into(),
-                content_signature: None,
-                redacted: None,
-            })
-            .unwrap();
-        builder
-            .apply(&AssistantMessageEvent::ToolCallStart {
-                content_index: 1,
-                id: "call|fc".into(),
-                tool_name: "search".into(),
-                namespace: Some("dynamic_tools".into()),
-            })
-            .unwrap();
-
-        assert!(matches!(
-            &builder.snapshot().content[0],
-            AssistantContent::Thinking(block)
-                if block.thinking == "[Reasoning redacted]"
-                    && block.thinking_signature.as_deref() == Some("sig-tail")
-                    && block.redacted == Some(true)
-        ));
-        assert!(matches!(
-            &builder.snapshot().content[1],
-            AssistantContent::ToolCall(call)
-                if call.namespace.as_deref() == Some("dynamic_tools")
-        ));
-        assert_eq!(
-            serde_json::to_value([
-                AssistantMessageEvent::ThinkingStart {
-                    content_index: 0,
-                    thinking: Some("[Reasoning redacted]".into()),
-                    thinking_signature: Some("sig".into()),
-                    redacted: Some(true),
-                },
-                AssistantMessageEvent::ThinkingDelta {
-                    content_index: 0,
-                    delta: String::new(),
-                    thinking_signature_delta: Some("tail".into()),
-                },
-                AssistantMessageEvent::ToolCallStart {
-                    content_index: 1,
-                    id: "call".into(),
-                    tool_name: "search".into(),
-                    namespace: Some("dynamic_tools".into()),
-                },
-            ])
-            .unwrap(),
-            json!([
-                {"type":"thinking_start","contentIndex":0,"thinking":"[Reasoning redacted]","thinkingSignature":"sig","redacted":true},
-                {"type":"thinking_delta","contentIndex":0,"delta":"","thinkingSignatureDelta":"tail"},
-                {"type":"toolcall_start","contentIndex":1,"id":"call","toolName":"search","namespace":"dynamic_tools"}
-            ])
-        );
-    }
-
-    /// Pins pi `types.ts:547-552` and `proxy.ts:353-362`: terminals replace the accumulated snapshot.
+    /// Pins pi `types.ts:547-552`: terminals replace the accumulated snapshot.
     #[test]
     fn message_builder_applies_done_and_error_terminals_authoritatively() {
-        let base = AssistantMessage::pending("api", "provider", "model", 7);
+        let base = AssistantMessage::pending("api", "provider", "model", 7.0);
         let mut done_builder = MessageBuilder::new(base.clone());
         let done = message(StopReason::ToolUse, "final");
         done_builder
@@ -987,12 +605,16 @@ mod tests {
 
         let mut error_builder = MessageBuilder::new(base);
         error_builder
-            .apply(&AssistantMessageEvent::TextStart { content_index: 0 })
+            .apply(&AssistantMessageEvent::TextStart {
+                content_index: 0.0,
+                partial: partial(),
+            })
             .unwrap();
         error_builder
             .apply(&AssistantMessageEvent::TextDelta {
-                content_index: 0,
+                content_index: 0.0,
                 delta: "partial".into(),
+                partial: partial(),
             })
             .unwrap();
         let mut error = AssistantMessage {
@@ -1003,7 +625,6 @@ mod tests {
             model: "model".into(),
             response_model: None,
             response_id: None,
-            reasoning_details: None,
             diagnostics: None,
             usage: Usage::default(),
             stop_reason: StopReason::Aborted,
@@ -1011,7 +632,7 @@ mod tests {
             error_message: Some("Request aborted by user".into()),
             raw_stop_reason: None,
             end_turn: None,
-            timestamp: 7,
+            timestamp: 7.0,
         };
         error_builder
             .apply(&AssistantMessageEvent::Error {
@@ -1024,67 +645,79 @@ mod tests {
         assert_ne!(error_builder.snapshot(), &error);
     }
 
-    /// Pins pi `types.ts:536-552` plus the partial-free fields in `proxy.ts:36-57`.
+    /// Pins pi `types.ts:536-552`: every nonterminal event serializes its
+    /// current assistant-message snapshot under `partial`.
     #[test]
-    fn event_wire_uses_pi_names_without_partial_snapshots() {
+    fn event_wire_carries_pi_partial_snapshots() {
+        let snapshot = message(StopReason::Pending, "snapshot");
+        let partial = || Arc::new(snapshot.clone());
         let events = vec![
-            AssistantMessageEvent::Start,
-            AssistantMessageEvent::TextStart { content_index: 0 },
+            AssistantMessageEvent::Start { partial: partial() },
+            AssistantMessageEvent::TextStart {
+                content_index: 0.0,
+                partial: partial(),
+            },
             AssistantMessageEvent::TextDelta {
-                content_index: 0,
+                content_index: 0.0,
                 delta: "a".into(),
+                partial: partial(),
             },
             AssistantMessageEvent::TextEnd {
-                content_index: 0,
+                content_index: 0.0,
                 content: "a".into(),
-                content_signature: Some("text-sig".into()),
+                partial: partial(),
             },
             AssistantMessageEvent::ThinkingStart {
-                content_index: 1,
-                thinking: None,
-                thinking_signature: None,
-                redacted: None,
+                content_index: 1.0,
+                partial: partial(),
             },
             AssistantMessageEvent::ThinkingDelta {
-                content_index: 1,
+                content_index: 1.0,
                 delta: "b".into(),
-                thinking_signature_delta: None,
+                partial: partial(),
             },
             AssistantMessageEvent::ThinkingEnd {
-                content_index: 1,
+                content_index: 1.0,
                 content: "b".into(),
-                content_signature: Some("thinking-sig".into()),
-                redacted: Some(false),
+                partial: partial(),
             },
             AssistantMessageEvent::ToolCallStart {
-                content_index: 2,
-                id: "call".into(),
-                tool_name: "lookup".into(),
-                namespace: None,
+                content_index: 2.0,
+                partial: partial(),
             },
             AssistantMessageEvent::ToolCallDelta {
-                content_index: 2,
+                content_index: 2.0,
                 delta: "{}".into(),
+                partial: partial(),
             },
             AssistantMessageEvent::ToolCallEnd {
-                content_index: 2,
-                tool_call: ToolCall::new("call", "lookup", json!({})),
+                content_index: 2.0,
+                tool_call: ToolCall::new("call", "lookup", crate::types::JsonObject::new()),
+                partial: partial(),
             },
         ];
+        let wire = serde_json::to_value(&events).unwrap();
+        let wire = wire.as_array().expect("event array");
+        assert_eq!(wire.len(), 10);
+        for (event, wire_event) in events.iter().zip(wire) {
+            assert_eq!(event.partial(), Some(&snapshot));
+            assert_eq!(wire_event.get("partial"), Some(&json!(snapshot)));
+        }
         assert_eq!(
-            serde_json::to_value(events).unwrap(),
-            json!([
-                {"type":"start"},
-                {"type":"text_start","contentIndex":0},
-                {"type":"text_delta","contentIndex":0,"delta":"a"},
-                {"type":"text_end","contentIndex":0,"content":"a","contentSignature":"text-sig"},
-                {"type":"thinking_start","contentIndex":1},
-                {"type":"thinking_delta","contentIndex":1,"delta":"b"},
-                {"type":"thinking_end","contentIndex":1,"content":"b","contentSignature":"thinking-sig","redacted":false},
-                {"type":"toolcall_start","contentIndex":2,"id":"call","toolName":"lookup"},
-                {"type":"toolcall_delta","contentIndex":2,"delta":"{}"},
-                {"type":"toolcall_end","contentIndex":2,"toolCall":{"type":"toolCall","id":"call","name":"lookup","arguments":{}}}
-            ])
+            wire[4],
+            json!({"type":"thinking_start","contentIndex":1,"partial":snapshot})
+        );
+        assert_eq!(
+            wire[5],
+            json!({"type":"thinking_delta","contentIndex":1,"delta":"b","partial":snapshot})
+        );
+        assert_eq!(
+            wire[6],
+            json!({"type":"thinking_end","contentIndex":1,"content":"b","partial":snapshot})
+        );
+        assert_eq!(
+            wire[7],
+            json!({"type":"toolcall_start","contentIndex":2,"partial":snapshot})
         );
 
         let done_message = message(StopReason::Deferred, "later");

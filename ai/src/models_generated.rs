@@ -165,8 +165,8 @@ mod tests {
         assert_eq!(glm.base_url, "https://inference.baseten.co/v1");
         assert!(glm.reasoning);
         assert_eq!(glm.input, [ModelInput::Text, ModelInput::Image]);
-        assert_eq!(glm.context_window, 1_048_576);
-        assert_eq!(glm.max_tokens, 262_144);
+        assert_eq!(glm.context_window, 1_048_576.0);
+        assert_eq!(glm.max_tokens, 262_144.0);
         assert_eq!(glm.cost.rates.input, 1.4);
         assert_eq!(glm.cost.rates.output, 4.4);
 
@@ -184,8 +184,8 @@ mod tests {
         assert_eq!(kimi.api.as_str(), "openai-completions");
         assert_eq!(kimi.provider.as_str(), "together");
         assert_eq!(kimi.base_url, "https://api.together.ai/v1");
-        assert_eq!(kimi.context_window, 262_144);
-        assert_eq!(kimi.max_tokens, 131_000);
+        assert_eq!(kimi.context_window, 262_144.0);
+        assert_eq!(kimi.max_tokens, 131_000.0);
         assert_eq!(kimi.cost.rates.input, 1.2);
         assert_eq!(kimi.cost.rates.output, 4.5);
         assert_eq!(
@@ -244,7 +244,7 @@ mod tests {
         assert_eq!(vision.input, [ModelInput::Text, ModelInput::Image]);
         assert_eq!(vision.cost.rates.input, 0.3);
         assert_eq!(vision.cost.rates.output, 0.9);
-        assert_eq!(vision.max_tokens, 32_768);
+        assert_eq!(vision.max_tokens, 32_768.0);
         assert_eq!(model("zai", "glm-5.2").cost.rates.input, 1.4);
         assert_eq!(model("zai-coding-cn", "glm-5.1").cost.rates.output, 4.4);
         for provider in ["zai", "zai-coding-cn"] {
@@ -405,7 +405,10 @@ mod tests {
         assert_eq!(kimi.api.as_str(), "anthropic-messages");
         assert_eq!(kimi.base_url, "https://api.fireworks.ai/inference");
         assert_eq!(kimi.input, [ModelInput::Text, ModelInput::Image]);
-        assert_eq!((kimi.context_window, kimi.max_tokens), (262_000, 262_000));
+        assert_eq!(
+            (kimi.context_window, kimi.max_tokens),
+            (262_000.0, 262_000.0)
+        );
         assert_eq!((kimi.cost.rates.input, kimi.cost.rates.output), (0.95, 4.0));
         assert!(MODELS["fireworks"].values().any(|model| {
             model.id.starts_with("accounts/fireworks/routers/")

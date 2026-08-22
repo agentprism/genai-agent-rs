@@ -5,16 +5,15 @@ use crate::types::{
 };
 use crate::utils::estimate::estimate_context_tokens;
 
-const CONTEXT_SAFETY_TOKENS: u64 = 4_096;
-const MIN_MAX_TOKENS: u64 = 1;
-pub fn clamp_max_tokens_to_context(model: &Model, context: &Context, max_tokens: u64) -> u64 {
-    if model.context_window == 0 {
+const CONTEXT_SAFETY_TOKENS: f64 = 4_096.0;
+const MIN_MAX_TOKENS: f64 = 1.0;
+pub fn clamp_max_tokens_to_context(model: &Model, context: &Context, max_tokens: f64) -> f64 {
+    if model.context_window == 0.0 {
         return MIN_MAX_TOKENS.max(max_tokens);
     }
-    let available = model.context_window as f64
-        - estimate_context_tokens(context).tokens.as_number()
-        - CONTEXT_SAFETY_TOKENS as f64;
-    max_tokens.min(available.max(MIN_MAX_TOKENS as f64) as u64)
+    let available =
+        model.context_window - estimate_context_tokens(context).tokens - CONTEXT_SAFETY_TOKENS;
+    max_tokens.min(available.max(MIN_MAX_TOKENS))
 }
 
 pub fn build_base_options(
@@ -142,8 +141,8 @@ mod tests {
             thinking_level_map: None,
             input: vec![ModelInput::Text],
             cost: ModelCost::default(),
-            context_window: 10_000,
-            max_tokens: 8_000,
+            context_window: 10_000.0,
+            max_tokens: 8_000.0,
             sampling_params: Some(Map::from_iter([
                 ("top_p".to_owned(), json!(0.9)),
                 ("seed".to_owned(), json!(1)),
@@ -155,11 +154,11 @@ mod tests {
 
     fn assistant(timestamp: i64, total_tokens: u64) -> Message {
         let mut message =
-            AssistantMessage::pending("openai-responses", "openai", "test", timestamp);
-        message.content = vec![AssistantContent::Text(TextContent::new("kept"))].into();
+            AssistantMessage::pending("openai-responses", "openai", "test", timestamp as f64);
+        message.content = vec![AssistantContent::Text(TextContent::new("kept"))];
         message.stop_reason = StopReason::Stop;
-        message.usage.input = total_tokens.into();
-        message.usage.total_tokens = total_tokens.into();
+        message.usage.input = total_tokens as f64;
+        message.usage.total_tokens = total_tokens as f64;
         Message::Assistant(Box::new(message))
     }
 
@@ -174,7 +173,7 @@ mod tests {
         };
         let mut options = SimpleStreamOptions::default();
         options.stream.temperature = Some(0.0);
-        options.stream.max_tokens = Some(0);
+        options.stream.max_tokens = Some(0.0);
         options.stream.request.api_key = Some(String::new());
         options.stream.sampling_params = Some(Map::from_iter([
             ("seed".to_owned(), json!(0)),
@@ -189,7 +188,7 @@ mod tests {
         options.stream.request.telemetry_context = Some(Arc::clone(&telemetry));
         let built = build_base_options(&model, &context, Some(&options), Some("resolved"));
         assert_eq!(built.temperature, Some(0.0));
-        assert_eq!(built.max_tokens, Some(0));
+        assert_eq!(built.max_tokens, Some(0.0));
         assert_eq!(built.request.api_key.as_deref(), Some("resolved"));
         assert_eq!(
             built.sampling_params.as_ref().expect("sampling")["top_p"],
@@ -255,18 +254,21 @@ mod tests {
     #[test]
     fn clamps_max_tokens_to_context_safety_room() {
         let mut model = model();
-        model.context_window = 10_000;
-        model.max_tokens = 8_000;
+        model.context_window = 10_000.0;
+        model.max_tokens = 8_000.0;
         let context = Context {
-            system_prompt: Some("x".repeat(4_000)),
+            system_prompt: Some(("x".repeat(4_000)).into()),
             messages: vec![Message::User(Box::new(UserMessage {
                 role: UserRole::User,
-                content: UserContent::Text("hello world".to_owned()),
-                timestamp: 1,
+                content: UserContent::Text(("hello world".to_owned()).into()),
+                timestamp: 1.0,
             }))],
             tools: None,
         };
-        assert_eq!(clamp_max_tokens_to_context(&model, &context, 8_000), 4_901);
+        assert_eq!(
+            clamp_max_tokens_to_context(&model, &context, 8_000.0),
+            4_901.0
+        );
     }
 
     /// Ports pi `test/context-estimate.test.ts:43-80`, used by `buildBaseOptions`.
@@ -275,18 +277,18 @@ mod tests {
         let mut model = model();
         model.sampling_params = None;
         let stale_context = Context {
-            system_prompt: Some("system".to_owned()),
+            system_prompt: Some(("system".to_owned()).into()),
             messages: vec![
                 Message::User(Box::new(UserMessage {
                     role: UserRole::User,
-                    content: UserContent::Text("summary".to_owned()),
-                    timestamp: 200,
+                    content: UserContent::Text(("summary".to_owned()).into()),
+                    timestamp: 200.0,
                 })),
                 assistant(100, 9_500),
                 Message::User(Box::new(UserMessage {
                     role: UserRole::User,
-                    content: UserContent::Text("x".repeat(4_000)),
-                    timestamp: 300,
+                    content: UserContent::Text(("x".repeat(4_000)).into()),
+                    timestamp: 300.0,
                 })),
             ],
             tools: None,
@@ -294,7 +296,7 @@ mod tests {
         assert_eq!(estimate_context_tokens(&stale_context).tokens, 1_005.0);
         assert_eq!(
             build_base_options(&model, &stale_context, None, None).max_tokens,
-            Some(4_899)
+            Some(4_899.0)
         );
 
         let current_context = Context {
@@ -302,20 +304,20 @@ mod tests {
             messages: vec![
                 Message::User(Box::new(UserMessage {
                     role: UserRole::User,
-                    content: UserContent::Text("summary".to_owned()),
-                    timestamp: 200,
+                    content: UserContent::Text(("summary".to_owned()).into()),
+                    timestamp: 200.0,
                 })),
                 assistant(100, 9_500),
                 Message::User(Box::new(UserMessage {
                     role: UserRole::User,
-                    content: UserContent::Text("new prompt".to_owned()),
-                    timestamp: 300,
+                    content: UserContent::Text(("new prompt".to_owned()).into()),
+                    timestamp: 300.0,
                 })),
                 assistant(400, 2_000),
                 Message::User(Box::new(UserMessage {
                     role: UserRole::User,
-                    content: UserContent::Text("tail".to_owned()),
-                    timestamp: 500,
+                    content: UserContent::Text(("tail".to_owned()).into()),
+                    timestamp: 500.0,
                 })),
             ],
             tools: None,

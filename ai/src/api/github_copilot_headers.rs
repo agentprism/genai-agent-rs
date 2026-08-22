@@ -60,7 +60,7 @@ mod tests {
                 "AA==",
                 "image/png",
             ))]),
-            timestamp: 1,
+            timestamp: 1.0,
         }));
         assert_eq!(infer_copilot_initiator(std::slice::from_ref(&user)), "user");
         assert!(has_copilot_vision_input(std::slice::from_ref(&user)));
@@ -69,14 +69,14 @@ mod tests {
             "openai-responses",
             "github-copilot",
             "gpt",
-            2,
+            2.0,
         )));
         assert_eq!(infer_copilot_initiator(&[user.clone(), assistant]), "agent");
 
         let tool_result = Message::ToolResult(Box::new(ToolResultMessage {
             role: ToolResultRole::ToolResult,
-            tool_call_id: "call".to_owned(),
-            tool_name: "image".to_owned(),
+            tool_call_id: "call".into(),
+            tool_name: "image".into(),
             content: vec![UserContentBlock::Image(ImageContent::new(
                 "AA==",
                 "image/png",
@@ -85,7 +85,7 @@ mod tests {
             usage: None,
             added_tool_names: None,
             is_error: false,
-            timestamp: 3,
+            timestamp: 3.0,
         }));
         assert!(has_copilot_vision_input(std::slice::from_ref(&tool_result)));
         let headers = build_copilot_dynamic_headers(&[user, tool_result], true);

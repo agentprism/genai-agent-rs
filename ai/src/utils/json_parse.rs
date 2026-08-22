@@ -1,7 +1,9 @@
 //! Full and partial JSON recovery ⇐ pi `src/utils/json-parse.ts` and pinned `partial-json` 0.1.7.
 
+use crate::utils::ecma_json::{self, JsonObject, JsonValue};
+use crate::utils::js_string::JsString;
 use serde::de::DeserializeOwned;
-use serde_json::{Map, Number, Value};
+use std::borrow::Cow;
 
 pub fn repair_json(json: &str) -> String {
     let characters = json.chars().collect::<Vec<_>>();
@@ -94,20 +96,60 @@ where
     }
 }
 
-pub fn parse_streaming_json(partial_json: Option<&str>) -> Value {
-    let Some(partial_json) = partial_json.filter(|json| !json.trim().is_empty()) else {
-        return Value::Object(Map::new());
-    };
-
-    parse_json_with_repair(partial_json)
-        .or_else(|_| PartialParser::parse(partial_json).map(coalesce_partial_null))
-        .or_else(|_| PartialParser::parse(&repair_json(partial_json)).map(coalesce_partial_null))
-        .unwrap_or_else(|_| Value::Object(Map::new()))
+pub trait EcmaJsonText {
+    fn json_source(&self) -> Cow<'_, str>;
 }
 
-fn coalesce_partial_null(value: Value) -> Value {
+impl EcmaJsonText for str {
+    fn json_source(&self) -> Cow<'_, str> {
+        Cow::Borrowed(self)
+    }
+}
+
+impl EcmaJsonText for String {
+    fn json_source(&self) -> Cow<'_, str> {
+        Cow::Borrowed(self)
+    }
+}
+
+impl EcmaJsonText for JsString {
+    fn json_source(&self) -> Cow<'_, str> {
+        Cow::Owned(self.to_json_source())
+    }
+}
+
+pub fn parse_streaming_json<T>(partial_json: Option<&T>) -> JsonValue
+where
+    T: EcmaJsonText + ?Sized,
+{
+    let Some(partial_json) = partial_json else {
+        return JsonValue::Object(JsonObject::new());
+    };
+    let partial_json = partial_json.json_source();
+    if partial_json.trim().is_empty() {
+        return JsonValue::Object(JsonObject::new());
+    }
+
+    ecma_json::parse(&partial_json)
+        .or_else(|_| ecma_json::parse(&repair_json(&partial_json)))
+        .or_else(|_| PartialParser::parse(&partial_json).map(coalesce_partial_null))
+        .or_else(|_| PartialParser::parse(&repair_json(&partial_json)).map(coalesce_partial_null))
+        .unwrap_or_else(|_| JsonValue::Object(JsonObject::new()))
+}
+
+pub fn parse_streaming_json_object<T>(partial_json: Option<&T>) -> JsonObject
+where
+    T: EcmaJsonText + ?Sized,
+{
+    parse_streaming_json(partial_json)
+        .as_object()
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn coalesce_partial_null(value: JsonValue) -> JsonValue {
     match value {
-        Value::Null => Value::Object(Map::new()),
+        JsonValue::Null => JsonValue::Object(JsonObject::new()),
         value => value,
     }
 }
@@ -122,7 +164,7 @@ struct PartialParser<'a> {
 }
 
 impl<'a> PartialParser<'a> {
-    fn parse(input: &'a str) -> Result<Value, PartialParseError> {
+    fn parse(input: &'a str) -> Result<JsonValue, PartialParseError> {
         let trimmed = input.trim();
         if trimmed.is_empty() {
             return Err(PartialParseError);
@@ -135,19 +177,22 @@ impl<'a> PartialParser<'a> {
         parser.parse_any()
     }
 
-    fn parse_any(&mut self) -> Result<Value, PartialParseError> {
+    fn parse_any(&mut self) -> Result<JsonValue, PartialParseError> {
         self.skip_blank();
         let Some(&next) = self.bytes.get(self.index) else {
             return Err(PartialParseError);
         };
         match next {
-            b'"' => self.parse_string().map(Value::String),
+            b'"' => self.parse_string().map(JsonValue::String),
             b'{' => self.parse_object(),
             b'[' => self.parse_array(),
-            _ if self.partial_keyword("null") => Ok(Value::Null),
-            _ if self.partial_keyword("true") => Ok(Value::Bool(true)),
-            _ if self.partial_keyword("false") => Ok(Value::Bool(false)),
-            _ => self.parse_number().map(Value::Number),
+            _ if self.partial_keyword("null") => Ok(JsonValue::Null),
+            _ if self.partial_keyword("true") => Ok(JsonValue::Bool(true)),
+            _ if self.partial_keyword("false") => Ok(JsonValue::Bool(false)),
+            _ if self.partial_keyword("Infinity") => Ok(JsonValue::Number(f64::INFINITY)),
+            _ if self.partial_negative_infinity() => Ok(JsonValue::Number(f64::NEG_INFINITY)),
+            _ if self.partial_keyword("NaN") => Ok(JsonValue::Number(f64::NAN)),
+            _ => self.parse_number().map(JsonValue::Number),
         }
     }
 
@@ -163,7 +208,21 @@ impl<'a> PartialParser<'a> {
         }
     }
 
-    fn parse_string(&mut self) -> Result<String, PartialParseError> {
+    fn partial_negative_infinity(&mut self) -> bool {
+        let remaining = &self.input[self.index..];
+        if remaining.starts_with("-Infinity")
+            || (remaining.len() > 1
+                && remaining.len() < "-Infinity".len()
+                && "-Infinity".starts_with(remaining))
+        {
+            self.index = self.index.saturating_add("-Infinity".len());
+            true
+        } else {
+            false
+        }
+    }
+
+    fn parse_string(&mut self) -> Result<JsString, PartialParseError> {
         let start = self.index;
         let mut escaped = false;
         self.index += 1;
@@ -171,8 +230,10 @@ impl<'a> PartialParser<'a> {
             let byte = self.bytes[self.index];
             if byte == b'"' && !escaped {
                 self.index += 1;
-                return serde_json::from_str(&self.input[start..self.index])
-                    .map_err(|_| PartialParseError);
+                return match ecma_json::parse(&self.input[start..self.index]) {
+                    Ok(JsonValue::String(value)) => Ok(value),
+                    _ => Err(PartialParseError),
+                };
             }
             escaped = byte == b'\\' && !escaped;
             if byte != b'\\' {
@@ -186,7 +247,7 @@ impl<'a> PartialParser<'a> {
             end = end.saturating_sub(1);
         }
         let candidate = format!("{}\"", &self.input[start..end]);
-        if let Ok(value) = serde_json::from_str(&candidate) {
+        if let Ok(JsonValue::String(value)) = ecma_json::parse(&candidate) {
             return Ok(value);
         }
 
@@ -194,28 +255,30 @@ impl<'a> PartialParser<'a> {
             .rfind('\\')
             .map(|offset| start + offset)
             .ok_or(PartialParseError)?;
-        serde_json::from_str(&format!("{}\"", &self.input[start..last_backslash]))
-            .map_err(|_| PartialParseError)
+        match ecma_json::parse(&format!("{}\"", &self.input[start..last_backslash])) {
+            Ok(JsonValue::String(value)) => Ok(value),
+            _ => Err(PartialParseError),
+        }
     }
 
-    fn parse_object(&mut self) -> Result<Value, PartialParseError> {
+    fn parse_object(&mut self) -> Result<JsonValue, PartialParseError> {
         self.index += 1;
         self.skip_blank();
-        let mut object = Map::new();
+        let mut object = JsonObject::new();
         loop {
             self.skip_blank();
             match self.bytes.get(self.index) {
                 Some(b'}') => {
                     self.index += 1;
-                    return Ok(Value::Object(object));
+                    return Ok(JsonValue::Object(object));
                 }
-                None => return Ok(Value::Object(object)),
+                None => return Ok(JsonValue::Object(object)),
                 Some(_) => {}
             }
 
             let key = match self.parse_string() {
                 Ok(key) => key,
-                Err(_) => return Ok(Value::Object(object)),
+                Err(_) => return Ok(JsonValue::Object(object)),
             };
             self.skip_blank();
             self.index = self.index.saturating_add(1);
@@ -223,7 +286,7 @@ impl<'a> PartialParser<'a> {
                 Ok(value) => {
                     object.insert(key, value);
                 }
-                Err(_) => return Ok(Value::Object(object)),
+                Err(_) => return Ok(JsonValue::Object(object)),
             }
             self.skip_blank();
             if self.bytes.get(self.index) == Some(&b',') {
@@ -232,21 +295,21 @@ impl<'a> PartialParser<'a> {
         }
     }
 
-    fn parse_array(&mut self) -> Result<Value, PartialParseError> {
+    fn parse_array(&mut self) -> Result<JsonValue, PartialParseError> {
         self.index += 1;
         let mut array = Vec::new();
         loop {
             self.skip_blank();
             if self.bytes.get(self.index) == Some(&b']') {
                 self.index += 1;
-                return Ok(Value::Array(array));
+                return Ok(JsonValue::Array(array));
             }
             if self.index >= self.bytes.len() {
-                return Ok(Value::Array(array));
+                return Ok(JsonValue::Array(array));
             }
             match self.parse_any() {
                 Ok(value) => array.push(value),
-                Err(_) => return Ok(Value::Array(array)),
+                Err(_) => return Ok(JsonValue::Array(array)),
             }
             self.skip_blank();
             if self.bytes.get(self.index) == Some(&b',') {
@@ -255,7 +318,20 @@ impl<'a> PartialParser<'a> {
         }
     }
 
-    fn parse_number(&mut self) -> Result<Number, PartialParseError> {
+    fn parse_number(&mut self) -> Result<f64, PartialParseError> {
+        if self.index == 0 {
+            if self.input == "-" {
+                return Err(PartialParseError);
+            }
+            if let Ok(number) = parse_json_number(self.input) {
+                return Ok(number);
+            }
+            if let Some(exponent) = self.input.rfind('e') {
+                return parse_json_number(&self.input[..exponent]);
+            }
+            return Err(PartialParseError);
+        }
+
         let start = self.index;
         if self.bytes.get(self.index) == Some(&b'-') {
             self.index += 1;
@@ -267,15 +343,19 @@ impl<'a> PartialParser<'a> {
             self.index += 1;
         }
         let token = &self.input[start..self.index];
-        if let Ok(number) = token.parse::<Number>() {
+        if let Ok(number) = parse_json_number(token) {
             return Ok(number);
         }
-        if let Some(exponent) = token.rfind('e').or_else(|| token.rfind('E')) {
-            return token[..exponent]
-                .parse::<Number>()
-                .map_err(|_| PartialParseError);
+        if token == "-" {
+            return Err(PartialParseError);
         }
-        Err(PartialParseError)
+        let exponent = self.input.rfind('e').unwrap_or_default();
+        let (left, right) = if start <= exponent {
+            (start, exponent)
+        } else {
+            (exponent, start)
+        };
+        parse_json_number(&self.input[left..right])
     }
 
     fn skip_blank(&mut self) {
@@ -289,9 +369,17 @@ impl<'a> PartialParser<'a> {
     }
 }
 
+fn parse_json_number(value: &str) -> Result<f64, PartialParseError> {
+    match ecma_json::parse(value) {
+        Ok(JsonValue::Number(value)) => Ok(value),
+        _ => Err(PartialParseError),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use serde_json::json;
 
     /// Matrix evaluated through pi `parseStreamingJson` (`src/utils/json-parse.ts:104-123`).
@@ -339,6 +427,54 @@ mod tests {
             ("{\"x\":\"trail\\", json!({"x":"trail"})),
         ];
         for (input, expected) in cases {
+            assert_eq!(parse_streaming_json(Some(input)), expected, "{input:?}");
+        }
+    }
+
+    /// Ports the pinned `partial-json@0.1.7` keyword branches consumed by pi
+    /// `src/utils/json-parse.ts:104-120`.
+    #[test]
+    fn partial_non_finite_numbers_survive() {
+        for (input, expected) in [
+            ("Infinity", f64::INFINITY),
+            ("Inf", f64::INFINITY),
+            ("-Infinity", f64::NEG_INFINITY),
+            ("-Inf", f64::NEG_INFINITY),
+        ] {
+            assert_eq!(parse_streaming_json(Some(input)).as_f64(), Some(expected));
+        }
+        assert!(
+            parse_streaming_json(Some("Na"))
+                .as_f64()
+                .expect("number")
+                .is_nan()
+        );
+        let object = parse_streaming_json(Some(r#"{"value":NaN}"#));
+        assert!(
+            object
+                .get("value")
+                .and_then(JsonValue::as_f64)
+                .expect("number")
+                .is_nan()
+        );
+    }
+
+    /// Ports the exact case-sensitive numeric recovery branches in
+    /// `partial-json@0.1.7/dist/index.js:61-75,151-183`, reached through pi
+    /// `src/utils/json-parse.ts:104-120`.
+    #[test]
+    fn malformed_and_incomplete_number_recovery_matches_partial_json_0_1_7() {
+        for (input, expected) in [
+            ("-", json!({})),
+            ("-I", json!(f64::NEG_INFINITY)),
+            ("1e", json!(1)),
+            ("1e+", json!(1)),
+            ("1E", json!({})),
+            (r#"{"value":1e}"#, json!({"value":1})),
+            (r#"{"value":1e+}"#, json!({"value":1})),
+            (r#"{"value":1E}"#, json!({})),
+            (r#"{"value":-}"#, json!({})),
+        ] {
             assert_eq!(parse_streaming_json(Some(input)), expected, "{input:?}");
         }
     }

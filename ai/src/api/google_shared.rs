@@ -3,8 +3,8 @@ use crate::api::constrained_sampling::{
 };
 use crate::api::transform_messages::transform_messages;
 use crate::types::{
-    AssistantContent, Context, Message, Model, ModelInput, ModelThinkingLevel, StopReason, Tool,
-    UserContent, UserContentBlock,
+    AssistantContent, Context, JsString, JsonObject, JsonValue, Message, Model, ModelInput,
+    ModelThinkingLevel, StopReason, Tool, UserContent, UserContentBlock,
 };
 use crate::utils::provider_retry::{
     ProviderErrorMetadata, ProviderRetryClassify, ProviderRetryError, ProviderRetryOptions,
@@ -102,11 +102,14 @@ pub fn is_thinking_part(part: &Value) -> bool {
     part.get("thought").and_then(Value::as_bool) == Some(true)
 }
 
-pub fn retain_thought_signature(existing: Option<&str>, incoming: Option<&str>) -> Option<String> {
+pub fn retain_thought_signature(
+    existing: Option<&str>,
+    incoming: Option<&str>,
+) -> Option<JsString> {
     incoming
         .filter(|signature| !signature.is_empty())
-        .or(existing)
-        .map(str::to_owned)
+        .map(Into::into)
+        .or_else(|| existing.map(Into::into))
 }
 
 fn is_valid_thought_signature(signature: Option<&str>) -> bool {
@@ -166,9 +169,9 @@ fn normalize_google_tool_call_id(id: &str, model: &Model) -> String {
     String::from_utf16(&units).expect("normalization emits ASCII")
 }
 
-pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
-    let normalize = |id: &str, target: &Model, _source: &crate::types::AssistantMessage| {
-        normalize_google_tool_call_id(id, target)
+pub fn convert_messages(model: &Model, context: &Context) -> Vec<JsonValue> {
+    let normalize = |id: &JsString, target: &Model, _source: &crate::types::AssistantMessage| {
+        JsString::from(normalize_google_tool_call_id(&id.to_utf8_lossy(), target))
     };
     let messages = transform_messages(&context.messages, model, Some(&normalize));
     let mut contents = Vec::new();
@@ -180,24 +183,29 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
                     UserContent::Text(text) => vec![json!({ "text": sanitize_surrogates(text) })],
                     UserContent::Blocks(blocks) => blocks
                         .iter()
-                        .filter_map(|block| match block {
+                        .map(|block| match block {
                             UserContentBlock::Text(text) => {
-                                Some(json!({ "text": sanitize_surrogates(&text.text) }))
+                                json!({ "text": sanitize_surrogates(&text.text) })
                             }
-                            UserContentBlock::Image(image) => Some(json!({
+                            UserContentBlock::Image(image) => json!({
                                 "inlineData": {
                                     "mimeType": image.mime_type,
                                     "data": image.data,
                                 }
-                            })),
-                            UserContentBlock::Unknown(_) => None,
+                            }),
                         })
                         .collect(),
                 };
                 if matches!(&message.content, UserContent::Blocks(_)) && parts.is_empty() {
                     continue;
                 }
-                contents.push(json!({ "role": "user", "parts": parts }));
+                let mut content = JsonObject::new();
+                content.insert("role", "user");
+                content.insert(
+                    "parts",
+                    JsonValue::Array(parts.into_iter().map(JsonValue::from).collect()),
+                );
+                contents.push(JsonValue::Object(content));
             }
             Message::Assistant(message) => {
                 let same_provider_and_model =
@@ -210,7 +218,7 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
                                 same_provider_and_model,
                                 text.text_signature.as_deref(),
                             );
-                            if text.text.trim().is_empty() && signature.is_none() {
+                            if text.text.is_blank() && signature.is_none() {
                                 continue;
                             }
                             let mut part = Map::from_iter([(
@@ -223,7 +231,7 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
                                     Value::String(signature),
                                 );
                             }
-                            parts.push(Value::Object(part));
+                            parts.push(JsonValue::from(Value::Object(part)));
                         }
                         AssistantContent::Thinking(thinking) => {
                             if same_provider_and_model {
@@ -231,7 +239,7 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
                                     true,
                                     thinking.thinking_signature.as_deref(),
                                 );
-                                if thinking.thinking.trim().is_empty() && signature.is_none() {
+                                if thinking.thinking.is_blank() && signature.is_none() {
                                     continue;
                                 }
                                 let mut part = Map::from_iter([
@@ -247,61 +255,48 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
                                         Value::String(signature),
                                     );
                                 }
-                                parts.push(Value::Object(part));
-                            } else if !thinking.thinking.trim().is_empty() {
-                                parts.push(
+                                parts.push(JsonValue::from(Value::Object(part)));
+                            } else if !thinking.thinking.is_blank() {
+                                parts.push(JsonValue::from(
                                     json!({ "text": sanitize_surrogates(&thinking.thinking) }),
-                                );
+                                ));
                             }
                         }
                         AssistantContent::ToolCall(tool_call) => {
-                            let mut function_call = Map::from_iter([
-                                ("name".to_owned(), Value::String(tool_call.name.clone())),
-                                (
-                                    "args".to_owned(),
-                                    if tool_call.arguments.is_null() {
-                                        Value::Object(Map::new())
-                                    } else {
-                                        tool_call.arguments.clone()
-                                    },
-                                ),
-                            ]);
+                            let mut function_call = JsonObject::new();
+                            function_call.insert("name", tool_call.name.clone());
+                            function_call
+                                .insert("args", JsonValue::Object(tool_call.arguments.clone()));
                             if requires_tool_call_id(&model.id) {
-                                function_call
-                                    .insert("id".to_owned(), Value::String(tool_call.id.clone()));
+                                function_call.insert("id", tool_call.id.clone());
                             }
-                            let mut part = Map::from_iter([(
-                                "functionCall".to_owned(),
-                                Value::Object(function_call),
-                            )]);
+                            let mut part = JsonObject::new();
+                            part.insert("functionCall", JsonValue::Object(function_call));
                             if let Some(signature) = resolve_thought_signature(
                                 same_provider_and_model,
                                 tool_call.thought_signature.as_deref(),
                             ) {
-                                part.insert(
-                                    "thoughtSignature".to_owned(),
-                                    Value::String(signature),
-                                );
+                                part.insert("thoughtSignature", signature);
                             }
-                            parts.push(Value::Object(part));
+                            parts.push(JsonValue::Object(part));
                         }
-                        AssistantContent::Unknown(_) => {}
                     }
                 }
                 if !parts.is_empty() {
-                    contents.push(json!({ "role": "model", "parts": parts }));
+                    let mut content = JsonObject::new();
+                    content.insert("role", "model");
+                    content.insert("parts", JsonValue::Array(parts));
+                    contents.push(JsonValue::Object(content));
                 }
             }
             Message::ToolResult(message) => {
-                let text_result = message
-                    .content
-                    .iter()
-                    .filter_map(|content| match content {
-                        UserContentBlock::Text(text) => Some(text.text.as_str()),
-                        UserContentBlock::Image(_) | UserContentBlock::Unknown(_) => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                let text_result = crate::types::JsString::join_refs(
+                    message.content.iter().filter_map(|content| match content {
+                        UserContentBlock::Text(text) => Some(&text.text),
+                        UserContentBlock::Image(_) => None,
+                    }),
+                    "\n",
+                );
                 let images = if model.input.contains(&ModelInput::Image) {
                     message
                         .content
@@ -314,7 +309,6 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
                                 }
                             })),
                             UserContentBlock::Text(_) => None,
-                            UserContentBlock::Unknown(_) => None,
                         })
                         .collect::<Vec<_>>()
                 } else {
@@ -328,53 +322,61 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
                     String::new()
                 };
                 let multimodal = supports_multimodal_function_response(&model.id);
-                let mut function_response = Map::from_iter([
-                    ("name".to_owned(), Value::String(message.tool_name.clone())),
-                    (
-                        "response".to_owned(),
-                        if message.is_error {
-                            json!({ "error": response_value })
-                        } else {
-                            json!({ "output": response_value })
-                        },
-                    ),
-                ]);
+                let mut response = JsonObject::new();
+                response.insert(
+                    if message.is_error { "error" } else { "output" },
+                    response_value,
+                );
+                let mut function_response = JsonObject::new();
+                function_response.insert("name", message.tool_name.clone());
+                function_response.insert("response", JsonValue::Object(response));
                 if !images.is_empty() && multimodal {
-                    function_response.insert("parts".to_owned(), Value::Array(images.clone()));
+                    function_response.insert(
+                        "parts",
+                        JsonValue::Array(images.clone().into_iter().map(JsonValue::from).collect()),
+                    );
                 }
                 if requires_tool_call_id(&model.id) {
-                    function_response
-                        .insert("id".to_owned(), Value::String(message.tool_call_id.clone()));
+                    function_response.insert("id", message.tool_call_id.clone());
                 }
-                let response_part = json!({ "functionResponse": function_response });
+                let mut response_part = JsonObject::new();
+                response_part.insert("functionResponse", JsonValue::Object(function_response));
+                let response_part = JsonValue::Object(response_part);
                 let merge = contents
                     .last_mut()
-                    .and_then(Value::as_object_mut)
+                    .and_then(JsonValue::as_object_mut)
                     .is_some_and(|last| {
-                        last.get("role").and_then(Value::as_str) == Some("user")
-                            && last
-                                .get("parts")
-                                .and_then(Value::as_array)
-                                .is_some_and(|parts| {
+                        last.get("role")
+                            .and_then(JsonValue::as_str)
+                            .is_some_and(|role| role == "user")
+                            && last.get("parts").and_then(JsonValue::as_array).is_some_and(
+                                |parts| {
                                     parts
                                         .iter()
                                         .any(|part| part.get("functionResponse").is_some())
-                                })
+                                },
+                            )
                     });
                 if merge {
                     contents
                         .last_mut()
                         .and_then(|content| content.get_mut("parts"))
-                        .and_then(Value::as_array_mut)
+                        .and_then(JsonValue::as_array_mut)
                         .expect("checked merge target")
                         .push(response_part);
                 } else {
-                    contents.push(json!({ "role": "user", "parts": [response_part] }));
+                    let mut content = JsonObject::new();
+                    content.insert("role", "user");
+                    content.insert("parts", JsonValue::Array(vec![response_part]));
+                    contents.push(JsonValue::Object(content));
                 }
                 if !images.is_empty() && !multimodal {
-                    let mut parts = vec![json!({ "text": "Tool result image:" })];
-                    parts.extend(images);
-                    contents.push(json!({ "role": "user", "parts": parts }));
+                    let mut parts = vec![JsonValue::from(json!({ "text": "Tool result image:" }))];
+                    parts.extend(images.into_iter().map(JsonValue::from));
+                    let mut content = JsonObject::new();
+                    content.insert("role", "user");
+                    content.insert("parts", JsonValue::Array(parts));
+                    contents.push(JsonValue::Object(content));
                 }
             }
         }

@@ -1,7 +1,7 @@
 use super::*;
 use crate::types::{
-    AssistantRole, BedrockCompat, ImageContent, ModelCost, ModelInput, ThinkingContentType,
-    ToolCallType, ToolResultMessage, ToolResultRole, UserMessage, UserRole,
+    AssistantRole, BedrockCompat, ImageContent, JsonObject, ModelCost, ModelInput,
+    ThinkingContentType, ToolCallType, ToolResultMessage, ToolResultRole, UserMessage, UserRole,
 };
 use futures::StreamExt;
 
@@ -20,8 +20,8 @@ fn model(id: &str, name: &str, reasoning: bool) -> Model {
         thinking_level_map: None,
         input: vec![ModelInput::Text, ModelInput::Image],
         cost: ModelCost::default(),
-        context_window: 200_000,
-        max_tokens: 64_000,
+        context_window: 200_000.0,
+        max_tokens: 64_000.0,
         sampling_params: None,
         headers: None,
         compat: Some(ModelCompat::Bedrock(compat)),
@@ -46,7 +46,7 @@ fn user(content: UserContent) -> Message {
     Message::User(Box::new(UserMessage {
         role: UserRole::User,
         content,
-        timestamp: 1,
+        timestamp: 1.0,
     }))
 }
 
@@ -58,7 +58,7 @@ fn context(messages: Vec<Message>) -> Context {
     }
 }
 
-fn payload(context: &Context, model: &Model, options: &BedrockOptions) -> Value {
+fn payload(context: &Context, model: &Model, options: &BedrockOptions) -> JsonValue {
     build_command_input(context, model, options, CacheRetention::None).expect("payload")
 }
 
@@ -69,20 +69,19 @@ fn blank_content_and_empty_assistant_messages_follow_bedrock_rules() {
     let options = BedrockOptions::default();
     let value = payload(
         &context(vec![
-            user(UserContent::Text("   ".to_owned())),
+            user(UserContent::Text(("   ".to_owned()).into())),
             user(UserContent::Blocks(vec![
                 UserContentBlock::Text(TextContent::new("")),
                 UserContentBlock::Text(TextContent::new("hello")),
             ])),
             Message::Assistant(Box::new(AssistantMessage {
                 role: AssistantRole::Assistant,
-                content: vec![AssistantContent::Text(TextContent::new("  "))].into(),
+                content: vec![AssistantContent::Text(TextContent::new("  "))],
                 api: "bedrock-converse-stream".into(),
                 provider: "amazon-bedrock".into(),
-                model: model.id.clone(),
+                model: model.id.clone().into(),
                 response_model: None,
                 response_id: None,
-                reasoning_details: None,
                 diagnostics: None,
                 usage: Default::default(),
                 stop_reason: StopReason::Stop,
@@ -90,7 +89,7 @@ fn blank_content_and_empty_assistant_messages_follow_bedrock_rules() {
                 error_message: None,
                 raw_stop_reason: None,
                 end_turn: None,
-                timestamp: 1,
+                timestamp: 1.0,
             })),
         ]),
         &model,
@@ -105,33 +104,50 @@ fn blank_content_and_empty_assistant_messages_follow_bedrock_rules() {
     );
 }
 
-/// Ports pi `test/bedrock-convert-messages.test.ts:152-235,327-345`.
+/// Ports pi `test/bedrock-convert-messages.test.ts:271-305` and pins the
+/// adjacent system/thinking lowering at `src/api/bedrock-converse-stream.ts:866-898,1004-1027`.
 #[test]
-fn unknown_content_blocks_are_skipped_and_user_only_unknown_gets_placeholder() {
-    let unknown_user: UserContentBlock =
-        serde_json::from_value(json!({"type":"audio","data":"opaque"})).expect("opaque user");
-    assert!(matches!(unknown_user, UserContentBlock::Unknown(_)));
-    let unknown_assistant: AssistantContent =
-        serde_json::from_value(json!({"type":"future","payload":1})).expect("opaque assistant");
-    assert!(matches!(unknown_assistant, AssistantContent::Unknown(_)));
-
+fn lone_surrogates_are_removed_before_bedrock_blank_rules() {
     let model = claude();
-    let mut assistant = AssistantMessage::pending(
-        "bedrock-converse-stream",
-        "amazon-bedrock",
-        model.id.clone(),
-        1,
+    let lone = JsString::from_utf16(vec![0xd83d]);
+
+    let mut user_context = context(vec![user(UserContent::Text(lone.clone()))]);
+    user_context.system_prompt = Some(lone.clone());
+    let value = payload(&user_context, &model, &BedrockOptions::default());
+    assert_eq!(value["system"], json!([{"text":""}]));
+    assert_eq!(
+        value["messages"],
+        json!([{"role":"user","content":[{"text":"<empty>"}]}])
     );
-    assistant.content = vec![unknown_assistant].into();
+
+    let mut assistant =
+        AssistantMessage::pending("bedrock-converse-stream", "amazon-bedrock", &model.id, 1.0);
     assistant.stop_reason = StopReason::Stop;
+    assistant
+        .content
+        .push(AssistantContent::Text(TextContent::new(lone.clone())));
+    assistant
+        .content
+        .push(AssistantContent::Thinking(ThinkingContent::new(lone)));
     let value = payload(
-        &context(vec![
-            user(UserContent::Blocks(vec![unknown_user])),
-            Message::Assistant(Box::new(assistant)),
-        ]),
+        &context(vec![Message::Assistant(Box::new(assistant))]),
         &model,
         &BedrockOptions::default(),
     );
+    assert_eq!(value["messages"], json!([]));
+}
+
+/// Pins pi `types.ts:350-467` together with
+/// `src/api/bedrock-converse-stream.ts:866-898`: persistence deserialization
+/// must retain lone surrogates until Bedrock's explicit sanitization boundary.
+#[test]
+fn deserialized_lone_surrogates_reach_bedrock_sanitization() {
+    let context: Context = serde_json::from_str(
+        r#"{"systemPrompt":"\ud83d","messages":[{"role":"user","content":"\ud83d","timestamp":0},{"role":"assistant","content":[{"type":"text","text":"\ud83d"},{"type":"thinking","thinking":"\ude00"}],"api":"bedrock-converse-stream","provider":"amazon-bedrock","model":"m","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1}]}"#,
+    )
+    .expect("context with ECMAScript strings");
+    let value = payload(&context, &claude(), &BedrockOptions::default());
+    assert_eq!(value["system"], json!([{"text":""}]));
     assert_eq!(
         value["messages"],
         json!([{"role":"user","content":[{"text":"<empty>"}]}])
@@ -147,14 +163,14 @@ fn replay_sanitizes_empty_tool_input_keys_without_mutating_source() {
         "bedrock-converse-stream",
         "amazon-bedrock",
         "different-model",
-        1,
+        1.0,
     );
     assistant.stop_reason = StopReason::ToolUse;
     assistant.content.push(AssistantContent::ToolCall(ToolCall {
         kind: ToolCallType::ToolCall,
-        id: "tool.id/with spaces".to_owned(),
-        name: "lookup".to_owned(),
-        arguments: arguments.clone(),
+        id: "tool.id/with spaces".into(),
+        name: "lookup".into(),
+        arguments: JsonObject::try_from(arguments.clone()).expect("object arguments"),
         thought_signature: None,
         namespace: None,
     }));
@@ -172,31 +188,177 @@ fn replay_sanitizes_empty_tool_input_keys_without_mutating_source() {
     assert_eq!(arguments[""], json!({"nested":true}));
 }
 
+/// Pins pi `types.ts:372-380` and
+/// `src/api/bedrock-converse-stream.ts:900-910`: recursive key filtering does
+/// not discard neighboring dynamic values when JSON lowers non-finite leaves.
+#[test]
+fn bedrock_replay_preserves_dynamic_tool_arguments_around_nonfinite_leaves() {
+    let model = claude();
+    let mut arguments = JsonObject::new();
+    arguments.insert("before", -1e20_f64);
+    arguments.insert("nan", f64::NAN);
+    arguments.insert(
+        "nested",
+        JsonValue::Array(vec![true.into(), f64::INFINITY.into(), "after".into()]),
+    );
+    let mut assistant =
+        AssistantMessage::pending("bedrock-converse-stream", "amazon-bedrock", &model.id, 1.0);
+    assistant.stop_reason = StopReason::ToolUse;
+    assistant
+        .content
+        .push(AssistantContent::ToolCall(ToolCall::new(
+            "call", "lookup", arguments,
+        )));
+    let value = payload(
+        &context(vec![Message::Assistant(Box::new(assistant))]),
+        &model,
+        &BedrockOptions::default(),
+    );
+    let input = &value["messages"][0]["content"][0]["toolUse"]["input"];
+    assert_eq!(input["before"].as_f64(), Some(-1e20_f64));
+    assert!(input["nan"].as_f64().is_some_and(f64::is_nan));
+    assert_eq!(input["nested"][1].as_f64(), Some(f64::INFINITY));
+    assert_eq!(
+        crate::utils::ecma_json::stringify_provider_json(input),
+        r#"{"before":-100000000000000000000,"nan":null,"nested":[true,null,"after"]}"#
+    );
+}
+
+/// Pins pi `src/api/bedrock-converse-stream.ts:866-898`: only empty object
+/// keys are removed; all other ECMAScript string keys and primitive values
+/// reach the JSON wire unchanged.
+#[test]
+fn bedrock_replay_preserves_lone_surrogate_argument_keys_and_values() {
+    let mut arguments = JsonObject::new();
+    arguments.insert(
+        JsString::from_utf16(vec![0xd83d]),
+        JsonValue::String(JsString::from_utf16(vec![0xde00])),
+    );
+    arguments.insert(
+        "plain",
+        JsonValue::String(JsString::from_utf16(vec![0xd83d])),
+    );
+    arguments.insert("", "removed");
+    let mut assistant = AssistantMessage::pending(
+        "bedrock-converse-stream",
+        "amazon-bedrock",
+        &claude().id,
+        1.0,
+    );
+    assistant.stop_reason = StopReason::ToolUse;
+    assistant
+        .content
+        .push(AssistantContent::ToolCall(ToolCall::new(
+            "call", "lookup", arguments,
+        )));
+    let request = payload(
+        &context(vec![Message::Assistant(Box::new(assistant))]),
+        &claude(),
+        &BedrockOptions::default(),
+    );
+    let wire = crate::utils::ecma_json::stringify_provider_json(&request);
+    assert!(wire.contains(r#""input":{"\ud83d":"\ude00","plain":"\ud83d"}"#));
+    assert!(!wire.contains(r#""":"removed""#));
+}
+
+/// Pins JavaScript `/[^a-zA-Z0-9_-]/g` plus `.slice(0, 64)` in pi
+/// `src/api/bedrock-converse-stream.ts:876-879`: both operations count UTF-16
+/// code units, including each half of an astral scalar.
+#[test]
+fn bedrock_tool_id_normalization_counts_utf16_code_units() {
+    let source = JsString::from("a😀b");
+    let assistant =
+        AssistantMessage::pending("foreign-api", "foreign-provider", "foreign-model", 1.0);
+    assert_eq!(
+        normalize_tool_call_id(&source, &claude(), &assistant),
+        "a__b"
+    );
+
+    let source = JsString::from(format!("{}😀z", "a".repeat(63)));
+    let normalized = normalize_tool_call_id(&source, &claude(), &assistant);
+    assert_eq!(normalized.len(), 64);
+    assert_eq!(normalized.as_utf16()[63], u16::from(b'_'));
+}
+
+/// Pins the provider payload object built at pi
+/// `src/api/bedrock-converse-stream.ts:989-1027`: opaque strings remain exact
+/// ECMAScript strings until the JSON wire escapes isolated code units.
+#[test]
+fn bedrock_tool_ids_names_and_thinking_signatures_bypass_serde_json_value() {
+    let model = claude();
+    let mut thinking = ThinkingContent::new("reasoning");
+    thinking.thinking_signature = Some(JsString::from_utf16(vec![0xd83d]));
+    let call = ToolCall::new(
+        JsString::from_utf16(vec![0xde00]),
+        JsString::from_utf16(vec![0xd83d]),
+        JsonObject::new(),
+    );
+    let mut assistant =
+        AssistantMessage::pending("bedrock-converse-stream", "amazon-bedrock", &model.id, 1.0);
+    assistant.stop_reason = StopReason::ToolUse;
+    assistant.content = vec![
+        AssistantContent::Thinking(thinking),
+        AssistantContent::ToolCall(call),
+    ];
+
+    let request = payload(
+        &context(vec![Message::Assistant(Box::new(assistant))]),
+        &model,
+        &BedrockOptions::default(),
+    );
+    assert_eq!(
+        request["messages"][0]["content"][0]["reasoningContent"]["reasoningText"]["signature"]
+            .as_str()
+            .expect("signature")
+            .as_utf16(),
+        &[0xd83d]
+    );
+    assert_eq!(
+        request["messages"][0]["content"][1]["toolUse"]["toolUseId"]
+            .as_str()
+            .expect("tool id")
+            .as_utf16(),
+        &[0xde00]
+    );
+    assert_eq!(
+        request["messages"][0]["content"][1]["toolUse"]["name"]
+            .as_str()
+            .expect("tool name")
+            .as_utf16(),
+        &[0xd83d]
+    );
+
+    let wire = crate::utils::ecma_json::stringify_provider_json(&request);
+    assert!(wire.contains(r#""signature":"\ud83d""#));
+    assert!(wire.contains(r#""toolUseId":"\ude00""#));
+    assert!(wire.contains(r#""name":"\ud83d""#));
+}
+
 /// Ports pi `src/api/bedrock-converse-stream.ts:923-1079` where pi had no mutation-specific test.
 #[test]
 fn consecutive_tool_results_are_combined_and_blank_results_use_placeholder() {
     let results = vec![
         Message::ToolResult(Box::new(ToolResultMessage {
             role: ToolResultRole::ToolResult,
-            tool_call_id: "a".to_owned(),
-            tool_name: "first".to_owned(),
+            tool_call_id: "a".into(),
+            tool_name: "first".into(),
             content: vec![UserContentBlock::Text(TextContent::new(""))],
             details: None,
             usage: None,
             added_tool_names: None,
             is_error: false,
-            timestamp: 1,
+            timestamp: 1.0,
         })),
         Message::ToolResult(Box::new(ToolResultMessage {
             role: ToolResultRole::ToolResult,
-            tool_call_id: "b".to_owned(),
-            tool_name: "second".to_owned(),
+            tool_call_id: "b".into(),
+            tool_name: "second".into(),
             content: vec![UserContentBlock::Text(TextContent::new("failed"))],
             details: None,
             usage: None,
             added_tool_names: None,
             is_error: true,
-            timestamp: 1,
+            timestamp: 1.0,
         })),
     ];
     let value = payload(&context(results), &claude(), &BedrockOptions::default());
@@ -308,14 +470,14 @@ fn thinking_payloads_cover_fixed_adaptive_govcloud_and_non_claude_models() {
 /// Ports pi `test/bedrock-thinking-payload.test.ts:118-164`.
 #[test]
 fn simple_options_add_fixed_thinking_tokens_but_not_adaptive_tokens() {
-    let context = context(vec![user(UserContent::Text("hello".to_owned()))]);
+    let context = context(vec![user(UserContent::Text(("hello".to_owned()).into()))]);
     let mut simple = SimpleStreamOptions {
         reasoning: Some(ThinkingLevel::Medium),
         ..SimpleStreamOptions::default()
     };
-    simple.stream.max_tokens = Some(2_000);
+    simple.stream.max_tokens = Some(2_000.0);
     let fixed = lower_simple_options(&claude(), &context, &simple);
-    assert_eq!(fixed.stream.max_tokens, Some(10_192));
+    assert_eq!(fixed.stream.max_tokens, Some(10_192.0));
     assert_eq!(
         fixed
             .thinking_budgets
@@ -325,7 +487,7 @@ fn simple_options_add_fixed_thinking_tokens_but_not_adaptive_tokens() {
     );
     let adaptive_model = model("anthropic.claude-opus-4-8", "Claude Opus 4.8", true);
     let adaptive = lower_simple_options(&adaptive_model, &context, &simple);
-    assert_eq!(adaptive.stream.max_tokens, Some(2_000));
+    assert_eq!(adaptive.stream.max_tokens, Some(2_000.0));
     assert_eq!(adaptive.thinking_budgets, None);
 }
 
@@ -470,7 +632,7 @@ fn endpoint_region_credential_and_auth_precedence_match_pi() {
 async fn invalid_proxy_setup_leaves_the_stream_unsettled() {
     let mut events = stream(
         &claude(),
-        &context(vec![user(UserContent::Text("hello".to_owned()))]),
+        &context(vec![user(UserContent::Text(("hello".to_owned()).into()))]),
         BedrockOptions {
             stream: StreamOptions {
                 request: crate::types::ProviderRequestOptions {
@@ -504,8 +666,8 @@ fn model_name_enables_application_profile_cache_points() {
         true,
     );
     let context = Context {
-        system_prompt: Some("system".to_owned()),
-        messages: vec![user(UserContent::Text("hello".to_owned()))],
+        system_prompt: Some(("system".to_owned()).into()),
+        messages: vec![user(UserContent::Text(("hello".to_owned()).into()))],
         tools: None,
     };
     let value = build_command_input(
@@ -564,7 +726,7 @@ fn custom_header_filter_is_case_insensitive_and_preserves_other_headers() {
     )]));
     let lowered = lower_simple_options(
         &claude(),
-        &context(vec![user(UserContent::Text("hello".to_owned()))]),
+        &context(vec![user(UserContent::Text(("hello".to_owned()).into()))]),
         &simple,
     );
     assert_eq!(
@@ -592,7 +754,7 @@ fn raw_smithy_response_status_and_headers_are_forwarded_intact() {
     let response = aws_smithy_runtime_api::client::orchestrator::HttpResponse::try_from(response)
         .expect("Smithy response");
     let response = sdk::to_provider_response(&response);
-    assert_eq!(response.status, 200);
+    assert_eq!(response.status, 200.0);
     assert_eq!(response.headers["x-amzn-requestid"], "req-123");
     assert_eq!(response.headers["x-bifrost-provider"], "bedrock");
     assert_eq!(response.headers["x-bifrost-resolved-model"], "model-123");
@@ -607,7 +769,7 @@ fn error_formatting_and_diagnostics_preserve_raw_body_and_modeled_metadata() {
         details: Box::new(BedrockErrorDetails {
             name: Some("ValidationException".to_owned()),
             status: Some(403),
-            body: Some("gateway denied".to_owned()),
+            body: Some("gateway denied".into()),
             message_carries_body: false,
             service_exception: true,
             request_id: Some(" request-123 ".to_owned()),
@@ -650,6 +812,37 @@ fn error_formatting_and_diagnostics_preserve_raw_body_and_modeled_metadata() {
             json!("stream-request")
         )]))
     );
+}
+
+/// Ports the full Bedrock catch path at pi
+/// `src/api/bedrock-converse-stream.ts:374-389,1301-1315` and
+/// `src/utils/error-body.ts:76-81,137-139` with a real Smithy raw response.
+#[test]
+fn raw_bedrock_error_body_is_utf16_truncated_into_terminal_error_message() {
+    use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
+    use aws_smithy_runtime_api::client::result::SdkError;
+    use aws_smithy_types::body::SdkBody;
+    use aws_smithy_types::error::metadata::ErrorMetadata;
+
+    let body = format!("{}😀", "x".repeat(3_999));
+    let response = http::Response::builder()
+        .status(403)
+        .body(SdkBody::from(body))
+        .expect("raw response");
+    let response = HttpResponse::try_from(response).expect("Smithy response");
+    let sdk_error: SdkError<ErrorMetadata, HttpResponse> =
+        SdkError::response_error(std::io::Error::other("unmodeled response"), response);
+    let error = sdk::sdk_error(&sdk_error);
+    let event = terminal_bedrock_error(pending_message(&claude()), &error, false);
+    let AssistantMessageEvent::Error { error, .. } = event else {
+        panic!("terminal Bedrock error")
+    };
+    let message = error.error_message.expect("errorMessage");
+    let mut expected = "403: ".encode_utf16().collect::<Vec<_>>();
+    expected.extend("x".repeat(3_999).encode_utf16());
+    expected.push(0xd83d);
+    expected.extend("... [truncated 1 chars]".encode_utf16());
+    assert_eq!(message.as_utf16(), expected);
 }
 
 /// Ports pi `test/bedrock-raw-stop-reason.test.ts`.
@@ -727,39 +920,12 @@ async fn stream_state_buffers_redacted_reasoning_and_preserves_empty_tool_argume
     let AssistantContent::ToolCall(call) = &output.content[1] else {
         panic!("tool call");
     };
-    assert_eq!(call.arguments, json!({"ok":1,"":""}));
+    assert_eq!(
+        call.arguments,
+        JsonObject::try_from(json!({"ok":1,"":""})).expect("object arguments")
+    );
     assert_eq!(output.stop_reason, StopReason::ToolUse);
     assert_eq!(output.raw_stop_reason.as_deref(), Some("tool_use"));
-}
-
-/// Pins pi `src/api/bedrock-converse-stream.ts:678-683,719-724`: finalization
-/// removes streaming scratch state without rewriting a parsed JSON `null`.
-#[tokio::test]
-async fn literal_null_tool_arguments_survive_stream_finalization() {
-    let model = claude();
-    let (sender, _events) = AssistantMessageEventStream::channel();
-    let mut output = pending_message(&model);
-    let mut state = StreamState::default();
-    for event in [
-        BedrockStreamEvent::ContentBlockStart {
-            provider_index: 0,
-            tool_id: Some("tool-1".to_owned()),
-            tool_name: Some("lookup".to_owned()),
-        },
-        BedrockStreamEvent::ToolDelta {
-            provider_index: 0,
-            input: "null".to_owned(),
-        },
-        BedrockStreamEvent::ContentBlockStop { provider_index: 0 },
-    ] {
-        handle_stream_event(event, &mut state, &model, &mut output, &sender).expect("event");
-    }
-    sdk::finish_stream_result(&mut state, &mut output, Ok(())).expect("stream success");
-
-    let AssistantContent::ToolCall(call) = &output.content[0] else {
-        panic!("tool call");
-    };
-    assert_eq!(call.arguments, Value::Null);
 }
 
 /// Ports pi `test/bedrock-redacted-reasoning.test.ts:165-186`.
@@ -848,18 +1014,17 @@ fn redacted_and_signed_reasoning_replay_matches_model_capabilities() {
         "bedrock-converse-stream",
         "amazon-bedrock",
         model.id.clone(),
-        1,
+        1.0,
     );
     let mut redacted = ThinkingContent::new(REDACTED_THINKING_PLACEHOLDER);
     redacted.redacted = Some(true);
-    redacted.thinking_signature = Some("AQIDBA==".to_owned());
+    redacted.thinking_signature = Some("AQIDBA==".into());
     let mut signed = ThinkingContent::new("private chain");
-    signed.thinking_signature = Some("signature".to_owned());
+    signed.thinking_signature = Some("signature".into());
     assistant.content = vec![
         AssistantContent::Thinking(redacted),
         AssistantContent::Thinking(signed),
-    ]
-    .into();
+    ];
     assistant.stop_reason = StopReason::Stop;
     let value = payload(
         &context(vec![Message::Assistant(Box::new(assistant.clone()))]),
@@ -875,8 +1040,8 @@ fn redacted_and_signed_reasoning_replay_matches_model_capabilities() {
     );
 
     let mut unsigned = ThinkingContent::new("visible fallback");
-    unsigned.thinking_signature = Some(" ".to_owned());
-    assistant.content = vec![AssistantContent::Thinking(unsigned)].into();
+    unsigned.thinking_signature = Some(" ".into());
+    assistant.content = vec![AssistantContent::Thinking(unsigned)];
     let value = payload(
         &context(vec![Message::Assistant(Box::new(assistant))]),
         &model,
@@ -942,7 +1107,7 @@ fn javascript_string_and_usage_semantics_are_retained() {
         &sender,
     )
     .expect("metadata");
-    assert_eq!(output.usage.total_tokens.as_number(), 7.0);
+    assert_eq!(output.usage.total_tokens, 7.0);
 }
 
 /// Pins pi `src/api/bedrock-converse-stream.ts:626-697` against the real AWS SDK unions.

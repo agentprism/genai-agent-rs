@@ -933,14 +933,14 @@ fn normalize_event(mut value: Value) -> Result<Option<(Value, bool)>, CodexRunEr
 
 fn normalize_stream(
     raw: BoxStream<'static, Result<Value, CodexRunError>>,
-    sender: Option<AssistantStreamSender>,
+    start_event: Option<(AssistantStreamSender, Arc<crate::types::AssistantMessage>)>,
     start_emitted: Arc<AtomicBool>,
     attempt_started: Arc<AtomicBool>,
     failure: Arc<Mutex<Option<CodexRunError>>>,
 ) -> BoxStream<'static, Result<Value, CodexRunError>> {
     struct State {
         raw: BoxStream<'static, Result<Value, CodexRunError>>,
-        sender: Option<AssistantStreamSender>,
+        start_event: Option<(AssistantStreamSender, Arc<crate::types::AssistantMessage>)>,
         start_emitted: Arc<AtomicBool>,
         attempt_started: Arc<AtomicBool>,
         failure: Arc<Mutex<Option<CodexRunError>>>,
@@ -949,7 +949,7 @@ fn normalize_stream(
     futures::stream::unfold(
         State {
             raw,
-            sender,
+            start_event,
             start_emitted,
             attempt_started,
             failure,
@@ -971,9 +971,13 @@ fn normalize_stream(
                     }
                 };
                 state.attempt_started.store(true, Ordering::Release);
-                if let Some(sender) = state.sender.as_ref()
+                if let Some((sender, partial)) = state.start_event.as_ref()
                     && !state.start_emitted.swap(true, Ordering::AcqRel)
-                    && sender.send(AssistantMessageEvent::Start).is_err()
+                    && sender
+                        .send(AssistantMessageEvent::Start {
+                            partial: partial.clone(),
+                        })
+                        .is_err()
                 {
                     return None;
                 }
@@ -989,14 +993,14 @@ pub(super) fn websocket_event_stream(
     acquired: &AcquiredWebSocket,
     signal: Option<Arc<dyn AbortSignal>>,
     idle_timeout_ms: Option<u64>,
-    sender: AssistantStreamSender,
+    start_event: (AssistantStreamSender, Arc<crate::types::AssistantMessage>),
     start_emitted: Arc<AtomicBool>,
     attempt_started: Arc<AtomicBool>,
     failure: Arc<Mutex<Option<CodexRunError>>>,
 ) -> BoxStream<'static, Result<Value, CodexRunError>> {
     normalize_stream(
         raw_websocket_stream(acquired.handle.clone(), signal, idle_timeout_ms),
-        Some(sender),
+        Some(start_event),
         start_emitted,
         attempt_started,
         failure,

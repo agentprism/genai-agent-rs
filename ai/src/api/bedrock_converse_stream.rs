@@ -15,16 +15,19 @@ use crate::event_stream::{
 use crate::models::calculate_cost;
 use crate::types::{
     AssistantContent, AssistantMessage, AssistantMessageDiagnostic, CacheRetention, Context,
-    ErrorStopReason, Message, Model, ModelCompat, ProviderEnv, ProviderResponse,
-    SimpleStreamOptions, StopReason, StreamOptions, SuccessfulStopReason, TextContent,
-    ThinkingBudgets, ThinkingContent, ThinkingLevel, Tool, ToolCall, ToolChoice, UsageValue,
+    ErrorStopReason, JsString, JsonObject, JsonValue, Message, Model, ModelCompat, ProviderEnv,
+    ProviderResponse, SimpleStreamOptions, StopReason, StreamOptions, SuccessfulStopReason,
+    TextContent, ThinkingBudgets, ThinkingContent, ThinkingLevel, Tool, ToolCall, ToolChoice,
     UserContent, UserContentBlock,
 };
-use crate::utils::error_body::trim_javascript_whitespace;
+use crate::utils::error_body::{
+    ProviderErrorBody, ProviderErrorData, normalize_provider_error, trim_javascript_whitespace,
+};
 use crate::utils::headers::provider_headers_to_record;
-use crate::utils::json_parse::parse_streaming_json;
+use crate::utils::json_parse::{parse_streaming_json, parse_streaming_json_object};
 use crate::utils::node_http_proxy::resolve_http_proxy_url_for_target;
 use crate::utils::provider_env::get_provider_env_value;
+use crate::utils::sanitize_unicode::sanitize_surrogates_utf16;
 use base64::Engine as _;
 use base64::alphabet;
 use base64::engine::general_purpose::{GeneralPurpose, PAD_INDIFFERENT, STANDARD};
@@ -207,17 +210,17 @@ fn lower_simple_options(
     }
 
     let adjusted = adjust_max_tokens_for_thinking(
-        result.stream.max_tokens.map(|value| value as f64),
-        model.max_tokens as f64,
+        result.stream.max_tokens,
+        model.max_tokens,
         reasoning,
         options.thinking_budgets.as_ref(),
     );
-    let max_tokens = clamp_max_tokens_to_context(model, context, adjusted.max_tokens as u64);
+    let max_tokens = clamp_max_tokens_to_context(model, context, adjusted.max_tokens);
     result.stream.max_tokens = Some(max_tokens);
     let level = clamp_reasoning(Some(reasoning)).expect("reasoning is present");
     let budget = adjusted
         .thinking_budget
-        .min(max_tokens.saturating_sub(1_024) as f64);
+        .min((max_tokens - 1_024.0).max(0.0));
     let budgets = result.thinking_budgets.get_or_insert_with(Default::default);
     match level {
         ThinkingLevel::Minimal => budgets.minimal = Some(budget),
@@ -233,7 +236,7 @@ fn lower_simple_options(
 fn terminal_setup_error(model: &Model, message: &str) -> AssistantMessageEventStream {
     let mut output = pending_message(model);
     output.stop_reason = StopReason::Error;
-    output.error_message = Some(message.to_owned());
+    output.error_message = Some(message.into());
     AssistantMessageEventStream::from_events(vec![AssistantMessageEvent::Error {
         reason: ErrorStopReason::Error,
         error: output,
@@ -249,12 +252,11 @@ fn pending_message(model: &Model) -> AssistantMessage {
     )
 }
 
-fn now_millis() -> i64 {
+fn now_millis() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
-        .unwrap_or(i64::MAX)
+        .unwrap_or_default()
+        .as_millis() as f64
 }
 
 async fn run_stream(
@@ -291,27 +293,31 @@ async fn run_stream(
             .signal
             .as_ref()
             .is_some_and(|signal| signal.is_aborted());
-        output.stop_reason = if aborted {
-            StopReason::Aborted
+        let _ = sender.send(terminal_bedrock_error(output, &error, aborted));
+    }
+}
+
+fn terminal_bedrock_error(
+    mut output: AssistantMessage,
+    error: &BedrockError,
+    aborted: bool,
+) -> AssistantMessageEvent {
+    output.stop_reason = if aborted {
+        StopReason::Aborted
+    } else {
+        StopReason::Error
+    };
+    output.error_message = Some(format_bedrock_error(error));
+    if !aborted {
+        append_bedrock_failure_diagnostic(&mut output, error, error.fallback_request_id.as_deref());
+    }
+    AssistantMessageEvent::Error {
+        reason: if aborted {
+            ErrorStopReason::Aborted
         } else {
-            StopReason::Error
-        };
-        output.error_message = Some(format_bedrock_error(&error));
-        if !aborted {
-            append_bedrock_failure_diagnostic(
-                &mut output,
-                &error,
-                error.fallback_request_id.as_deref(),
-            );
-        }
-        let _ = sender.send(AssistantMessageEvent::Error {
-            reason: if aborted {
-                ErrorStopReason::Aborted
-            } else {
-                ErrorStopReason::Error
-            },
-            error: output,
-        });
+            ErrorStopReason::Error
+        },
+        error: output,
     }
 }
 
@@ -354,13 +360,13 @@ async fn run_stream_inner(
         );
     }
     if matches!(output.stop_reason, StopReason::Error | StopReason::Aborted) {
-        return Err(BedrockError::plain(
-            output
-                .error_message
-                .clone()
-                .unwrap_or_else(|| "An unknown error occurred".to_owned()),
-        )
-        .with_fallback_request_id(response_request_id));
+        return Err(
+            BedrockError::plain(output.error_message.as_ref().map_or_else(
+                || "An unknown error occurred".to_owned(),
+                |message| message.to_utf8_lossy(),
+            ))
+            .with_fallback_request_id(response_request_id),
+        );
     }
     let reason = match output.stop_reason {
         StopReason::Stop => SuccessfulStopReason::Stop,
@@ -393,12 +399,12 @@ fn build_command_input(
     model: &Model,
     options: &BedrockOptions,
     cache_retention: CacheRetention,
-) -> Result<Value, BedrockError> {
-    let mut result = Map::new();
-    result.insert("modelId".to_owned(), Value::String(model.id.clone()));
+) -> Result<JsonValue, BedrockError> {
+    let mut result = JsonObject::new();
+    result.insert("modelId", model.id.clone());
     result.insert(
-        "messages".to_owned(),
-        Value::Array(convert_messages(
+        "messages",
+        JsonValue::Array(convert_messages(
             context,
             model,
             cache_retention,
@@ -406,45 +412,45 @@ fn build_command_input(
         )?),
     );
     if let Some(system) = build_system_prompt(
-        context.system_prompt.as_deref(),
+        context.system_prompt.as_ref(),
         model,
         cache_retention,
         options.stream.request.env.as_ref(),
     ) {
-        result.insert("system".to_owned(), Value::Array(system));
+        result.insert(
+            "system",
+            JsonValue::Array(system.into_iter().map(JsonValue::from).collect()),
+        );
     }
-    let mut inference = Map::new();
+    let mut inference = JsonObject::new();
     let inference_max_tokens = options
         .stream
         .max_tokens
         .or_else(|| is_anthropic_claude_model(model).then_some(model.max_tokens));
     if let Some(max_tokens) = inference_max_tokens {
-        inference.insert("maxTokens".to_owned(), Value::from(max_tokens));
+        inference.insert("maxTokens", max_tokens);
     }
     if let Some(temperature) = options.stream.temperature {
-        inference.insert(
-            "temperature".to_owned(),
-            serde_json::Number::from_f64(temperature).map_or(Value::Null, Value::Number),
-        );
+        inference.insert("temperature", temperature);
     }
-    result.insert("inferenceConfig".to_owned(), Value::Object(inference));
+    result.insert("inferenceConfig", JsonValue::Object(inference));
     if let Some(config) = convert_tool_config(
         context.tools.as_deref(),
         options.tool_choice.as_ref(),
         supports_strict_mode(model),
     )? {
-        result.insert("toolConfig".to_owned(), config);
+        result.insert("toolConfig", JsonValue::from(config));
     }
     if let Some(fields) = build_additional_model_request_fields(model, options) {
-        result.insert("additionalModelRequestFields".to_owned(), fields);
+        result.insert("additionalModelRequestFields", JsonValue::from(fields));
     }
     if let Some(metadata) = &options.request_metadata {
         result.insert(
-            "requestMetadata".to_owned(),
-            serde_json::to_value(metadata).map_err(BedrockError::display)?,
+            "requestMetadata",
+            JsonValue::from(serde_json::to_value(metadata).map_err(BedrockError::display)?),
         );
     }
-    Ok(Value::Object(result))
+    Ok(JsonValue::Object(result))
 }
 
 fn model_match_candidates(model_id: &str, model_name: &str) -> Vec<String> {
@@ -577,12 +583,16 @@ fn cache_point(retention: CacheRetention) -> Value {
 }
 
 fn build_system_prompt(
-    system_prompt: Option<&str>,
+    system_prompt: Option<&JsString>,
     model: &Model,
     retention: CacheRetention,
     env: Option<&ProviderEnv>,
 ) -> Option<Vec<Value>> {
-    let system_prompt = system_prompt.filter(|value| !value.is_empty())?;
+    let system_prompt = system_prompt?;
+    if system_prompt.is_empty() {
+        return None;
+    }
+    let system_prompt = sanitize_surrogates_utf16(system_prompt.as_utf16());
     let mut blocks = vec![json!({"text":system_prompt})];
     if retention != CacheRetention::None && supports_prompt_caching(model, env) {
         blocks.push(cache_point(retention));
@@ -590,41 +600,61 @@ fn build_system_prompt(
     Some(blocks)
 }
 
-fn normalize_tool_call_id(id: &str, _model: &Model, _message: &AssistantMessage) -> String {
-    id.chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .take(64)
-        .collect()
+fn normalize_tool_call_id(id: &JsString, _model: &Model, _message: &AssistantMessage) -> JsString {
+    JsString::from_utf16(
+        id.as_utf16()
+            .iter()
+            .copied()
+            .map(|unit| {
+                if u8::try_from(unit)
+                    .is_ok_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                {
+                    unit
+                } else {
+                    u16::from(b'_')
+                }
+            })
+            .take(64)
+            .collect::<Vec<_>>(),
+    )
 }
 
-fn non_blank_text(text: &str) -> Option<Value> {
-    (!trim_javascript_whitespace(text).is_empty()).then(|| json!({"text":text}))
+fn non_blank_text(text: &JsString) -> Option<Value> {
+    let sanitized = sanitize_surrogates_utf16(text.as_utf16());
+    (!trim_javascript_whitespace(&sanitized).is_empty()).then(|| json!({"text":sanitized}))
 }
 
-fn required_text(text: &str) -> Value {
+fn required_text(text: &JsString) -> Value {
     non_blank_text(text).unwrap_or_else(|| json!({"text":EMPTY_TEXT_PLACEHOLDER}))
 }
 
-fn sanitize_bedrock_document(value: &Value) -> Value {
+fn sanitize_bedrock_value(value: &JsonValue) -> JsonValue {
     match value {
-        Value::Array(values) => {
-            Value::Array(values.iter().map(sanitize_bedrock_document).collect())
+        JsonValue::Null => JsonValue::Null,
+        JsonValue::Bool(value) => JsonValue::Bool(*value),
+        JsonValue::Number(value) => JsonValue::Number(*value),
+        JsonValue::String(value) => JsonValue::String(value.clone()),
+        JsonValue::Array(values) => {
+            JsonValue::Array(values.iter().map(sanitize_bedrock_value).collect())
         }
-        Value::Object(values) => Value::Object(
-            values
-                .iter()
-                .filter(|(key, _)| !key.is_empty())
-                .map(|(key, value)| (key.clone(), sanitize_bedrock_document(value)))
-                .collect(),
-        ),
-        value => value.clone(),
+        JsonValue::Object(values) => {
+            let mut output = crate::types::JsonObject::new();
+            for (key, value) in values {
+                if key.is_empty() {
+                    continue;
+                }
+                output.insert(key.clone(), sanitize_bedrock_value(value));
+            }
+            JsonValue::Object(output)
+        }
     }
+}
+
+fn sanitize_bedrock_document(value: &crate::types::JsonObject) -> JsonValue {
+    let JsonValue::Object(value) = sanitize_bedrock_value(&JsonValue::Object(value.clone())) else {
+        unreachable!("the root is an object")
+    };
+    value.to_provider_json()
 }
 
 fn image_block(mime_type: &str, data: &str) -> Result<Value, BedrockError> {
@@ -664,7 +694,6 @@ fn convert_tool_result_content(content: &[UserContentBlock]) -> Result<Vec<Value
                     result.push(block);
                 }
             }
-            UserContentBlock::Unknown(_) => {}
         }
     }
     if result.is_empty() {
@@ -678,7 +707,7 @@ fn convert_messages(
     model: &Model,
     retention: CacheRetention,
     env: Option<&ProviderEnv>,
-) -> Result<Vec<Value>, BedrockError> {
+) -> Result<Vec<JsonValue>, BedrockError> {
     let transformed = transform_messages(&context.messages, model, Some(&normalize_tool_call_id));
     let mut result = Vec::new();
     let mut index = 0;
@@ -699,7 +728,6 @@ fn convert_messages(
                                 UserContentBlock::Image(image) => content.push(
                                     json!({"image":image_block(&image.mime_type, &image.data)?}),
                                 ),
-                                UserContentBlock::Unknown(_) => {}
                             }
                         }
                         if content.is_empty() {
@@ -707,7 +735,13 @@ fn convert_messages(
                         }
                     }
                 }
-                result.push(json!({"role":"user","content":content}));
+                let mut wire_message = JsonObject::new();
+                wire_message.insert("role", "user");
+                wire_message.insert(
+                    "content",
+                    JsonValue::Array(content.into_iter().map(JsonValue::from).collect()),
+                );
+                result.push(JsonValue::Object(wire_message));
             }
             Message::Assistant(message) => {
                 if message.content.is_empty() {
@@ -719,72 +753,98 @@ fn convert_messages(
                     match block {
                         AssistantContent::Text(text) => {
                             if let Some(block) = non_blank_text(&text.text) {
-                                content.push(block);
+                                content.push(JsonValue::from(block));
                             }
                         }
-                        AssistantContent::ToolCall(call) => content.push(json!({
-                            "toolUse":{
-                                "toolUseId":call.id,
-                                "name":call.name,
-                                "input":sanitize_bedrock_document(&call.arguments)
-                            }
-                        })),
+                        AssistantContent::ToolCall(call) => {
+                            let mut tool_use = JsonObject::new();
+                            tool_use.insert("toolUseId", call.id.clone());
+                            tool_use.insert("name", call.name.clone());
+                            tool_use.insert("input", sanitize_bedrock_document(&call.arguments));
+                            let mut wrapper = JsonObject::new();
+                            wrapper.insert("toolUse", JsonValue::Object(tool_use));
+                            content.push(JsonValue::Object(wrapper));
+                        }
                         AssistantContent::Thinking(thinking) if thinking.redacted == Some(true) => {
                             if let Some(bytes) = thinking
                                 .thinking_signature
-                                .as_deref()
+                                .as_ref()
+                                .and_then(JsString::try_as_str)
                                 .and_then(|signature| decode_browser_base64(signature).ok())
                                 .filter(|bytes| !bytes.is_empty())
                             {
-                                content.push(json!({
+                                content.push(JsonValue::from(json!({
                                     "reasoningContent":{"redactedContent":STANDARD.encode(bytes)}
-                                }));
+                                })));
                             }
                         }
                         AssistantContent::Thinking(thinking) => {
-                            if trim_javascript_whitespace(&thinking.thinking).is_empty() {
+                            let sanitized = sanitize_surrogates_utf16(thinking.thinking.as_utf16());
+                            if trim_javascript_whitespace(&sanitized).is_empty() {
                                 continue;
                             }
                             if is_anthropic_claude_model(model) {
-                                if let Some(signature) =
-                                    thinking.thinking_signature.as_deref().filter(|signature| {
-                                        !trim_javascript_whitespace(signature).is_empty()
-                                    })
+                                if let Some(signature) = thinking
+                                    .thinking_signature
+                                    .as_ref()
+                                    .filter(|signature| !signature.is_blank())
                                 {
-                                    content.push(json!({
-                                        "reasoningContent":{"reasoningText":{
-                                            "text":thinking.thinking,
-                                            "signature":signature
-                                        }}
-                                    }));
+                                    let mut reasoning_text = JsonObject::new();
+                                    reasoning_text.insert("text", sanitized.clone());
+                                    reasoning_text.insert("signature", signature.clone());
+                                    let mut reasoning_content = JsonObject::new();
+                                    reasoning_content
+                                        .insert("reasoningText", JsonValue::Object(reasoning_text));
+                                    let mut wrapper = JsonObject::new();
+                                    wrapper.insert(
+                                        "reasoningContent",
+                                        JsonValue::Object(reasoning_content),
+                                    );
+                                    content.push(JsonValue::Object(wrapper));
                                 } else {
-                                    content.push(json!({"text":thinking.thinking}));
+                                    content.push(JsonValue::from(json!({"text":sanitized})));
                                 }
                             } else {
-                                content.push(json!({
-                                    "reasoningContent":{"reasoningText":{"text":thinking.thinking}}
-                                }));
+                                content.push(JsonValue::from(json!({
+                                    "reasoningContent":{"reasoningText":{"text":sanitized}}
+                                })));
                             }
                         }
-                        AssistantContent::Unknown(_) => {}
                     }
                 }
                 if !content.is_empty() {
-                    result.push(json!({"role":"assistant","content":content}));
+                    let mut wire_message = JsonObject::new();
+                    wire_message.insert("role", "assistant");
+                    wire_message.insert("content", JsonValue::Array(content));
+                    result.push(JsonValue::Object(wire_message));
                 }
             }
             Message::ToolResult(_) => {
                 let mut content = Vec::new();
                 let mut cursor = index;
                 while let Some(Message::ToolResult(message)) = transformed.get(cursor) {
-                    content.push(json!({"toolResult":{
-                        "toolUseId":message.tool_call_id,
-                        "content":convert_tool_result_content(&message.content)?,
-                        "status":if message.is_error { "error" } else { "success" }
-                    }}));
+                    let mut tool_result = JsonObject::new();
+                    tool_result.insert("toolUseId", message.tool_call_id.clone());
+                    tool_result.insert(
+                        "content",
+                        JsonValue::Array(
+                            convert_tool_result_content(&message.content)?
+                                .into_iter()
+                                .map(JsonValue::from)
+                                .collect(),
+                        ),
+                    );
+                    tool_result
+                        .insert("status", if message.is_error { "error" } else { "success" });
+                    let mut wrapper = JsonObject::new();
+                    wrapper.insert("toolResult", JsonValue::Object(tool_result));
+                    content.push(JsonValue::Object(wrapper));
                     cursor += 1;
                 }
-                result.push(json!({"role":"user","content":content}));
+                let mut wire_message = JsonObject::new();
+                wire_message.insert("role", "user");
+                wire_message.insert("content", JsonValue::Array(content));
+                result.push(JsonValue::Object(wire_message));
                 index = cursor - 1;
             }
         }
@@ -793,10 +853,13 @@ fn convert_messages(
     if retention != CacheRetention::None
         && supports_prompt_caching(model, env)
         && let Some(last) = result.last_mut()
-        && last.get("role").and_then(Value::as_str) == Some("user")
-        && let Some(content) = last.get_mut("content").and_then(Value::as_array_mut)
+        && last
+            .get("role")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|role| role == "user")
+        && let Some(content) = last.get_mut("content").and_then(JsonValue::as_array_mut)
     {
-        content.push(cache_point(retention));
+        content.push(JsonValue::from(cache_point(retention)));
     }
     Ok(result)
 }
@@ -1069,7 +1132,7 @@ struct BedrockError {
 struct BedrockErrorDetails {
     name: Option<String>,
     status: Option<i64>,
-    body: Option<String>,
+    body: Option<JsString>,
     message_carries_body: bool,
     service_exception: bool,
     request_id: Option<String>,
@@ -1113,22 +1176,32 @@ impl fmt::Display for BedrockError {
 
 impl std::error::Error for BedrockError {}
 
-fn format_bedrock_error(error: &BedrockError) -> String {
+fn format_bedrock_error(error: &BedrockError) -> JsString {
     let core = if !error.message_carries_body {
-        match (error.status, error.body.as_deref()) {
-            (Some(status), Some(body)) => format!("{status}: {body}"),
-            _ => error.message.clone(),
+        match (error.status, error.body.as_ref()) {
+            (Some(status), Some(body)) => {
+                let mut output = JsString::from(format!("{status}: "));
+                output.push_str(body);
+                output
+            }
+            _ => error.message.clone().into(),
         }
     } else {
-        error.message.clone()
+        error.message.clone().into()
     };
-    let hint = if core.to_lowercase().contains("data retention mode") {
+    let hint = if core
+        .to_utf8_lossy()
+        .to_lowercase()
+        .contains("data retention mode")
+    {
         format!(" See {BEDROCK_DATA_RETENTION_DOCS_URL} for supported data retention modes.")
     } else {
         String::new()
     };
+    let mut core_with_hint = core;
+    core_with_hint.push_utf8(&hint);
     if !error.service_exception {
-        return format!("{core}{hint}");
+        return core_with_hint;
     }
     let name = error
         .name
@@ -1142,7 +1215,9 @@ fn format_bedrock_error(error: &BedrockError) -> String {
         "ServiceUnavailableException" => "Service unavailable",
         value => value,
     };
-    format!("{prefix}: {core}{hint}")
+    let mut output = JsString::from(format!("{prefix}: "));
+    output.push_str(&core_with_hint);
+    output
 }
 
 fn normalize_diagnostic_value(value: Option<&str>) -> Option<String> {
@@ -1183,7 +1258,7 @@ fn append_bedrock_failure_diagnostic(
             kind: "bedrock_response_failure".to_owned(),
             timestamp: now_millis(),
             error: None,
-            details: Some(details),
+            details: Some(details.into()),
         });
 }
 
@@ -1258,7 +1333,9 @@ fn handle_stream_event(
                 ));
             }
             sender
-                .send(AssistantMessageEvent::Start)
+                .send(AssistantMessageEvent::Start {
+                    partial: Arc::new(output.clone()),
+                })
                 .map_err(|_| BedrockError::plain("Assistant event stream receiver was dropped"))?;
         }
         BedrockStreamEvent::ContentBlockStart {
@@ -1271,7 +1348,7 @@ fn handle_stream_event(
                 let call = ToolCall::new(
                     tool_id.unwrap_or_default(),
                     tool_name.unwrap_or_default(),
-                    Value::Object(Map::new()),
+                    Map::new(),
                 );
                 output
                     .content
@@ -1286,10 +1363,8 @@ fn handle_stream_event(
                 );
                 sender
                     .send(AssistantMessageEvent::ToolCallStart {
-                        content_index,
-                        id: call.id,
-                        tool_name: call.name,
-                        namespace: None,
+                        content_index: content_index as f64,
+                        partial: Arc::new(output.clone()),
                     })
                     .map_err(|_| {
                         BedrockError::plain("Assistant event stream receiver was dropped")
@@ -1316,18 +1391,23 @@ fn handle_stream_event(
                     },
                 );
                 sender
-                    .send(AssistantMessageEvent::TextStart { content_index })
+                    .send(AssistantMessageEvent::TextStart {
+                        content_index: content_index as f64,
+                        partial: Arc::new(output.clone()),
+                    })
                     .map_err(|_| {
                         BedrockError::plain("Assistant event stream receiver was dropped")
                     })?;
                 content_index
             };
             if let Some(AssistantContent::Text(block)) = output.content.get_mut(content_index) {
+                let text = JsString::from(text);
                 block.text.push_str(&text);
                 sender
                     .send(AssistantMessageEvent::TextDelta {
-                        content_index,
+                        content_index: content_index as f64,
                         delta: text,
+                        partial: Arc::new(output.clone()),
                     })
                     .map_err(|_| {
                         BedrockError::plain("Assistant event stream receiver was dropped")
@@ -1343,11 +1423,15 @@ fn handle_stream_event(
                     output.content.get_mut(block.content_index)
             {
                 block.partial_json.push_str(&input);
-                call.arguments = parse_streaming_json(Some(&block.partial_json));
+                call.arguments = parse_streaming_json(Some(&block.partial_json))
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default();
                 sender
                     .send(AssistantMessageEvent::ToolCallDelta {
-                        content_index: block.content_index,
-                        delta: input,
+                        content_index: block.content_index as f64,
+                        delta: input.into(),
+                        partial: Arc::new(output.clone()),
                     })
                     .map_err(|_| {
                         BedrockError::plain("Assistant event stream receiver was dropped")
@@ -1365,7 +1449,7 @@ fn handle_stream_event(
             } else {
                 let content_index = output.content.len();
                 let mut thinking = ThinkingContent::new("");
-                thinking.thinking_signature = Some(String::new());
+                thinking.thinking_signature = Some(JsString::default());
                 output.content.push(AssistantContent::Thinking(thinking));
                 state.blocks.insert(
                     provider_index,
@@ -1377,50 +1461,64 @@ fn handle_stream_event(
                 );
                 sender
                     .send(AssistantMessageEvent::ThinkingStart {
-                        content_index,
-                        thinking: None,
-                        thinking_signature: None,
-                        redacted: None,
+                        content_index: content_index as f64,
+                        partial: Arc::new(output.clone()),
                     })
                     .map_err(|_| {
                         BedrockError::plain("Assistant event stream receiver was dropped")
                     })?;
                 content_index
             };
-            let Some(AssistantContent::Thinking(thinking)) = output.content.get_mut(content_index)
-            else {
-                return Ok(());
-            };
-            if let Some(text) = text.filter(|text| !text.is_empty()) {
-                thinking.thinking.push_str(&text);
+            let mut text_delta = None;
+            let mut redacted_delta = false;
+            {
+                let Some(AssistantContent::Thinking(thinking)) =
+                    output.content.get_mut(content_index)
+                else {
+                    return Ok(());
+                };
+                if let Some(text) = text.filter(|text| !text.is_empty()) {
+                    let text = JsString::from(text);
+                    thinking.thinking.push_str(&text);
+                    text_delta = Some(text);
+                }
+                if thinking.redacted != Some(true)
+                    && let Some(signature) = signature.filter(|signature| !signature.is_empty())
+                {
+                    thinking
+                        .thinking_signature
+                        .get_or_insert_with(Default::default)
+                        .push_str(&signature);
+                }
+                if redacted_content
+                    .as_ref()
+                    .is_some_and(|content| !content.is_empty())
+                    && thinking.redacted != Some(true)
+                {
+                    thinking.redacted = Some(true);
+                    thinking.thinking_signature = Some(JsString::default());
+                    thinking.thinking.push_utf8(REDACTED_THINKING_PLACEHOLDER);
+                    redacted_delta = true;
+                }
+            }
+            if let Some(text) = text_delta {
                 sender
                     .send(AssistantMessageEvent::ThinkingDelta {
-                        content_index,
+                        content_index: content_index as f64,
                         delta: text,
-                        thinking_signature_delta: None,
+                        partial: Arc::new(output.clone()),
                     })
                     .map_err(|_| {
                         BedrockError::plain("Assistant event stream receiver was dropped")
                     })?;
             }
-            if thinking.redacted != Some(true)
-                && let Some(signature) = signature.filter(|signature| !signature.is_empty())
-            {
-                thinking
-                    .thinking_signature
-                    .get_or_insert_with(String::new)
-                    .push_str(&signature);
-            }
             if let Some(redacted_content) = redacted_content.filter(|content| !content.is_empty()) {
-                if thinking.redacted != Some(true) {
-                    thinking.redacted = Some(true);
-                    thinking.thinking_signature = Some(String::new());
-                    thinking.thinking.push_str(REDACTED_THINKING_PLACEHOLDER);
+                if redacted_delta {
                     sender
                         .send(AssistantMessageEvent::ThinkingDelta {
-                            content_index,
-                            delta: REDACTED_THINKING_PLACEHOLDER.to_owned(),
-                            thinking_signature_delta: None,
+                            content_index: content_index as f64,
+                            delta: REDACTED_THINKING_PLACEHOLDER.into(),
+                            partial: Arc::new(output.clone()),
                         })
                         .map_err(|_| {
                             BedrockError::plain("Assistant event stream receiver was dropped")
@@ -1441,9 +1539,9 @@ fn handle_stream_event(
             match content {
                 AssistantContent::Text(text) => sender
                     .send(AssistantMessageEvent::TextEnd {
-                        content_index: block.content_index,
+                        content_index: block.content_index as f64,
                         content: text.text.clone(),
-                        content_signature: None,
+                        partial: Arc::new(output.clone()),
                     })
                     .map_err(|_| {
                         BedrockError::plain("Assistant event stream receiver was dropped")
@@ -1452,35 +1550,37 @@ fn handle_stream_event(
                     flush_redacted_content(thinking, &block.redacted_chunks);
                     sender
                         .send(AssistantMessageEvent::ThinkingEnd {
-                            content_index: block.content_index,
+                            content_index: block.content_index as f64,
                             content: thinking.thinking.clone(),
-                            content_signature: None,
-                            redacted: None,
+                            partial: Arc::new(output.clone()),
                         })
                         .map_err(|_| {
                             BedrockError::plain("Assistant event stream receiver was dropped")
                         })?;
                 }
                 AssistantContent::ToolCall(call) => {
-                    call.arguments = parse_streaming_json(Some(&block.partial_json));
+                    call.arguments = parse_streaming_json(Some(&block.partial_json))
+                        .as_object()
+                        .cloned()
+                        .unwrap_or_default();
                     sender
                         .send(AssistantMessageEvent::ToolCallEnd {
-                            content_index: block.content_index,
+                            content_index: block.content_index as f64,
                             tool_call: call.clone(),
+                            partial: Arc::new(output.clone()),
                         })
                         .map_err(|_| {
                             BedrockError::plain("Assistant event stream receiver was dropped")
                         })?;
                 }
-                AssistantContent::Unknown(_) => {}
             }
         }
         BedrockStreamEvent::MessageStop { reason } => {
-            output.raw_stop_reason.clone_from(&reason);
+            output.raw_stop_reason = reason.clone().map(Into::into);
             let (stop_reason, message) = map_stop_reason(reason.as_deref());
             output.stop_reason = stop_reason;
             if message.is_some() {
-                output.error_message = message;
+                output.error_message = message.map(Into::into);
             }
         }
         BedrockStreamEvent::Metadata {
@@ -1500,15 +1600,13 @@ fn handle_stream_event(
             }
             let input = input.unwrap_or(0);
             let output_tokens = output_tokens.unwrap_or(0);
-            output.usage.input = UsageValue::from(input);
-            output.usage.output = UsageValue::from(output_tokens);
-            output.usage.cache_read = UsageValue::from(cache_read.unwrap_or(0));
-            output.usage.cache_write = UsageValue::from(cache_write.unwrap_or(0));
-            output.usage.total_tokens = UsageValue::from(
-                total
-                    .filter(|total| *total != 0)
-                    .unwrap_or(input + output_tokens),
-            );
+            output.usage.input = input as f64;
+            output.usage.output = output_tokens as f64;
+            output.usage.cache_read = cache_read.unwrap_or(0) as f64;
+            output.usage.cache_write = cache_write.unwrap_or(0) as f64;
+            output.usage.total_tokens = total
+                .filter(|total| *total != 0)
+                .unwrap_or(input + output_tokens) as f64;
             calculate_cost(model, &mut output.usage);
         }
     }
@@ -1517,7 +1615,7 @@ fn handle_stream_event(
 
 fn flush_redacted_content(thinking: &mut ThinkingContent, chunks: &[Vec<u8>]) {
     if !chunks.is_empty() {
-        thinking.thinking_signature = Some(STANDARD.encode(chunks.concat()));
+        thinking.thinking_signature = Some(STANDARD.encode(chunks.concat()).into());
     }
 }
 
@@ -1788,7 +1886,7 @@ mod sdk {
 
     pub(super) fn to_provider_response(response: &HttpResponse) -> ProviderResponse {
         ProviderResponse {
-            status: response.status().as_u16(),
+            status: f64::from(response.status().as_u16()),
             headers: response
                 .headers()
                 .into_iter()
@@ -1809,13 +1907,13 @@ mod sdk {
             .and_then(|(_, value)| normalize_diagnostic_value(Some(value)))
     }
 
-    fn sdk_error<E>(error: &SdkError<E, HttpResponse>) -> BedrockError
+    pub(super) fn sdk_error<E>(error: &SdkError<E, HttpResponse>) -> BedrockError
     where
         E: std::error::Error + ProvideErrorMetadata + 'static,
     {
         let raw = error.raw_response();
         let status = raw.map(|response| i64::from(response.status().as_u16()));
-        let body = raw
+        let raw_body = raw
             .and_then(|response| response.body().bytes())
             .and_then(|body| std::str::from_utf8(body).ok())
             .map(str::to_owned);
@@ -1839,14 +1937,19 @@ mod sdk {
                 })
                 .map(|(_, value)| value.to_owned())
         });
-        let message_carries_body = body.as_ref().is_none_or(|body| message.contains(body));
+        let normalized = normalize_provider_error(&ProviderErrorData {
+            message: message.clone(),
+            metadata_http_status_code: status.map(|status| status as f64),
+            response_body: raw_body.map(|body| ProviderErrorBody::Text(body.into())),
+            ..ProviderErrorData::default()
+        });
         BedrockError {
             message,
             details: Box::new(BedrockErrorDetails {
-                message_carries_body,
+                message_carries_body: normalized.message_carries_body,
                 name,
                 status,
-                body,
+                body: normalized.body,
                 service_exception: service.is_some(),
                 request_id,
                 fallback_request_id: None,
@@ -2017,10 +2120,9 @@ mod sdk {
                     flush_redacted_content(thinking, &block.redacted_chunks);
                 }
                 Some(AssistantContent::ToolCall(call)) => {
-                    call.arguments = parse_streaming_json(Some(&block.partial_json));
+                    call.arguments = parse_streaming_json_object(Some(&block.partial_json));
                 }
                 Some(AssistantContent::Text(_)) | None => {}
-                Some(AssistantContent::Unknown(_)) => {}
             }
         }
     }
@@ -2040,19 +2142,20 @@ mod sdk {
         options: &BedrockOptions,
         output: &mut AssistantMessage,
         resolution: ClientResolution,
-        mut payload: Value,
+        mut payload: JsonValue,
     ) -> Result<Option<String>, BedrockError> {
         let model_id = payload
             .get("modelId")
-            .and_then(Value::as_str)
+            .and_then(JsonValue::as_str)
             .filter(|model_id| !model_id.is_empty())
             .ok_or_else(|| BedrockError::plain("No value provided for input HTTP label: modelId"))?
-            .to_owned();
+            .to_utf8()
+            .map_err(|_| BedrockError::plain("modelId contains an unpaired UTF-16 surrogate"))?;
         payload
             .as_object_mut()
             .expect("command input is an object")
             .remove("modelId");
-        let body = serde_json::to_vec(&payload).map_err(BedrockError::display)?;
+        let body = crate::utils::ecma_json::stringify_provider_json(&payload).into_bytes();
         let headers =
             provider_headers_to_record(options.stream.request.headers.as_ref()).unwrap_or_default();
         let response_capture = Arc::new(Mutex::new(None));
@@ -2124,7 +2227,7 @@ mod sdk {
             .or(modeled_request_id);
         if let Some(on_response) = &options.stream.request.on_response {
             let response = raw_response.unwrap_or_else(|| ProviderResponse {
-                status: 200,
+                status: 200.0,
                 headers: response_request_id
                     .as_ref()
                     .map(|request_id| {

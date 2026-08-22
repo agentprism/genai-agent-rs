@@ -1,9 +1,8 @@
 //! Assistant diagnostics ⇐ pi `src/utils/diagnostics.ts`.
 
 use crate::types::{
-    AssistantMessage, AssistantMessageDiagnostic, DiagnosticCode, DiagnosticErrorInfo,
+    AssistantMessage, AssistantMessageDiagnostic, DiagnosticCode, DiagnosticErrorInfo, JsonObject,
 };
-use serde_json::{Map, Value};
 use std::any::Any;
 use std::any::type_name_of_val;
 use std::backtrace::Backtrace;
@@ -28,30 +27,28 @@ where
         message => message,
     };
     DiagnosticErrorInfo {
-        name: type_name,
-        message,
-        stack: Some(Backtrace::force_capture().to_string()),
+        name: type_name.map(Into::into),
+        message: message.into(),
+        stack: Some(Backtrace::force_capture().to_string().into()),
         code: None,
     }
 }
 
 pub fn create_assistant_message_diagnostic<E>(
-    kind: impl Into<String>,
+    kind: impl Into<crate::types::JsString>,
     error: &E,
-    details: Option<Map<String, Value>>,
+    details: Option<JsonObject>,
 ) -> AssistantMessageDiagnostic
 where
     E: Error + 'static + ?Sized,
 {
     AssistantMessageDiagnostic {
         kind: kind.into(),
-        timestamp: i64::try_from(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis(),
-        )
-        .unwrap_or(i64::MAX),
+        timestamp: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64()
+            * 1_000.0,
         error: Some(extract_diagnostic_error(error)),
         details,
     }
@@ -67,7 +64,7 @@ pub fn append_assistant_message_diagnostic(
         .push(diagnostic);
 }
 
-pub fn diagnostic_code_string(value: impl Into<String>) -> DiagnosticCode {
+pub fn diagnostic_code_string(value: impl Into<crate::types::JsString>) -> DiagnosticCode {
     DiagnosticCode::String(value.into())
 }
 
@@ -86,6 +83,7 @@ pub fn format_panic_payload(payload: &(dyn Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::JsonValue;
     use std::fmt;
 
     #[derive(Debug)]
@@ -116,13 +114,13 @@ mod tests {
         let diagnostic = create_assistant_message_diagnostic(
             "transport",
             &NamedError,
-            Some(Map::from_iter([("attempt".to_owned(), Value::from(1))])),
+            Some(JsonObject::from_iter([("attempt".into(), JsonValue::from(1))])),
         );
         let error = diagnostic.error.as_ref().expect("error");
         assert_eq!(error.name.as_deref(), Some("NamedError"));
         assert_eq!(error.message, "failure");
         assert!(error.stack.as_ref().is_some_and(|stack| !stack.is_empty()));
-        let mut message = AssistantMessage::pending("api", "provider", "model", 1);
+        let mut message = AssistantMessage::pending("api", "provider", "model", 1.0);
         append_assistant_message_diagnostic(&mut message, diagnostic.clone());
         append_assistant_message_diagnostic(&mut message, diagnostic);
         assert_eq!(message.diagnostics.expect("diagnostics").len(), 2);

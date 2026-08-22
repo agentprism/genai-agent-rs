@@ -80,7 +80,7 @@ impl OpenAiHttpError {
             },
             provider_data: Box::new(ProviderErrorData {
                 message,
-                status: Some(i64::from(status)),
+                status: Some(f64::from(status)),
                 error: error.map(ProviderErrorBody::Parsed),
                 ..ProviderErrorData::default()
             }),
@@ -95,7 +95,8 @@ impl OpenAiHttpError {
 
     pub fn formatted(&self, prefix: Option<&str>, append_raw_metadata: bool) -> String {
         let mut message =
-            format_provider_error(&normalize_provider_error(&self.provider_data), prefix);
+            format_provider_error(&normalize_provider_error(&self.provider_data), prefix)
+                .to_utf8_lossy();
         if append_raw_metadata && let Some(raw) = self.raw_metadata.as_ref() {
             let raw = js_string(raw);
             if !message.contains(&raw) {
@@ -195,7 +196,7 @@ pub(crate) async fn acquire_sse(
         return Err(OpenAiHttpError::http(status, headers, &body));
     }
     let metadata = ProviderResponse {
-        status: response.status,
+        status: f64::from(response.status),
         headers: response.headers,
     };
     let stream = response.body.map_or_else(

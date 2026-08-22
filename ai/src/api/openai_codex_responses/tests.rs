@@ -324,8 +324,8 @@ fn model(id: &str) -> Model {
         thinking_level_map: None,
         input: vec![ModelInput::Text],
         cost: ModelCost::default(),
-        context_window: 400_000,
-        max_tokens: 128_000,
+        context_window: 400_000.0,
+        max_tokens: 128_000.0,
         sampling_params: None,
         headers: None,
         compat: None,
@@ -334,11 +334,11 @@ fn model(id: &str) -> Model {
 
 fn context(text: &str) -> Context {
     Context {
-        system_prompt: Some("You are a helpful assistant.".to_owned()),
+        system_prompt: Some(("You are a helpful assistant.".to_owned()).into()),
         messages: vec![Message::User(Box::new(UserMessage {
             role: UserRole::User,
-            content: UserContent::Text(text.to_owned()),
-            timestamp: 1,
+            content: UserContent::Text((text.to_owned()).into()),
+            timestamp: 1.0,
         }))],
         tools: None,
     }
@@ -411,7 +411,7 @@ async fn streams_sse_responses_into_assistant_message_event_stream() {
     let mut kinds = Vec::new();
     while let Some(event) = events.next().await {
         kinds.push(match event {
-            AssistantMessageEvent::Start => "start",
+            AssistantMessageEvent::Start { .. } => "start",
             AssistantMessageEvent::TextStart { .. } => "text_start",
             AssistantMessageEvent::TextDelta { .. } => "text_delta",
             AssistantMessageEvent::TextEnd { .. } => "text_end",
@@ -1169,9 +1169,7 @@ async fn zstd_compresses_every_sse_request_body_at_level_three() {
 fn message_text(message: &AssistantMessage) -> Option<&str> {
     message.content.iter().find_map(|content| match content {
         AssistantContent::Text(text) => Some(text.text.as_str()),
-        AssistantContent::Thinking(_)
-        | AssistantContent::ToolCall(_)
-        | AssistantContent::Unknown(_) => None,
+        AssistantContent::Thinking(_) | AssistantContent::ToolCall(_) => None,
     })
 }
 
@@ -1439,7 +1437,7 @@ async fn collect_event_kinds(
     let mut kinds = Vec::new();
     while let Some(event) = events.next().await {
         kinds.push(match event {
-            AssistantMessageEvent::Start => "start",
+            AssistantMessageEvent::Start { .. } => "start",
             AssistantMessageEvent::TextStart { .. } => "text_start",
             AssistantMessageEvent::TextDelta { .. } => "text_delta",
             AssistantMessageEvent::TextEnd { .. } => "text_end",
@@ -1536,7 +1534,7 @@ async fn websocket_pre_stream_failure_falls_back_and_is_remembered() {
             assert_eq!(error.message, "WebSocket closed 1009 message too big");
             assert_eq!(
                 error.code,
-                Some(DiagnosticCode::Number(serde_json::Number::from(1009)))
+                Some(DiagnosticCode::Number(1009.0))
             );
         }
     }
@@ -1675,12 +1673,10 @@ async fn codex_toolcall_start_carries_start_time_namespace() {
     );
     let mut namespace = None;
     while let Some(event) = stream.next().await {
-        if let AssistantMessageEvent::ToolCallStart {
-            namespace: event_namespace,
-            ..
-        } = event
+        if let AssistantMessageEvent::ToolCallStart { partial, .. } = event
+            && let Some(AssistantContent::ToolCall(call)) = partial.content.last()
         {
-            namespace = event_namespace;
+            namespace = call.namespace.clone();
         }
     }
     assert_eq!(namespace.as_deref(), Some("dynamic_tools"));
@@ -1717,8 +1713,8 @@ async fn websocket_cache_reuses_session_socket_and_sends_only_input_delta() {
         .messages
         .push(Message::User(Box::new(UserMessage {
             role: UserRole::User,
-            content: UserContent::Text("Now finish".to_owned()),
-            timestamp: 2,
+            content: UserContent::Text(("Now finish".to_owned()).into()),
+            timestamp: 2.0,
         })));
     let second = stream(
         &current,
@@ -1782,8 +1778,8 @@ async fn auto_uses_input_delta_while_plain_websocket_uses_full_context() {
             Message::Assistant(Box::new(first)),
             Message::User(Box::new(UserMessage {
                 role: UserRole::User,
-                content: UserContent::Text("again".to_owned()),
-                timestamp: 2,
+                content: UserContent::Text(("again".to_owned()).into()),
+                timestamp: 2.0,
             })),
         ]);
         stream(
@@ -2077,8 +2073,8 @@ async fn cached_websocket_max_age_forces_a_fresh_connection() {
         Message::Assistant(Box::new(first)),
         Message::User(Box::new(UserMessage {
             role: UserRole::User,
-            content: UserContent::Text("again".to_owned()),
-            timestamp: 2,
+            content: UserContent::Text(("again".to_owned()).into()),
+            timestamp: 2.0,
         })),
     ]);
     stream(
@@ -2218,8 +2214,8 @@ async fn websocket_cached_sends_only_custom_tool_result_and_user_input_delta() {
         Message::Assistant(Box::new(first)),
         Message::ToolResult(Box::new(ToolResultMessage {
             role: ToolResultRole::ToolResult,
-            tool_call_id: "call_1|ctc_1".to_owned(),
-            tool_name: "sample_tool".to_owned(),
+            tool_call_id: "call_1|ctc_1".into(),
+            tool_name: "sample_tool".into(),
             content: vec![crate::types::UserContentBlock::Text(TextContent::new(
                 "real result",
             ))],
@@ -2227,12 +2223,12 @@ async fn websocket_cached_sends_only_custom_tool_result_and_user_input_delta() {
             usage: None,
             added_tool_names: None,
             is_error: false,
-            timestamp: 2,
+            timestamp: 2.0,
         })),
         Message::User(Box::new(UserMessage {
             role: UserRole::User,
-            content: UserContent::Text("Now finish".to_owned()),
-            timestamp: 3,
+            content: UserContent::Text(("Now finish".to_owned()).into()),
+            timestamp: 3.0,
         })),
     ]);
     stream(
@@ -2305,8 +2301,8 @@ async fn missing_websocket_continuation_retries_once_with_full_context() {
         Message::Assistant(Box::new(first)),
         Message::User(Box::new(UserMessage {
             role: UserRole::User,
-            content: UserContent::Text("Now finish".to_owned()),
-            timestamp: 2,
+            content: UserContent::Text(("Now finish".to_owned()).into()),
+            timestamp: 2.0,
         })),
     ]);
     let second = stream(
@@ -2362,8 +2358,8 @@ async fn missing_websocket_continuation_retry_can_fall_back_to_sse() {
         Message::Assistant(Box::new(first)),
         Message::User(Box::new(UserMessage {
             role: UserRole::User,
-            content: UserContent::Text("Now finish".to_owned()),
-            timestamp: 2,
+            content: UserContent::Text(("Now finish".to_owned()).into()),
+            timestamp: 2.0,
         })),
     ]);
     let (kinds, second) = collect_event_kinds(stream(

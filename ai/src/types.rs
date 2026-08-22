@@ -1,10 +1,13 @@
 //! Provider-neutral data contracts mirrored from pi `src/types.ts`.
 
+pub use crate::utils::ecma_json::{JsonObject, JsonValue};
+pub use crate::utils::js_string::JsString;
 use futures::{StreamExt, future::BoxFuture};
 use indexmap::IndexMap;
 use serde::de::Error as _;
 use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::value::RawValue;
 use serde_json::{Map, Number, Value};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -17,33 +20,39 @@ macro_rules! open_string_newtype {
             Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
         )]
         #[serde(transparent)]
-        pub struct $name(pub String);
+        pub struct $name(pub JsString);
 
         impl $name {
-            pub fn new(value: impl Into<String>) -> Self {
+            pub fn new(value: impl Into<JsString>) -> Self {
                 Self(value.into())
             }
 
             pub fn as_str(&self) -> &str {
-                &self.0
+                self.0.as_str()
             }
         }
 
         impl From<&str> for $name {
             fn from(value: &str) -> Self {
-                Self(value.to_owned())
+                Self(value.into())
             }
         }
 
         impl From<String> for $name {
             fn from(value: String) -> Self {
+                Self(value.into())
+            }
+        }
+
+        impl From<JsString> for $name {
+            fn from(value: JsString) -> Self {
                 Self(value)
             }
         }
 
         impl fmt::Display for $name {
             fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str(&self.0)
+                fmt::Display::fmt(&self.0, formatter)
             }
         }
     };
@@ -92,36 +101,34 @@ where
     Option::<T>::deserialize(deserializer).map(Some)
 }
 
-fn deserialize_present_json<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+fn deserialize_present_ecma_json<'de, D>(deserializer: D) -> Result<Option<JsonValue>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    Value::deserialize(deserializer).map(Some)
+    JsonValue::deserialize(deserializer).map(Some)
 }
 
-fn deserialize_null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Deserialize<'de> + Default,
-{
-    Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
+fn raw_tagged_string(raw: &RawValue, field: &str) -> Result<Option<String>, String> {
+    let value = crate::utils::ecma_json::parse(raw.get()).map_err(|error| error.to_string())?;
+    let Some(value) = value.get(field) else {
+        return Ok(None);
+    };
+    let value = value
+        .as_str()
+        .ok_or_else(|| format!("{field} must be a string"))?;
+    value
+        .to_utf8()
+        .map(Some)
+        .map_err(|_| format!("{field} must not contain an unpaired surrogate"))
 }
 
 pub(crate) fn serialize_js_f64<S>(value: &f64, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    if *value == 0.0 {
-        serializer.serialize_i64(0)
-    } else if value.is_finite()
-        && value.fract() == 0.0
-        && *value >= i64::MIN as f64
-        && *value <= i64::MAX as f64
-    {
-        serializer.serialize_i64(*value as i64)
-    } else {
-        serializer.serialize_f64(*value)
-    }
+    let raw = RawValue::from_string(crate::utils::ecma_json::format_number(*value))
+        .map_err(S::Error::custom)?;
+    raw.serialize(serializer)
 }
 
 pub(crate) fn serialize_optional_js_f64<S>(
@@ -134,6 +141,29 @@ where
     match value {
         Some(value) => serialize_js_f64(value, serializer),
         None => serializer.serialize_none(),
+    }
+}
+
+pub(crate) fn deserialize_js_f64<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match JsonValue::deserialize(deserializer)? {
+        JsonValue::Number(value) => Ok(value),
+        _ => Err(D::Error::custom("expected a JavaScript number")),
+    }
+}
+
+pub(crate) fn deserialize_optional_js_f64<'de, D>(
+    deserializer: D,
+) -> Result<Option<f64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match Option::<JsonValue>::deserialize(deserializer)? {
+        None | Some(JsonValue::Null) => Ok(None),
+        Some(JsonValue::Number(value)) => Ok(Some(value)),
+        Some(_) => Err(D::Error::custom("expected a JavaScript number or null")),
     }
 }
 
@@ -313,9 +343,10 @@ pub enum SessionAffinityFormat {
     Openrouter,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderResponse {
-    pub status: u16,
+    #[serde(serialize_with = "serialize_js_f64")]
+    pub status: f64,
     pub headers: BTreeMap<String, String>,
 }
 
@@ -452,7 +483,7 @@ pub fn is_default_fetch(fetch: &Arc<dyn FetchFunction>) -> bool {
 }
 
 pub type OnPayload<TModel = Model> = Arc<
-    dyn for<'a> Fn(Value, &'a TModel) -> BoxFuture<'a, Result<Option<Value>, String>>
+    dyn for<'a> Fn(JsonValue, &'a TModel) -> BoxFuture<'a, Result<Option<JsonValue>, String>>
         + Send
         + Sync
         + 'static,
@@ -545,7 +576,8 @@ pub struct StreamOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sampling_params: Option<Map<String, Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u64>,
+    #[serde(serialize_with = "serialize_optional_js_f64")]
+    pub max_tokens: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<Transport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -573,7 +605,8 @@ pub struct DeferredFetchOptions {
     #[serde(flatten)]
     pub request: ProviderRequestOptions<Model>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wait: Option<u64>,
+    #[serde(serialize_with = "serialize_optional_js_f64")]
+    pub wait: Option<f64>,
 }
 
 pub type DeferredCancelOptions = ProviderRequestOptions<Model>;
@@ -622,7 +655,7 @@ pub struct TextSignatureV1 {
         deserialize_with = "deserialize_text_signature_version"
     )]
     pub v: u8,
-    pub id: String,
+    pub id: JsString,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<TextSignaturePhase>,
 }
@@ -646,13 +679,13 @@ pub enum TextContentType {
 pub struct TextContent {
     #[serde(rename = "type")]
     pub kind: TextContentType,
-    pub text: String,
+    pub text: JsString,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text_signature: Option<String>,
+    pub text_signature: Option<JsString>,
 }
 
 impl TextContent {
-    pub fn new(text: impl Into<String>) -> Self {
+    pub fn new(text: impl Into<JsString>) -> Self {
         Self {
             kind: TextContentType::Text,
             text: text.into(),
@@ -673,15 +706,15 @@ pub enum ThinkingContentType {
 pub struct ThinkingContent {
     #[serde(rename = "type")]
     pub kind: ThinkingContentType,
-    pub thinking: String,
+    pub thinking: JsString,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking_signature: Option<String>,
+    pub thinking_signature: Option<JsString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redacted: Option<bool>,
 }
 
 impl ThinkingContent {
-    pub fn new(thinking: impl Into<String>) -> Self {
+    pub fn new(thinking: impl Into<JsString>) -> Self {
         Self {
             kind: ThinkingContentType::Thinking,
             thinking: thinking.into(),
@@ -703,12 +736,12 @@ pub enum ImageContentType {
 pub struct ImageContent {
     #[serde(rename = "type")]
     pub kind: ImageContentType,
-    pub data: String,
-    pub mime_type: String,
+    pub data: JsString,
+    pub mime_type: JsString,
 }
 
 impl ImageContent {
-    pub fn new(data: impl Into<String>, mime_type: impl Into<String>) -> Self {
+    pub fn new(data: impl Into<JsString>, mime_type: impl Into<JsString>) -> Self {
         Self {
             kind: ImageContentType::Image,
             data: data.into(),
@@ -729,20 +762,20 @@ pub enum ToolCallType {
 pub struct ToolCall {
     #[serde(rename = "type")]
     pub kind: ToolCallType,
-    pub id: String,
-    pub name: String,
-    pub arguments: Value,
+    pub id: JsString,
+    pub name: JsString,
+    pub arguments: JsonObject,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thought_signature: Option<String>,
+    pub thought_signature: Option<JsString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub namespace: Option<String>,
+    pub namespace: Option<JsString>,
 }
 
 impl ToolCall {
     pub fn new(
-        id: impl Into<String>,
-        name: impl Into<String>,
-        arguments: impl Into<Value>,
+        id: impl Into<JsString>,
+        name: impl Into<JsString>,
+        arguments: impl Into<JsonObject>,
     ) -> Self {
         Self {
             kind: ToolCallType::ToolCall,
@@ -755,106 +788,101 @@ impl ToolCall {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum AssistantContent {
     Text(TextContent),
     Thinking(ThinkingContent),
     ToolCall(ToolCall),
-    Unknown(Value),
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum AssistantMessageContent {
-    Null,
-    Blocks(Vec<AssistantContent>),
-}
-
-impl Default for AssistantMessageContent {
-    fn default() -> Self {
-        Self::Blocks(Vec::new())
-    }
-}
-
-impl From<Vec<AssistantContent>> for AssistantMessageContent {
-    fn from(value: Vec<AssistantContent>) -> Self {
-        Self::Blocks(value)
-    }
-}
-
-impl std::ops::Deref for AssistantMessageContent {
-    type Target = Vec<AssistantContent>;
-
-    fn deref(&self) -> &Self::Target {
-        match self {
-            Self::Null => &EMPTY_ASSISTANT_CONTENT,
-            Self::Blocks(blocks) => blocks,
-        }
-    }
-}
-
-static EMPTY_ASSISTANT_CONTENT: Vec<AssistantContent> = Vec::new();
-
-impl std::ops::DerefMut for AssistantMessageContent {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        if matches!(self, Self::Null) {
-            *self = Self::default();
-        }
-        match self {
-            Self::Blocks(blocks) => blocks,
-            Self::Null => unreachable!("null was normalized for mutation"),
-        }
-    }
-}
-
-impl<'a> IntoIterator for &'a AssistantMessageContent {
-    type Item = &'a AssistantContent;
-    type IntoIter = std::slice::Iter<'a, AssistantContent>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
-    }
-}
-
-impl Serialize for AssistantMessageContent {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match self {
-            Self::Null => serializer.serialize_none(),
-            Self::Blocks(blocks) => blocks.serialize(serializer),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for AssistantMessageContent {
+impl<'de> Deserialize<'de> for AssistantContent {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        Option::<Vec<AssistantContent>>::deserialize(deserializer)
-            .map(|value| value.map_or(Self::Null, Self::Blocks))
+        let raw = Box::<RawValue>::deserialize(deserializer)?;
+        match raw_tagged_string(&raw, "type")
+            .map_err(D::Error::custom)?
+            .as_deref()
+        {
+            Some("text") => serde_json::from_str(raw.get())
+                .map(Self::Text)
+                .map_err(D::Error::custom),
+            Some("thinking") => serde_json::from_str(raw.get())
+                .map(Self::Thinking)
+                .map_err(D::Error::custom),
+            Some("toolCall") => serde_json::from_str(raw.get())
+                .map(Self::ToolCall)
+                .map_err(D::Error::custom),
+            Some(kind) => Err(D::Error::custom(format!(
+                "unknown assistant content type {kind:?}"
+            ))),
+            None => Err(D::Error::custom("assistant content type is required")),
+        }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub type AssistantMessageContent = Vec<AssistantContent>;
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum UserContentBlock {
     Text(TextContent),
     Image(ImageContent),
-    Unknown(Value),
+}
+
+impl<'de> Deserialize<'de> for UserContentBlock {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = Box::<RawValue>::deserialize(deserializer)?;
+        match raw_tagged_string(&raw, "type")
+            .map_err(D::Error::custom)?
+            .as_deref()
+        {
+            Some("text") => serde_json::from_str(raw.get())
+                .map(Self::Text)
+                .map_err(D::Error::custom),
+            Some("image") => serde_json::from_str(raw.get())
+                .map(Self::Image)
+                .map_err(D::Error::custom),
+            Some(kind) => Err(D::Error::custom(format!(
+                "unknown user content type {kind:?}"
+            ))),
+            None => Err(D::Error::custom("user content type is required")),
+        }
+    }
 }
 
 pub type ToolResultContent = UserContentBlock;
 pub type ImagesInputContent = UserContentBlock;
 pub type ImagesOutputContent = UserContentBlock;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum UserContent {
-    Text(String),
+    Text(JsString),
     Blocks(Vec<UserContentBlock>),
+}
+
+impl<'de> Deserialize<'de> for UserContent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = Box::<RawValue>::deserialize(deserializer)?;
+        match raw.get().trim_start().as_bytes().first() {
+            Some(b'"') => serde_json::from_str(raw.get())
+                .map(Self::Text)
+                .map_err(D::Error::custom),
+            Some(b'[') => serde_json::from_str(raw.get())
+                .map(Self::Blocks)
+                .map_err(D::Error::custom),
+            _ => Err(D::Error::custom("user content must be a string or array")),
+        }
+    }
 }
 
 impl Default for UserContent {
@@ -870,12 +898,13 @@ pub enum UserRole {
     User,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UserMessage {
     pub role: UserRole,
-    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub content: UserContent,
-    pub timestamp: i64,
+    pub timestamp: f64,
+    #[doc(hidden)]
+    pub __field_order: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -966,71 +995,47 @@ pub struct UsageCost {
     pub total: f64,
 }
 
-#[derive(Debug, Clone)]
-pub struct UsageValue(UsageValueRepr);
-
-#[derive(Debug, Clone)]
-enum UsageValueRepr {
-    Number(f64),
-    Other(Value),
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Usage {
+    #[serde(serialize_with = "serialize_js_f64")]
+    pub input: f64,
+    #[serde(serialize_with = "serialize_js_f64")]
+    pub output: f64,
+    #[serde(serialize_with = "serialize_js_f64")]
+    pub cache_read: f64,
+    #[serde(serialize_with = "serialize_js_f64")]
+    pub cache_write: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "serialize_optional_js_f64")]
+    pub cache_write_1h: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "serialize_optional_js_f64")]
+    pub reasoning: Option<f64>,
+    #[serde(serialize_with = "serialize_js_f64")]
+    pub total_tokens: f64,
+    pub cost: UsageCost,
 }
 
-impl Default for UsageValue {
-    fn default() -> Self {
-        Self(UsageValueRepr::Number(0.0))
+/// Provider-response number normalization. This is intentionally crate-private:
+/// public usage is always numeric, while malformed SDK payloads are normalized at adapters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+#[serde(transparent)]
+pub(crate) struct UsageValue(f64);
+
+impl UsageValue {
+    pub(crate) fn as_number(&self) -> f64 {
+        self.0
+    }
+
+    pub(crate) fn is_truthy(&self) -> bool {
+        self.0 != 0.0 && !self.0.is_nan()
     }
 }
 
-impl PartialEq for UsageValue {
-    fn eq(&self, other: &Self) -> bool {
-        match (&self.0, &other.0) {
-            (UsageValueRepr::Number(left), UsageValueRepr::Number(right)) => left == right,
-            (UsageValueRepr::Other(left), UsageValueRepr::Other(right)) => left == right,
-            _ => false,
-        }
-    }
-}
-
-macro_rules! usage_value_from_number {
-    ($($kind:ty),+ $(,)?) => {
-        $(
-            impl From<$kind> for UsageValue {
-                fn from(value: $kind) -> Self {
-                    Self(UsageValueRepr::Number(value as f64))
-                }
-            }
-
-            impl PartialEq<$kind> for UsageValue {
-                fn eq(&self, other: &$kind) -> bool {
-                    matches!(&self.0, UsageValueRepr::Number(value) if *value == *other as f64)
-                }
-            }
-        )+
-    };
-}
-
-usage_value_from_number!(i32, i64, u32, u64, usize, f32, f64);
-
-impl From<Value> for UsageValue {
-    fn from(value: Value) -> Self {
-        match value {
-            Value::Number(value) => {
-                Self(UsageValueRepr::Number(value.as_f64().unwrap_or(f64::NAN)))
-            }
-            value => Self(UsageValueRepr::Other(value)),
-        }
-    }
-}
-
-impl Serialize for UsageValue {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match &self.0 {
-            UsageValueRepr::Number(value) => serialize_js_f64(value, serializer),
-            UsageValueRepr::Other(value) => value.serialize(serializer),
-        }
+impl From<serde_json::Value> for UsageValue {
+    fn from(value: serde_json::Value) -> Self {
+        Self(value.as_f64().unwrap_or_default())
     }
 }
 
@@ -1039,138 +1044,62 @@ impl<'de> Deserialize<'de> for UsageValue {
     where
         D: Deserializer<'de>,
     {
-        Value::deserialize(deserializer).map(Self::from)
+        serde_json::Value::deserialize(deserializer).map(Self::from)
     }
 }
 
-impl UsageValue {
-    pub fn as_number(&self) -> f64 {
-        match &self.0 {
-            UsageValueRepr::Number(value) => *value,
-            UsageValueRepr::Other(Value::Null) => 0.0,
-            UsageValueRepr::Other(Value::Bool(value)) => f64::from(u8::from(*value)),
-            UsageValueRepr::Other(Value::String(value)) => javascript_number(value),
-            UsageValueRepr::Other(Value::Array(values)) => match values.as_slice() {
-                [] => 0.0,
-                [value] => UsageValue::from(value.clone()).as_number(),
-                _ => f64::NAN,
-            },
-            UsageValueRepr::Other(Value::Object(_)) => f64::NAN,
-            UsageValueRepr::Other(Value::Number(_)) => unreachable!("numbers use Number"),
-        }
-    }
-
-    pub fn is_truthy(&self) -> bool {
-        match &self.0 {
-            UsageValueRepr::Number(value) => *value != 0.0 && !value.is_nan(),
-            UsageValueRepr::Other(Value::Null) => false,
-            UsageValueRepr::Other(Value::Bool(value)) => *value,
-            UsageValueRepr::Other(Value::String(value)) => !value.is_empty(),
-            UsageValueRepr::Other(Value::Array(_) | Value::Object(_)) => true,
-            UsageValueRepr::Other(Value::Number(_)) => unreachable!("numbers use Number"),
-        }
-    }
-
-    pub(crate) fn js_add(&self, other: &Self) -> Self {
-        match (self.string_primitive(), other.string_primitive()) {
-            (Some(left), Some(right)) => Value::String(left + &right).into(),
-            (Some(left), None) => Value::String(left + &other.non_string_primitive()).into(),
-            (None, Some(right)) => Value::String(self.non_string_primitive() + &right).into(),
-            (None, None) => (self.as_number() + other.as_number()).into(),
-        }
-    }
-
-    fn string_primitive(&self) -> Option<String> {
-        match &self.0 {
-            UsageValueRepr::Other(Value::String(value)) => Some(value.clone()),
-            UsageValueRepr::Other(Value::Array(values)) => Some(
-                values
-                    .iter()
-                    .map(|value| match value {
-                        Value::Null => String::new(),
-                        Value::String(value) => value.clone(),
-                        value => UsageValue::from(value.clone()).non_string_primitive(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(","),
-            ),
-            UsageValueRepr::Other(Value::Object(_)) => Some("[object Object]".to_owned()),
-            _ => None,
-        }
-    }
-
-    fn non_string_primitive(&self) -> String {
-        match &self.0 {
-            UsageValueRepr::Number(value) => javascript_number_string(*value),
-            UsageValueRepr::Other(Value::Null) => "null".to_owned(),
-            UsageValueRepr::Other(Value::Bool(value)) => value.to_string(),
-            UsageValueRepr::Other(Value::String(value)) => value.clone(),
-            UsageValueRepr::Other(Value::Array(_) | Value::Object(_)) => {
-                self.string_primitive().unwrap_or_default()
+macro_rules! usage_value_from_number {
+    ($($kind:ty),+ $(,)?) => {
+        $(
+            impl From<$kind> for UsageValue {
+                fn from(value: $kind) -> Self {
+                    Self(value as f64)
+                }
             }
-            UsageValueRepr::Other(Value::Number(_)) => unreachable!("numbers use Number"),
-        }
-    }
+        )+
+    };
 }
 
-fn javascript_number(value: &str) -> f64 {
-    let value = crate::utils::error_body::trim_javascript_whitespace(value);
-    if value.is_empty() {
-        return 0.0;
-    }
-    match value {
-        "Infinity" | "+Infinity" => return f64::INFINITY,
-        "-Infinity" => return f64::NEG_INFINITY,
-        _ => {}
-    }
-    for (prefixes, radix) in [(["0x", "0X"], 16), (["0b", "0B"], 2), (["0o", "0O"], 8)] {
-        if let Some(digits) = value
-            .strip_prefix(prefixes[0])
-            .or_else(|| value.strip_prefix(prefixes[1]))
-        {
-            return u128::from_str_radix(digits, radix).map_or(f64::NAN, |number| number as f64);
-        }
-    }
-    value
-        .parse()
-        .ok()
-        .filter(|number: &f64| number.is_finite())
-        .unwrap_or(f64::NAN)
-}
+usage_value_from_number!(i32, i64, u32, u64, usize, f32, f64);
 
-fn javascript_number_string(value: f64) -> String {
-    crate::utils::error_body::js_f64_string(value)
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Usage {
-    pub input: UsageValue,
-    pub output: UsageValue,
-    pub cache_read: UsageValue,
-    pub cache_write: UsageValue,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_write_1h: Option<UsageValue>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning: Option<UsageValue>,
-    pub total_tokens: UsageValue,
-    pub cost: UsageCost,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DiagnosticCode {
-    String(String),
-    Number(Number),
+    String(JsString),
+    Number(f64),
+}
+
+impl Serialize for DiagnosticCode {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::String(value) => value.serialize(serializer),
+            Self::Number(value) => serialize_js_f64(value, serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DiagnosticCode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match JsonValue::deserialize(deserializer)? {
+            JsonValue::String(value) => Ok(Self::String(value)),
+            JsonValue::Number(value) => Ok(Self::Number(value)),
+            _ => Err(D::Error::custom("diagnostic code must be a string or number")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DiagnosticErrorInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    pub message: String,
+    pub name: Option<JsString>,
+    pub message: JsString,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stack: Option<String>,
+    pub stack: Option<JsString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<DiagnosticCode>,
 }
@@ -1178,69 +1107,66 @@ pub struct DiagnosticErrorInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AssistantMessageDiagnostic {
     #[serde(rename = "type")]
-    pub kind: String,
-    pub timestamp: i64,
+    pub kind: JsString,
+    #[serde(
+        serialize_with = "serialize_js_f64",
+        deserialize_with = "deserialize_js_f64"
+    )]
+    pub timestamp: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<DiagnosticErrorInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub details: Option<Map<String, Value>>,
+    pub details: Option<JsonObject>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeferredHandle {
-    pub provider: String,
-    pub model_id: String,
-    pub api: String,
-    pub id: String,
+    pub provider: JsString,
+    pub model_id: JsString,
+    pub api: JsString,
+    pub id: JsString,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<i64>,
+    #[serde(serialize_with = "serialize_optional_js_f64")]
+    pub expires_at: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub poll_after_ms: Option<u64>,
+    #[serde(serialize_with = "serialize_optional_js_f64")]
+    pub poll_after_ms: Option<f64>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_present_json"
+        deserialize_with = "deserialize_present_ecma_json"
     )]
-    pub data: Option<Value>,
+    pub data: Option<JsonValue>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AssistantMessage {
     pub role: AssistantRole,
-    #[serde(default)]
     pub content: AssistantMessageContent,
     pub api: Api,
     pub provider: ProviderId,
-    pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub response_model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub response_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_details: Option<Vec<Value>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: JsString,
+    pub response_model: Option<JsString>,
+    pub response_id: Option<JsString>,
     pub diagnostics: Option<Vec<AssistantMessageDiagnostic>>,
     pub usage: Usage,
     pub stop_reason: StopReason,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deferred: Option<DeferredHandle>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error_message: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub raw_stop_reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<JsString>,
+    pub raw_stop_reason: Option<JsString>,
     pub end_turn: Option<bool>,
-    pub timestamp: i64,
+    pub timestamp: f64,
+    #[doc(hidden)]
+    pub __field_order: Vec<String>,
 }
 
 impl AssistantMessage {
     pub fn pending(
         api: impl Into<Api>,
         provider: impl Into<ProviderId>,
-        model: impl Into<String>,
-        timestamp: i64,
+        model: impl Into<JsString>,
+        timestamp: f64,
     ) -> Self {
         Self {
             role: AssistantRole::Assistant,
@@ -1250,7 +1176,6 @@ impl AssistantMessage {
             model: model.into(),
             response_model: None,
             response_id: None,
-            reasoning_details: None,
             diagnostics: None,
             usage: Usage::default(),
             stop_reason: StopReason::Pending,
@@ -1259,33 +1184,27 @@ impl AssistantMessage {
             raw_stop_reason: None,
             end_turn: None,
             timestamp,
+            __field_order: Vec::new(),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ToolResultMessage {
     pub role: ToolResultRole,
-    pub tool_call_id: String,
-    pub tool_name: String,
-    #[serde(default, deserialize_with = "deserialize_null_as_default")]
+    pub tool_call_id: JsString,
+    pub tool_name: JsString,
     pub content: Vec<ToolResultContent>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_present_json"
-    )]
-    pub details: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<JsonValue>,
     pub usage: Option<Usage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub added_tool_names: Option<Vec<String>>,
+    pub added_tool_names: Option<Vec<JsString>>,
     pub is_error: bool,
-    pub timestamp: i64,
+    pub timestamp: f64,
+    #[doc(hidden)]
+    pub __field_order: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum Message {
     User(Box<UserMessage>),
@@ -1293,13 +1212,39 @@ pub enum Message {
     ToolResult(Box<ToolResultMessage>),
 }
 
-pub type JsonValue = Value;
+impl<'de> Deserialize<'de> for Message {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = Box::<RawValue>::deserialize(deserializer)?;
+        match raw_tagged_string(&raw, "role")
+            .map_err(D::Error::custom)?
+            .as_deref()
+        {
+            Some("user") => serde_json::from_str(raw.get())
+                .map(Box::new)
+                .map(Self::User)
+                .map_err(D::Error::custom),
+            Some("assistant") => serde_json::from_str(raw.get())
+                .map(Box::new)
+                .map(Self::Assistant)
+                .map_err(D::Error::custom),
+            Some("toolResult") => serde_json::from_str(raw.get())
+                .map(Box::new)
+                .map(Self::ToolResult)
+                .map_err(D::Error::custom),
+            Some(role) => Err(D::Error::custom(format!("unknown message role {role:?}"))),
+            None => Err(D::Error::custom("message role is required")),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Context {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system_prompt: Option<String>,
+    pub system_prompt: Option<JsString>,
     pub messages: Vec<Message>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<Tool>>,
@@ -1409,7 +1354,8 @@ pub struct AssistantImages {
     pub stop_reason: ImagesStopReason,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
-    pub timestamp: i64,
+    #[serde(serialize_with = "serialize_js_f64")]
+    pub timestamp: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1439,7 +1385,8 @@ pub struct ModelCostRates {
 pub struct ModelCostTier {
     #[serde(flatten)]
     pub rates: ModelCostRates,
-    pub input_tokens_above: u64,
+    #[serde(serialize_with = "serialize_js_f64")]
+    pub input_tokens_above: f64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2001,8 +1948,8 @@ pub struct Model {
     pub thinking_level_map: Option<ThinkingLevelMap>,
     pub input: Vec<ModelInput>,
     pub cost: ModelCost,
-    pub context_window: u64,
-    pub max_tokens: u64,
+    pub context_window: f64,
+    pub max_tokens: f64,
     pub sampling_params: Option<Map<String, Value>>,
     pub headers: Option<IndexMap<String, String>>,
     pub compat: Option<ModelCompat>,
@@ -2021,8 +1968,10 @@ struct ModelWireRef<'a> {
     thinking_level_map: &'a Option<ThinkingLevelMap>,
     input: &'a [ModelInput],
     cost: &'a ModelCost,
-    context_window: u64,
-    max_tokens: u64,
+    #[serde(serialize_with = "serialize_js_f64")]
+    context_window: f64,
+    #[serde(serialize_with = "serialize_js_f64")]
+    max_tokens: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     sampling_params: &'a Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2044,8 +1993,8 @@ struct ModelWireOwned {
     thinking_level_map: Option<ThinkingLevelMap>,
     input: Vec<ModelInput>,
     cost: ModelCost,
-    context_window: u64,
-    max_tokens: u64,
+    context_window: f64,
+    max_tokens: f64,
     #[serde(default)]
     sampling_params: Option<Map<String, Value>>,
     #[serde(default)]
@@ -2268,6 +2217,84 @@ mod tests {
         );
     }
 
+    /// Pins pi `types.ts:350-467`: tagged content and message unions retain
+    /// arbitrary ECMAScript string code units while dispatching on `type`/`role`.
+    #[test]
+    fn tagged_content_and_messages_round_trip_lone_surrogates_losslessly() {
+        let content: AssistantContent =
+            serde_json::from_str(r#"{"type":"text","text":"\ud83d"}"#).expect("content");
+        let AssistantContent::Text(text) = content else {
+            panic!("text content")
+        };
+        assert_eq!(text.text.as_utf16(), &[0xd83d]);
+        assert_eq!(
+            serde_json::to_string(&AssistantContent::Text(text)).expect("serialize content"),
+            r#"{"type":"text","text":"\ud83d"}"#
+        );
+
+        let source = r#"{"role":"assistant","content":[{"type":"thinking","thinking":"\ude00"}],"api":"a","provider":"p","model":"m","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":0}"#;
+        let message: Message = serde_json::from_str(source).expect("assistant message");
+        let Message::Assistant(message) = &message else {
+            panic!("assistant message")
+        };
+        let AssistantContent::Thinking(thinking) = &message.content[0] else {
+            panic!("thinking content")
+        };
+        assert_eq!(thinking.thinking.as_utf16(), &[0xde00]);
+        assert_eq!(
+            serde_json::to_string(&message).expect("serialize message"),
+            source
+        );
+
+        // pi `types.ts:350-467`: every JavaScript string field, not only text,
+        // persists arbitrary UTF-16 code units.
+        let assistant_source = r#"{"role":"assistant","content":[{"type":"text","text":"ok","textSignature":"\ud800"},{"type":"thinking","thinking":"ok","thinkingSignature":"\udc00"},{"type":"toolCall","id":"\ud801","name":"\udc01","arguments":{"\ud802":"\udc02"},"thoughtSignature":"\ud803","namespace":"\udc03"}],"api":"\ud804","provider":"\udc04","model":"\ud805","responseModel":"\udc05","responseId":"\ud806","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"error","deferred":{"provider":"\ud807","modelId":"\udc07","api":"\ud808","id":"\udc08"},"errorMessage":"\ud809","rawStopReason":"\udc09","timestamp":0}"#;
+        let assistant: Message =
+            serde_json::from_str(assistant_source).expect("all assistant strings");
+        assert_eq!(
+            serde_json::to_string(&assistant).expect("serialize all assistant strings"),
+            assistant_source
+        );
+
+        let result_source = r#"{"role":"toolResult","toolCallId":"\ud810","toolName":"\udc10","content":[{"type":"image","data":"\ud811","mimeType":"\udc11"}],"addedToolNames":["\ud812"],"isError":false,"timestamp":0}"#;
+        let result: Message = serde_json::from_str(result_source).expect("all tool-result strings");
+        assert_eq!(
+            serde_json::to_string(&result).expect("serialize all tool-result strings"),
+            result_source
+        );
+
+        let signature_source = r#"{"v":1,"id":"\ud813"}"#;
+        let signature: TextSignatureV1 =
+            serde_json::from_str(signature_source).expect("text signature id");
+        assert_eq!(
+            serde_json::to_string(&signature).expect("serialize text signature id"),
+            signature_source
+        );
+    }
+
+    /// Pins pi `types.ts:372-380`: `Record<string, any>` accepts every dynamic
+    /// value below its root but never a scalar/array/null root.
+    #[test]
+    fn tool_call_deserialization_enforces_map_valued_arguments() {
+        for arguments in ["null", "[]", "1", "true", r#""text""#] {
+            let source =
+                format!(r#"{{"type":"toolCall","id":"c","name":"t","arguments":{arguments}}}"#);
+            assert!(
+                serde_json::from_str::<ToolCall>(&source).is_err(),
+                "{source}"
+            );
+        }
+        let call: ToolCall = serde_json::from_str(
+            r#"{"type":"toolCall","id":"c","name":"t","arguments":{"null":null,"array":[1,true],"large":9007199254740993}}"#,
+        )
+        .expect("object arguments");
+        assert_eq!(call.arguments["null"], JsonValue::Null);
+        assert_eq!(
+            call.arguments["large"].as_f64(),
+            Some(9_007_199_254_740_992.0)
+        );
+    }
+
     /// Pins pi `types.ts:382-403`: optional counters preserve explicit zero and omit only absence.
     #[test]
     fn usage_round_trips_presence_bearing_counters() {
@@ -2288,13 +2315,29 @@ mod tests {
         );
     }
 
+    /// Pins pi `types.ts:382-403`: scalar serialization follows
+    /// `JSON.stringify`, including negative 1e20 expansion and non-finite nulls.
+    #[test]
+    fn usage_scalar_lowering_matches_ecmascript_json() {
+        let usage = Usage {
+            input: -1e20,
+            output: f64::NAN,
+            cache_read: f64::INFINITY,
+            ..Usage::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&usage).expect("usage JSON"),
+            r#"{"input":-100000000000000000000,"output":null,"cacheRead":null,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}"#
+        );
+    }
+
     /// Pins pi `types.ts:421-425` user string and multimodal content union shapes.
     #[test]
     fn user_message_variants_round_trip_exact_wire_json() {
         let string_message = Message::User(Box::new(UserMessage {
             role: UserRole::User,
             content: UserContent::Text("hello".into()),
-            timestamp: 10,
+            timestamp: 10.0,
         }));
         assert_round_trip(
             &string_message,
@@ -2307,7 +2350,7 @@ mod tests {
                 UserContentBlock::Text(TextContent::new("look")),
                 UserContentBlock::Image(ImageContent::new("AA==", "image/jpeg")),
             ]),
-            timestamp: 11,
+            timestamp: 11.0,
         }));
         assert_round_trip(
             &blocks_message,
@@ -2320,7 +2363,7 @@ mod tests {
     fn assistant_message_round_trips_all_fidelity_fields() {
         let diagnostic = AssistantMessageDiagnostic {
             kind: "retry".into(),
-            timestamp: 12,
+            timestamp: 12.0,
             error: Some(DiagnosticErrorInfo {
                 name: Some("ProviderError".into()),
                 message: "retrying".into(),
@@ -2345,14 +2388,12 @@ mod tests {
                     thought_signature: Some("thought-sig".into()),
                     ..ToolCall::new("c", "t", Map::new())
                 }),
-            ]
-            .into(),
+            ],
             api: Api::from("openai-responses"),
             provider: ProviderId::from("custom-provider"),
             model: "requested".into(),
             response_model: Some("actual".into()),
             response_id: Some("resp-1".into()),
-            reasoning_details: Some(vec![json!({"opaque":true}), Value::Null]),
             diagnostics: Some(vec![diagnostic]),
             usage: full_usage(),
             stop_reason: StopReason::Deferred,
@@ -2361,14 +2402,14 @@ mod tests {
                 model_id: "requested".into(),
                 api: "openai-responses".into(),
                 id: "deferred-1".into(),
-                expires_at: Some(99),
-                poll_after_ms: Some(0),
-                data: Some(json!({"row":1})),
+                expires_at: Some(99.0),
+                poll_after_ms: Some(0.0),
+                data: Some(json!({"row":1}).into()),
             }),
             error_message: Some("detail".into()),
             raw_stop_reason: Some("provider_reason".into()),
             end_turn: Some(false),
-            timestamp: 13,
+            timestamp: 13.0,
         }));
         assert_round_trip(
             &message,
@@ -2381,7 +2422,6 @@ mod tests {
                 ],
                 "api":"openai-responses","provider":"custom-provider","model":"requested",
                 "responseModel":"actual","responseId":"resp-1",
-                "reasoningDetails":[{"opaque":true},null],
                 "diagnostics":[{
                     "type":"retry","timestamp":12,
                     "error":{"name":"ProviderError","message":"retrying","stack":"redacted stack","code":429},
@@ -2401,7 +2441,7 @@ mod tests {
             }),
         );
 
-        let minimal = AssistantMessage::pending("custom-api", "custom-provider", "model", 0);
+        let minimal = AssistantMessage::pending("custom-api", "custom-provider", "model", 0.0);
         assert_eq!(
             serde_json::to_value(minimal).unwrap(),
             json!({
@@ -2424,11 +2464,11 @@ mod tests {
                 ToolResultContent::Text(TextContent::new("done")),
                 ToolResultContent::Image(ImageContent::new("AA==", "image/png")),
             ],
-            details: Some(json!({"exitCode":0})),
+            details: Some(json!({"exitCode":0}).into()),
             usage: Some(full_usage()),
             added_tool_names: Some(vec!["later_tool".into()]),
             is_error: false,
-            timestamp: 14,
+            timestamp: 14.0,
         }));
         assert_round_trip(
             &message,
@@ -2454,7 +2494,7 @@ mod tests {
     fn diagnostics_round_trip_string_and_numeric_codes() {
         let numeric = AssistantMessageDiagnostic {
             kind: "provider".into(),
-            timestamp: 1,
+            timestamp: 1.0,
             error: Some(DiagnosticErrorInfo {
                 name: None,
                 message: "limited".into(),
@@ -2469,7 +2509,7 @@ mod tests {
         );
         let string = AssistantMessageDiagnostic {
             kind: "runtime".into(),
-            timestamp: 2,
+            timestamp: 2.0,
             error: Some(DiagnosticErrorInfo {
                 name: Some("Error".into()),
                 message: "failed".into(),
@@ -2513,7 +2553,7 @@ mod tests {
             "provider":"p","modelId":"m","api":"a","id":"d","data":null
         }))
         .unwrap();
-        assert_eq!(handle.data, Some(Value::Null));
+        assert_eq!(handle.data, Some(JsonValue::Null));
         assert_eq!(
             serde_json::to_value(handle).unwrap(),
             json!({"provider":"p","modelId":"m","api":"a","id":"d","data":null})
@@ -2524,7 +2564,7 @@ mod tests {
             "details":null,"isError":false,"timestamp":0
         }))
         .unwrap();
-        assert_eq!(tool_result.details, Some(Value::Null));
+        assert_eq!(tool_result.details, Some(JsonValue::Null));
         assert_eq!(
             serde_json::to_value(tool_result).unwrap(),
             json!({
@@ -2558,26 +2598,26 @@ mod tests {
         let usage: Usage = serde_json::from_value(json!({
             "input":-1.25,
             "output":0.5,
-            "cacheRead":"2",
+            "cacheRead":2,
             "cacheWrite":0,
             "reasoning":-0.5,
-            "totalTokens":"1.250",
+            "totalTokens":1.25,
             "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}
         }))
         .unwrap();
         let wire = serde_json::to_value(usage).unwrap();
         assert_eq!(wire["input"], -1.25);
         assert_eq!(wire["output"], 0.5);
-        assert_eq!(wire["cacheRead"], "2");
+        assert_eq!(wire["cacheRead"], 2);
         assert_eq!(wire["reasoning"], -0.5);
-        assert_eq!(wire["totalTokens"], "1.250");
-        assert!(UsageValue::from(json!("inf")).as_number().is_nan());
-        assert_eq!(
-            UsageValue::from(json!("Infinity")).as_number(),
-            f64::INFINITY
+        assert_eq!(wire["totalTokens"], 1.25);
+        assert!(
+            serde_json::from_value::<Usage>(json!({
+                "input":"2","output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":2,
+                "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}
+            }))
+            .is_err()
         );
-        assert_eq!(UsageValue::from(json!("\u{feff}1")).as_number(), 1.0);
-        assert!(UsageValue::from(json!("\u{0085}1")).as_number().is_nan());
     }
 
     /// Pins pi `types.ts:225,297-305`: provider option intersections retain custom JSON keys.
@@ -2789,8 +2829,8 @@ mod tests {
             thinking_level_map: None,
             input: vec![ModelInput::Text],
             cost: ModelCost::default(),
-            context_window: 1,
-            max_tokens: 1,
+            context_window: 1.0,
+            max_tokens: 1.0,
             sampling_params: None,
             headers: None,
             compat: Some(ModelCompat::OpenAIResponses(
@@ -2829,6 +2869,17 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&NumberOrString::Number(4.0)).unwrap(),
             "4"
+        );
+        assert_eq!(
+            serde_json::to_string(&UsageCost {
+                input: 1e-7,
+                output: 1e-6,
+                cache_read: 1e20,
+                cache_write: 1e21,
+                total: f64::INFINITY,
+            })
+            .unwrap(),
+            r#"{"input":1e-7,"output":0.000001,"cacheRead":100000000000000000000,"cacheWrite":1e+21,"total":null}"#
         );
         assert_eq!(
             serde_json::to_string(&RoutingThreshold::Percentiles(PercentileThresholds {

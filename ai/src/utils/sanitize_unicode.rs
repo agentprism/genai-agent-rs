@@ -1,7 +1,34 @@
 //! Unicode-surrogate sanitization ⇐ pi `src/utils/sanitize-unicode.ts`.
 
-pub fn sanitize_surrogates(text: &str) -> String {
-    text.to_owned()
+use crate::types::JsString;
+
+pub trait SurrogateText {
+    fn sanitized_surrogates(&self) -> String;
+}
+
+impl SurrogateText for str {
+    fn sanitized_surrogates(&self) -> String {
+        self.to_owned()
+    }
+}
+
+impl SurrogateText for String {
+    fn sanitized_surrogates(&self) -> String {
+        self.clone()
+    }
+}
+
+impl SurrogateText for JsString {
+    fn sanitized_surrogates(&self) -> String {
+        sanitize_surrogates_utf16(self.as_utf16())
+    }
+}
+
+pub fn sanitize_surrogates<T>(text: &T) -> String
+where
+    T: SurrogateText + ?Sized,
+{
+    text.sanitized_surrogates()
 }
 
 pub fn sanitize_surrogates_utf16(units: &[u16]) -> String {

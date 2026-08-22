@@ -11,9 +11,9 @@ use crate::event_stream::{
 };
 use crate::models::{calculate_cost, clamp_thinking_level};
 use crate::types::{
-    AssistantContent, Context, ErrorStopReason, Model, ModelThinkingLevel, SimpleStreamOptions,
-    StopReason, StreamOptions, SuccessfulStopReason, TextContent, ThinkingBudgets, ThinkingContent,
-    ToolCall, ToolChoice, Usage, is_default_fetch,
+    AssistantContent, Context, ErrorStopReason, JsonObject, JsonValue, Model, ModelThinkingLevel,
+    SimpleStreamOptions, StopReason, StreamOptions, SuccessfulStopReason, TextContent,
+    ThinkingBudgets, ThinkingContent, ToolCall, ToolChoice, Usage, is_default_fetch,
 };
 use crate::utils::pi_user_agent::get_pi_user_agent;
 use crate::utils::provider_retry::ProviderRetryOptions;
@@ -24,6 +24,7 @@ use google_cloud_auth::credentials::{CacheableResource, Credentials};
 use reqwest_012::header::{HeaderMap, HeaderName, HeaderValue, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
@@ -148,7 +149,7 @@ pub fn stream(
             } else {
                 StopReason::Error
             };
-            output.error_message = Some(error);
+            output.error_message = Some(error.into());
             let reason = if output.stop_reason == StopReason::Aborted {
                 ErrorStopReason::Aborted
             } else {
@@ -231,7 +232,9 @@ pub(crate) async fn consume_google_stream(
     missing_finish_message: &str,
 ) -> Result<(), String> {
     sender
-        .send(AssistantMessageEvent::Start)
+        .send(AssistantMessageEvent::Start {
+            partial: Arc::new(output.clone()),
+        })
         .map_err(|error| error.to_string())?;
     let mut current = None;
     loop {
@@ -300,7 +303,7 @@ fn process_chunk(
     if output.response_id.as_deref().is_none_or(str::is_empty)
         && let Some(response_id) = chunk.get("responseId").and_then(Value::as_str)
     {
-        output.response_id = Some(response_id.to_owned());
+        output.response_id = Some(response_id.into());
     }
     let candidate = chunk
         .get("candidates")
@@ -328,10 +331,8 @@ fn process_chunk(
                         *current = Some(CurrentBlock::Thinking(index));
                         sender
                             .send(AssistantMessageEvent::ThinkingStart {
-                                content_index: index,
-                                thinking: None,
-                                thinking_signature: None,
-                                redacted: None,
+                                content_index: index as f64,
+                                partial: Arc::new(output.clone()),
                             })
                             .map_err(|error| error.to_string())?;
                     } else {
@@ -341,7 +342,8 @@ fn process_chunk(
                         *current = Some(CurrentBlock::Text(index));
                         sender
                             .send(AssistantMessageEvent::TextStart {
-                                content_index: index,
+                                content_index: index as f64,
+                                partial: Arc::new(output.clone()),
                             })
                             .map_err(|error| error.to_string())?;
                     }
@@ -359,9 +361,9 @@ fn process_chunk(
                         );
                         sender
                             .send(AssistantMessageEvent::ThinkingDelta {
-                                content_index: index,
-                                delta: text.to_owned(),
-                                thinking_signature_delta: None,
+                                content_index: index as f64,
+                                delta: text.into(),
+                                partial: Arc::new(output.clone()),
                             })
                             .map_err(|error| error.to_string())?;
                     }
@@ -374,8 +376,9 @@ fn process_chunk(
                             retain_thought_signature(block.text_signature.as_deref(), signature);
                         sender
                             .send(AssistantMessageEvent::TextDelta {
-                                content_index: index,
-                                delta: text.to_owned(),
+                                content_index: index as f64,
+                                delta: text.into(),
+                                partial: Arc::new(output.clone()),
                             })
                             .map_err(|error| error.to_string())?;
                     }
@@ -409,35 +412,39 @@ fn process_chunk(
                     .filter(|value| !value.is_null())
                     .cloned()
                     .unwrap_or_else(|| Value::Object(Map::new()));
-                let mut tool_call = ToolCall::new(id, name, arguments);
+                let mut tool_call = ToolCall::new(
+                    id,
+                    name,
+                    crate::types::JsonObject::try_from(arguments).unwrap_or_default(),
+                );
                 tool_call.thought_signature = part
                     .get("thoughtSignature")
                     .and_then(Value::as_str)
                     .filter(|signature| !signature.is_empty())
-                    .map(str::to_owned);
+                    .map(Into::into);
                 let index = output.content.len();
                 output
                     .content
                     .push(AssistantContent::ToolCall(tool_call.clone()));
                 sender
                     .send(AssistantMessageEvent::ToolCallStart {
-                        content_index: index,
-                        id: tool_call.id.clone(),
-                        tool_name: tool_call.name.clone(),
-                        namespace: None,
+                        content_index: index as f64,
+                        partial: Arc::new(output.clone()),
                     })
                     .map_err(|error| error.to_string())?;
                 sender
                     .send(AssistantMessageEvent::ToolCallDelta {
-                        content_index: index,
-                        delta: serde_json::to_string(&tool_call.arguments)
-                            .map_err(|error| error.to_string())?,
+                        content_index: index as f64,
+                        delta: crate::utils::ecma_json::stringify_object(&tool_call.arguments)
+                            .into(),
+                        partial: Arc::new(output.clone()),
                     })
                     .map_err(|error| error.to_string())?;
                 sender
                     .send(AssistantMessageEvent::ToolCallEnd {
-                        content_index: index,
+                        content_index: index as f64,
                         tool_call,
+                        partial: Arc::new(output.clone()),
                     })
                     .map_err(|error| error.to_string())?;
             }
@@ -448,7 +455,7 @@ fn process_chunk(
         .and_then(|value| value.as_str())
         .filter(|reason| !reason.is_empty())
     {
-        output.raw_stop_reason = Some(reason.to_owned());
+        output.raw_stop_reason = Some(reason.into());
         output.stop_reason = stream_stop_reason(reason)?;
         if output.stop_reason == StopReason::Stop
             && output
@@ -465,13 +472,13 @@ fn process_chunk(
         let candidates = number_field(usage, "candidatesTokenCount");
         let thoughts = number_field(usage, "thoughtsTokenCount");
         output.usage = Usage {
-            input: (prompt - cached).into(),
-            output: (candidates + thoughts).into(),
-            cache_read: cached.into(),
+            input: prompt - cached,
+            output: candidates + thoughts,
+            cache_read: cached,
             cache_write: 0.into(),
             cache_write_1h: None,
-            reasoning: Some(thoughts.into()),
-            total_tokens: number_field(usage, "totalTokenCount").into(),
+            reasoning: Some(thoughts),
+            total_tokens: number_field(usage, "totalTokenCount"),
             cost: Default::default(),
         };
         calculate_cost(model, &mut output.usage);
@@ -513,9 +520,9 @@ fn close_current_block(
             };
             sender
                 .send(AssistantMessageEvent::TextEnd {
-                    content_index: index,
+                    content_index: index as f64,
                     content: block.text.clone(),
-                    content_signature: None,
+                    partial: Arc::new(output.clone()),
                 })
                 .map_err(|error| error.to_string())
         }
@@ -525,10 +532,9 @@ fn close_current_block(
             };
             sender
                 .send(AssistantMessageEvent::ThinkingEnd {
-                    content_index: index,
+                    content_index: index as f64,
                     content: block.thinking.clone(),
-                    content_signature: None,
-                    redacted: None,
+                    partial: Arc::new(output.clone()),
                 })
                 .map_err(|error| error.to_string())
         }
@@ -694,7 +700,7 @@ pub(crate) struct GoogleBackend {
 #[derive(Debug, Clone)]
 pub(crate) struct GoogleWireRequest {
     model: String,
-    body: Value,
+    body: JsonValue,
     http_options: GoogleHttpOptions,
 }
 
@@ -723,7 +729,11 @@ impl GoogleBackend {
         if let Some(extra_body) = request.http_options.extra_body.as_ref() {
             deep_merge_json(&mut body, extra_body);
         }
-        let mut builder = self.client.post(url).json(&body);
+        let mut builder = self
+            .client
+            .post(url)
+            .header("content-type", "application/json")
+            .body(crate::utils::ecma_json::stringify_provider_json(&body));
         for (name, value) in &request.http_options.headers {
             let Some(value) = value.as_str() else {
                 continue;
@@ -838,25 +848,36 @@ fn decode_google_stream_event(data: &str) -> Result<Value, adk_gemini::ClientErr
         .map_err(|source| adk_gemini::ClientError::Deserialize { source })
 }
 
-pub(crate) fn google_wire_request_from_params(
-    params: &Value,
+pub(crate) fn google_wire_request_from_params<
+    T: crate::utils::ecma_json::ProviderJsonValue + ?Sized,
+>(
+    params: &T,
     target: &GoogleRequestTarget,
 ) -> Result<GoogleWireRequest, String> {
+    let params = params.to_ecma_json();
     let model = params
         .get("model")
-        .and_then(Value::as_str)
+        .and_then(JsonValue::as_str)
         .ok_or_else(|| "model is required and must be a string".to_owned())?;
-    let model = transform_model(model, target.vertex)?;
-    let mut body = Map::new();
+    let model = model
+        .to_utf8()
+        .map_err(|_| "model is required and must be a well-formed string".to_owned())?;
+    let model = transform_model(&model, target.vertex)?;
+    let mut body = JsonObject::new();
     if let Some(contents) = params.get("contents").filter(|value| !value.is_null()) {
         body.insert(
-            "contents".to_owned(),
-            transform_contents(contents, target.vertex)?,
+            "contents",
+            transform_ecma_contents(contents, target.vertex)?,
         );
     }
     let mut http_options = GoogleHttpOptions::default();
     if let Some(config) = params.get("config").filter(|value| !value.is_null()) {
-        let mut config = config.as_object().cloned().unwrap_or_default();
+        let mut config = config
+            .to_serde_json_with_stringify_semantics()
+            .map_err(|error| error.to_string())?
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
         if config
             .get("responseJsonSchema")
             .is_none_or(|value| !js_truthy(value))
@@ -869,14 +890,180 @@ pub(crate) fn google_wire_request_from_params(
             config.insert("responseJsonSchema".to_owned(), schema);
         }
         http_options = parse_google_http_options(config.get("httpOptions"));
-        let generation_config = transform_generation_config(&config, &mut body, target)?;
-        body.insert("generationConfig".to_owned(), generation_config);
+        let mut strict_body = Map::new();
+        let generation_config = transform_generation_config(&config, &mut strict_body, target)?;
+        for (key, value) in strict_body {
+            body.insert(key, JsonValue::from(value));
+        }
+        body.insert("generationConfig", JsonValue::from(generation_config));
     }
     Ok(GoogleWireRequest {
         model,
-        body: Value::Object(body),
+        body: JsonValue::Object(body),
         http_options,
     })
+}
+
+fn transform_ecma_contents(contents: &JsonValue, vertex: bool) -> Result<JsonValue, String> {
+    if let Some(items) = contents.as_array() {
+        if items.is_empty() {
+            return Err("contents are required".to_owned());
+        }
+        let first_is_content = items.first().is_some_and(ecma_is_content);
+        if items
+            .iter()
+            .any(|item| ecma_is_content(item) != first_is_content)
+        {
+            return Err("Mixing Content and Parts is not supported, please group the parts into a the appropriate Content objects and specify the roles for them".to_owned());
+        }
+        if first_is_content {
+            return items
+                .iter()
+                .map(|content| transform_ecma_content(content, vertex))
+                .collect::<Result<Vec<_>, _>>()
+                .map(JsonValue::Array);
+        }
+        let parts = items
+            .iter()
+            .map(transform_ecma_part_union)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut content = JsonObject::new();
+        content.insert("role", "user");
+        content.insert("parts", JsonValue::Array(parts));
+        return Ok(JsonValue::Array(vec![transform_ecma_content(
+            &JsonValue::Object(content),
+            vertex,
+        )?]));
+    }
+    let part = transform_ecma_part_union(contents)?;
+    let mut content = JsonObject::new();
+    content.insert("role", "user");
+    content.insert("parts", JsonValue::Array(vec![part]));
+    Ok(JsonValue::Array(vec![transform_ecma_content(
+        &JsonValue::Object(content),
+        vertex,
+    )?]))
+}
+
+fn ecma_is_content(value: &JsonValue) -> bool {
+    value
+        .as_object()
+        .and_then(|content| content.get("parts"))
+        .and_then(JsonValue::as_array)
+        .is_some()
+}
+
+fn transform_ecma_part_union(value: &JsonValue) -> Result<JsonValue, String> {
+    match value {
+        JsonValue::Null => Err("PartUnion is required".to_owned()),
+        JsonValue::String(text) => {
+            let mut part = JsonObject::new();
+            part.insert("text", text.clone());
+            Ok(JsonValue::Object(part))
+        }
+        JsonValue::Object(_) | JsonValue::Array(_) => Ok(value.clone()),
+        JsonValue::Bool(_) => Err("Unsupported part type: boolean".to_owned()),
+        JsonValue::Number(_) => Err("Unsupported part type: number".to_owned()),
+    }
+}
+
+fn transform_ecma_content(value: &JsonValue, vertex: bool) -> Result<JsonValue, String> {
+    let object = value.as_object();
+    let mut content = JsonObject::new();
+    if let Some(parts) = object.and_then(|object| object.get("parts")) {
+        let parts = parts
+            .as_array()
+            .ok_or_else(|| "parts must be an array".to_owned())?
+            .iter()
+            .map(|part| transform_ecma_part(part, vertex))
+            .collect::<Result<Vec<_>, _>>()?;
+        content.insert("parts", JsonValue::Array(parts));
+    }
+    if let Some(role) = object.and_then(|object| object.get("role"))
+        && !role.is_null()
+    {
+        content.insert("role", role.clone());
+    }
+    Ok(JsonValue::Object(content))
+}
+
+fn copy_ecma_fields(source: &JsonObject, names: &[&str]) -> JsonObject {
+    let mut output = JsonObject::new();
+    for name in names {
+        if let Some(value) = source.get(name)
+            && !value.is_null()
+        {
+            output.insert(*name, value.clone());
+        }
+    }
+    output
+}
+
+fn transform_ecma_part(value: &JsonValue, vertex: bool) -> Result<JsonValue, String> {
+    let object = value.as_object().cloned().unwrap_or_default();
+    if vertex {
+        for name in ["toolCall", "toolResponse", "partMetadata"] {
+            if object.get(name).is_some() {
+                return Err(format!(
+                    "{name} parameter is not supported in Gemini Enterprise Agent Platform (previously known as Vertex AI)."
+                ));
+            }
+        }
+    }
+    let mut part = copy_ecma_fields(
+        &object,
+        &[
+            "mediaResolution",
+            "codeExecutionResult",
+            "executableCode",
+            "functionResponse",
+            "text",
+            "thought",
+            "thoughtSignature",
+            "videoMetadata",
+            "toolCall",
+            "toolResponse",
+            "partMetadata",
+        ],
+    );
+    if let Some(file_data) = object.get("fileData").filter(|value| !value.is_null()) {
+        let file_data = if vertex {
+            file_data.clone()
+        } else {
+            JsonValue::Object(copy_ecma_fields(
+                &file_data.as_object().cloned().unwrap_or_default(),
+                &["fileUri", "mimeType"],
+            ))
+        };
+        part.insert("fileData", file_data);
+    }
+    if let Some(call) = object.get("functionCall").filter(|value| !value.is_null()) {
+        let call = if vertex {
+            call.clone()
+        } else {
+            let call = call.as_object().cloned().unwrap_or_default();
+            if call.get("partialArgs").is_some() {
+                return Err("partialArgs parameter is not supported in Gemini API.".to_owned());
+            }
+            if call.get("willContinue").is_some() {
+                return Err("willContinue parameter is not supported in Gemini API.".to_owned());
+            }
+            JsonValue::Object(copy_ecma_fields(&call, &["id", "args", "name"]))
+        };
+        part.insert("functionCall", call);
+    }
+    if let Some(data) = object.get("inlineData").filter(|value| !value.is_null()) {
+        let data = if vertex {
+            data.clone()
+        } else {
+            JsonValue::Object(copy_ecma_fields(
+                &data.as_object().cloned().unwrap_or_default(),
+                &["data", "mimeType"],
+            ))
+        };
+        part.insert("inlineData", data);
+    }
+    Ok(JsonValue::Object(part))
 }
 
 fn transform_model(model: &str, vertex: bool) -> Result<String, String> {
@@ -904,55 +1091,11 @@ fn transform_model(model: &str, vertex: bool) -> Result<String, String> {
     }
 }
 
-fn transform_contents(contents: &Value, vertex: bool) -> Result<Value, String> {
-    if contents.is_null() || contents.as_array().is_some_and(Vec::is_empty) {
-        return Err("contents are required".to_owned());
-    }
-    let normalized = if let Some(items) = contents.as_array() {
-        let first_is_content = items.first().is_some_and(is_content);
-        let mut normalized = Vec::new();
-        let mut parts = Vec::new();
-        for item in items {
-            if is_content(item) != first_is_content {
-                return Err("Mixing Content and Parts is not supported, please group the parts into a the appropriate Content objects and specify the roles for them".to_owned());
-            }
-            if first_is_content {
-                normalized.push(item.clone());
-            } else {
-                reject_bare_function_part(item)?;
-                parts.push(transform_part_union(item)?);
-            }
-        }
-        if !first_is_content {
-            normalized.push(json!({ "role": "user", "parts": parts }));
-        }
-        normalized
-    } else {
-        reject_bare_function_part(contents)?;
-        vec![transform_content_union(contents)?]
-    };
-    normalized
-        .iter()
-        .map(|content| transform_content(content, vertex))
-        .collect::<Result<Vec<_>, _>>()
-        .map(Value::Array)
-}
-
 fn is_content(value: &Value) -> bool {
     value
         .as_object()
         .and_then(|content| content.get("parts"))
         .is_some_and(Value::is_array)
-}
-
-fn reject_bare_function_part(value: &Value) -> Result<(), String> {
-    if value.as_object().is_some_and(|part| {
-        part.contains_key("functionCall") || part.contains_key("functionResponse")
-    }) {
-        Err("To specify functionCall or functionResponse parts, please wrap them in a Content object, specifying the role for them".to_owned())
-    } else {
-        Ok(())
-    }
 }
 
 fn transform_content_union(value: &Value) -> Result<Value, String> {
@@ -1629,16 +1772,20 @@ fn parse_google_http_options(value: Option<&Value>) -> GoogleHttpOptions {
     }
 }
 
-fn deep_merge_json(target: &mut Value, source: &Value) {
+fn deep_merge_json(target: &mut JsonValue, source: &Value) {
+    deep_merge_ecma_json(target, &JsonValue::from(source.clone()));
+}
+
+fn deep_merge_ecma_json(target: &mut JsonValue, source: &JsonValue) {
     let (Some(target), Some(source)) = (target.as_object_mut(), source.as_object()) else {
         return;
     };
     for (name, value) in source {
         if let Some(existing) = target.get_mut(name)
-            && existing.is_object()
-            && value.is_object()
+            && existing.as_object().is_some()
+            && value.as_object().is_some()
         {
-            deep_merge_json(existing, value);
+            deep_merge_ecma_json(existing, value);
         } else {
             target.insert(name.clone(), value.clone());
         }
@@ -1671,7 +1818,7 @@ pub(crate) fn build_params(
     model: &Model,
     context: &Context,
     options: &GoogleOptions,
-) -> Result<Value, String> {
+) -> Result<JsonValue, String> {
     if options
         .stream
         .request
@@ -1686,7 +1833,10 @@ pub(crate) fn build_params(
         config.insert("temperature".to_owned(), json!(temperature));
     }
     if let Some(max_tokens) = options.stream.max_tokens {
-        config.insert("maxOutputTokens".to_owned(), json!(max_tokens));
+        config.insert(
+            "maxOutputTokens".to_owned(),
+            crate::types::js_f64_value(max_tokens),
+        );
     }
     if let Some(system_prompt) = context
         .system_prompt
@@ -1734,11 +1884,14 @@ pub(crate) fn build_params(
     if options.stream.request.signal.is_some() {
         config.insert("abortSignal".to_owned(), json!({ "aborted": false }));
     }
-    Ok(json!({
-        "model": model.id,
-        "contents": convert_messages(model, context),
-        "config": config,
-    }))
+    let mut params = JsonObject::new();
+    params.insert("model", model.id.clone());
+    params.insert(
+        "contents",
+        JsonValue::Array(convert_messages(model, context)),
+    );
+    params.insert("config", JsonValue::from(Value::Object(config)));
+    Ok(JsonValue::Object(params))
 }
 
 pub fn stream_simple(
@@ -1942,7 +2095,7 @@ fn setup_error_stream(
     } else {
         StopReason::Error
     };
-    output.error_message = Some(message);
+    output.error_message = Some(message.into());
     AssistantMessageEventStream::from_events(vec![AssistantMessageEvent::Error {
         reason: if aborted {
             ErrorStopReason::Aborted
@@ -1953,12 +2106,11 @@ fn setup_error_stream(
     }])
 }
 
-fn now_millis() -> i64 {
+fn now_millis() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
-        .unwrap_or(0)
+        .unwrap_or_default()
+        .as_millis() as f64
 }
 
 #[cfg(test)]

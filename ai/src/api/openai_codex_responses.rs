@@ -275,7 +275,7 @@ impl CodexRunError {
 
     fn diagnostic_code(&self) -> Option<DiagnosticCode> {
         self.websocket_close_code
-            .map(|code| DiagnosticCode::Number(serde_json::Number::from(code)))
+            .map(|code| DiagnosticCode::Number(f64::from(code)))
             .or_else(|| {
                 self.code()
                     .map(|code| DiagnosticCode::String(code.to_owned()))
@@ -335,7 +335,7 @@ pub fn stream_simple(
 fn terminal_setup_error(model: &Model, message: &str) -> AssistantMessageEventStream {
     let mut output = pending_message(model);
     output.stop_reason = StopReason::Error;
-    output.error_message = Some(message.to_owned());
+    output.error_message = Some(message.into());
     AssistantMessageEventStream::from_events(vec![AssistantMessageEvent::Error {
         reason: ErrorStopReason::Error,
         error: output,
@@ -351,12 +351,11 @@ fn pending_message(model: &Model) -> AssistantMessage {
     )
 }
 
-fn now_millis() -> i64 {
+fn now_millis() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
-        .unwrap_or(i64::MAX)
+        .unwrap_or_default()
+        .as_millis() as f64
 }
 
 fn ensure_cleanup_registered() {
@@ -411,7 +410,7 @@ async fn run_stream(
         } else {
             StopReason::Error
         };
-        output.error_message = Some(error.message);
+        output.error_message = Some(error.message.into());
         let _ = sender.send(AssistantMessageEvent::Error {
             reason: if aborted {
                 ErrorStopReason::Aborted
@@ -459,11 +458,13 @@ async fn run_stream_inner(
         &grammar_properties,
     )?;
     if let Some(on_payload) = &options.stream.request.on_payload
-        && let Some(replacement) = on_payload(body.clone(), model)
+        && let Some(replacement) = on_payload(body.clone().into(), model)
             .await
             .map_err(CodexRunError::new)?
     {
-        body = replacement;
+        body = replacement
+            .to_serde_json_with_stringify_semantics()
+            .map_err(CodexRunError::display)?;
     }
     let body_json = serde_json::to_string(&body).map_err(CodexRunError::display)?;
     let websocket_request_id = websocket_request_id(codex_session_id.as_deref());
@@ -588,7 +589,9 @@ async fn run_stream_inner(
         .ok_or_else(|| CodexRunError::new("No response body"))?;
     if !start_emitted.swap(true, Ordering::AcqRel) {
         sender
-            .send(AssistantMessageEvent::Start)
+            .send(AssistantMessageEvent::Start {
+                partial: Arc::new(output.clone()),
+            })
             .map_err(CodexRunError::display)?;
     }
     let mut events = sse_event_stream(response_body, options.stream.request.signal.clone());
@@ -653,7 +656,7 @@ fn append_transport_diagnostic(
             stack: Some(error.stack.clone()),
             code: error.diagnostic_code(),
         }),
-        details: Some(details),
+        details: Some(details.into()),
     };
     output
         .diagnostics
@@ -670,10 +673,10 @@ fn successful_reason(output: &AssistantMessage) -> Result<SuccessfulStopReason, 
             "Codex stream ended without a stop reason",
         )),
         StopReason::Error | StopReason::Aborted => Err(CodexRunError::new(
-            output
-                .error_message
-                .clone()
-                .unwrap_or_else(|| "An unknown error occurred".to_owned()),
+            output.error_message.as_ref().map_or_else(
+                || "An unknown error occurred".to_owned(),
+                |message| message.to_utf8_lossy(),
+            ),
         )),
         StopReason::Deferred => Err(CodexRunError::new(
             "Provider returned an invalid successful stop reason",
@@ -745,7 +748,7 @@ async fn process_websocket_stream(attempt: WebSocketAttempt<'_>) -> Result<(), C
         &acquired,
         options.stream.request.signal.clone(),
         idle_timeout_ms,
-        sender.clone(),
+        (sender.clone(), Arc::new(output.clone())),
         start_emitted,
         attempt_started,
         failure.clone(),
@@ -780,7 +783,14 @@ async fn process_websocket_stream(attempt: WebSocketAttempt<'_>) -> Result<(), C
                             return Err(error);
                         }
                     };
-                set_continuation(&acquired, body.clone(), response_id, response_items);
+                set_continuation(
+                    &acquired,
+                    body.clone(),
+                    response_id
+                        .to_utf8()
+                        .expect("provider response id originated as UTF-8"),
+                    response_items,
+                );
             }
             release_websocket(&acquired, keep);
             Ok(())
@@ -1437,7 +1447,7 @@ async fn acquire_sse_response(
                 if let Some(on_response) = &options.stream.request.on_response {
                     on_response(
                         ProviderResponse {
-                            status: response.status,
+                            status: f64::from(response.status),
                             headers: response.headers.clone(),
                         },
                         model,

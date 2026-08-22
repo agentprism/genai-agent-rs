@@ -46,8 +46,9 @@ reqwest = { version = "0.13", default-features = false, features = ["stream", "r
 reqwest_012 = { package = "reqwest", version = "0.12", default-features = false, features = ["charset", "http2", "json", "stream", "rustls-tls"] }
 regex = "1"
 rustix = { version = "1", features = ["system"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
+ryu-js = "1"
 sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["sync", "time", "rt-multi-thread", "macros", "test-util", "net", "io-util"] }

@@ -1,8 +1,8 @@
 //! Shared message lowering ⇐ pi `src/api/transform-messages.ts` (preserved seam #11).
 
 use crate::types::{
-    AssistantContent, AssistantMessage, Message, Model, ModelInput, StopReason, TextContent,
-    ToolCall, ToolResultMessage, ToolResultRole, UserContent, UserContentBlock,
+    AssistantContent, AssistantMessage, JsString, Message, Model, ModelInput, StopReason,
+    TextContent, ToolCall, ToolResultMessage, ToolResultRole, UserContent, UserContentBlock,
 };
 use crate::utils::hash::short_hash;
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,7 +14,7 @@ const NON_VISION_TOOL_IMAGE_PLACEHOLDER: &str =
 const MISTRAL_TOOL_CALL_ID_LENGTH: usize = 9;
 
 pub type ToolCallIdNormalizer<'a> =
-    dyn Fn(&str, &Model, &AssistantMessage) -> String + Send + Sync + 'a;
+    dyn Fn(&JsString, &Model, &AssistantMessage) -> JsString + Send + Sync + 'a;
 
 fn replace_images_with_placeholder(
     content: &[UserContentBlock],
@@ -33,10 +33,6 @@ fn replace_images_with_placeholder(
             UserContentBlock::Text(text) => {
                 result.push(UserContentBlock::Text(text.clone()));
                 previous_was_placeholder = text.text == placeholder;
-            }
-            UserContentBlock::Unknown(value) => {
-                result.push(UserContentBlock::Unknown(value.clone()));
-                previous_was_placeholder = false;
             }
         }
     }
@@ -75,7 +71,7 @@ pub fn transform_messages(
     model: &Model,
     normalize_tool_call_id: Option<&ToolCallIdNormalizer<'_>>,
 ) -> Vec<Message> {
-    let mut tool_call_id_map: BTreeMap<String, String> = BTreeMap::new();
+    let mut tool_call_id_map = BTreeMap::<crate::types::JsString, crate::types::JsString>::new();
     let mut transformed = Vec::with_capacity(messages.len());
 
     for original in messages {
@@ -113,7 +109,7 @@ pub fn transform_messages(
                                 content.push(block.clone());
                                 continue;
                             }
-                            if thinking.thinking.trim().is_empty() {
+                            if thinking.thinking.is_blank() {
                                 continue;
                             }
                             if same_model {
@@ -151,10 +147,9 @@ pub fn transform_messages(
                             }
                             content.push(AssistantContent::ToolCall(normalized));
                         }
-                        AssistantContent::Unknown(_) => content.push(block.clone()),
                     }
                 }
-                assistant.content = content.into();
+                assistant.content = content;
                 transformed.push(Message::Assistant(assistant));
             }
         }
@@ -182,9 +177,7 @@ pub fn transform_messages(
                     .iter()
                     .filter_map(|block| match block {
                         AssistantContent::ToolCall(tool_call) => Some(tool_call.clone()),
-                        AssistantContent::Text(_)
-                        | AssistantContent::Thinking(_)
-                        | AssistantContent::Unknown(_) => None,
+                        AssistantContent::Text(_) | AssistantContent::Thinking(_) => None,
                     })
                     .collect();
                 existing_tool_result_ids.clear();
@@ -215,7 +208,7 @@ pub fn transform_messages(
 fn insert_synthetic_tool_results(
     result: &mut Vec<Message>,
     pending_tool_calls: &mut Vec<ToolCall>,
-    existing_tool_result_ids: &mut BTreeSet<String>,
+    existing_tool_result_ids: &mut BTreeSet<crate::types::JsString>,
 ) {
     for tool_call in pending_tool_calls.drain(..) {
         if !existing_tool_result_ids.contains(&tool_call.id) {
@@ -237,12 +230,11 @@ fn insert_synthetic_tool_results(
     existing_tool_result_ids.clear();
 }
 
-fn now_millis() -> i64 {
+fn now_millis() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
-        .unwrap_or(0)
+        .unwrap_or_default()
+        .as_millis() as f64
 }
 
 pub fn normalize_anthropic_tool_call_id(id: &str) -> String {
@@ -409,8 +401,8 @@ mod tests {
             thinking_level_map: None,
             input,
             cost: ModelCost::default(),
-            context_window: 128_000,
-            max_tokens: 4_096,
+            context_window: 128_000.0,
+            max_tokens: 4_096.0,
             sampling_params: None,
             headers: None,
             compat: None,
@@ -422,9 +414,9 @@ mod tests {
             model.api.clone(),
             model.provider.clone(),
             model.id.clone(),
-            1,
+            1.0,
         );
-        message.content = content.into();
+        message.content = content;
         message.stop_reason = StopReason::Stop;
         message
     }
@@ -434,43 +426,21 @@ mod tests {
         let mut message = assistant(&source, content);
         message.api = "openai-responses".into();
         message.provider = "source-provider".into();
-        message.model = "source".to_owned();
+        message.model = "source".into();
         message
-    }
-
-    /// Pins pi `src/api/transform-messages.ts:71-74` nullish content coercion.
-    #[test]
-    fn null_and_missing_message_content_deserialize_and_lower_to_empty_arrays() {
-        let messages: Vec<Message> = serde_json::from_value(json!([
-            {"role":"user","timestamp":1},
-            {
-                "role":"assistant","content":null,"api":"test-api","provider":"test-provider",
-                "model":"test-model","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,
-                "totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},
-                "stopReason":"stop","timestamp":2
-            },
-            {"role":"toolResult","toolCallId":"call","toolName":"run","isError":false,"timestamp":3}
-        ]))
-        .expect("pi accepts nullish content");
-
-        let transformed = transform_messages(&messages, &model(vec![ModelInput::Text]), None);
-        let wire = serde_json::to_value(transformed).unwrap();
-        assert_eq!(wire[0]["content"], json!([]));
-        assert_eq!(wire[1]["content"], json!([]));
-        assert_eq!(wire[2]["content"], json!([]));
     }
 
     fn tool_result(id: &str) -> Message {
         Message::ToolResult(Box::new(ToolResultMessage {
             role: ToolResultRole::ToolResult,
-            tool_call_id: id.to_owned(),
-            tool_name: "run".to_owned(),
+            tool_call_id: id.into(),
+            tool_name: "run".into(),
             content: vec![UserContentBlock::Text(TextContent::new("done"))],
             details: None,
             usage: None,
             added_tool_names: None,
             is_error: false,
-            timestamp: 2,
+            timestamp: 2.0,
         }))
     }
 
@@ -479,14 +449,14 @@ mod tests {
     fn thinking_and_text_fidelity_follow_model_identity() {
         let target = model(vec![ModelInput::Text]);
         let mut signed_empty = ThinkingContent::new("");
-        signed_empty.thinking_signature = Some("ciphertext".to_owned());
+        signed_empty.thinking_signature = Some("ciphertext".into());
         let mut unsigned = ThinkingContent::new("reasoning");
         unsigned.redacted = Some(false);
         let mut redacted = ThinkingContent::new("");
         redacted.redacted = Some(true);
-        redacted.thinking_signature = Some("opaque".to_owned());
+        redacted.thinking_signature = Some("opaque".into());
         let mut text = TextContent::new("answer");
-        text.text_signature = Some("message-id".to_owned());
+        text.text_signature = Some("message-id".into());
         let same = Message::Assistant(Box::new(assistant(
             &target,
             vec![
@@ -509,7 +479,6 @@ mod tests {
                 AssistantContent::Thinking(redacted),
                 AssistantContent::Text(text),
             ]
-            .into()
         );
 
         let foreign = Message::Assistant(Box::new(foreign_assistant(vec![
@@ -521,7 +490,7 @@ mod tests {
             }),
             AssistantContent::Text({
                 let mut value = TextContent::new("answer");
-                value.text_signature = Some("foreign".to_owned());
+                value.text_signature = Some("foreign".into());
                 value
             }),
         ])));
@@ -535,7 +504,6 @@ mod tests {
                 AssistantContent::Text(TextContent::new("reasoning")),
                 AssistantContent::Text(TextContent::new("answer")),
             ]
-            .into()
         );
     }
 
@@ -544,15 +512,16 @@ mod tests {
     fn cross_model_tool_calls_drop_signature_and_remap_results() {
         let target = model(vec![ModelInput::Text]);
         let mut call = ToolCall::new("call|foreign", "run", Map::new());
-        call.thought_signature = Some("opaque".to_owned());
+        call.thought_signature = Some("opaque".into());
         let messages = [
             Message::Assistant(Box::new(foreign_assistant(vec![
                 AssistantContent::ToolCall(call),
             ]))),
             tool_result("call|foreign"),
         ];
-        let normalizer =
-            |id: &str, _: &Model, _: &AssistantMessage| normalize_anthropic_tool_call_id(id);
+        let normalizer = |id: &JsString, _: &Model, _: &AssistantMessage| {
+            normalize_anthropic_tool_call_id(&id.to_utf8_lossy()).into()
+        };
         let transformed = transform_messages(&messages, &target, Some(&normalizer));
         let Message::Assistant(assistant) = &transformed[0] else {
             panic!("assistant")
@@ -590,12 +559,13 @@ mod tests {
             Message::Assistant(Box::new(aborted)),
             Message::User(Box::new(UserMessage {
                 role: UserRole::User,
-                content: UserContent::Text("continue".to_owned()),
-                timestamp: 3,
+                content: UserContent::Text(("continue".to_owned()).into()),
+                timestamp: 3.0,
             })),
         ];
-        let normalizer =
-            |id: &str, _: &Model, _: &AssistantMessage| normalize_anthropic_tool_call_id(id);
+        let normalizer = |id: &JsString, _: &Model, _: &AssistantMessage| {
+            normalize_anthropic_tool_call_id(&id.to_utf8_lossy()).into()
+        };
         let transformed = transform_messages(&messages, &target, Some(&normalizer));
         assert_eq!(
             transformed
@@ -642,8 +612,8 @@ mod tests {
                 Message::Assistant(Box::new(first)),
                 Message::User(Box::new(UserMessage {
                     role: UserRole::User,
-                    content: UserContent::Text("interrupt".to_owned()),
-                    timestamp: 3,
+                    content: UserContent::Text(("interrupt".to_owned()).into()),
+                    timestamp: 3.0,
                 })),
                 Message::Assistant(Box::new(second)),
             ],
@@ -674,7 +644,7 @@ mod tests {
                 image.clone(),
                 UserContentBlock::Text(TextContent::new("after")),
             ]),
-            timestamp: 1,
+            timestamp: 1.0,
         }));
         let non_vision = model(vec![ModelInput::Text]);
         let transformed = transform_messages(std::slice::from_ref(&user), &non_vision, None);
@@ -696,8 +666,8 @@ mod tests {
 
         let tool = Message::ToolResult(Box::new(ToolResultMessage {
             role: ToolResultRole::ToolResult,
-            tool_call_id: "image".to_owned(),
-            tool_name: "render".to_owned(),
+            tool_call_id: "image".into(),
+            tool_name: "render".into(),
             content: vec![
                 UserContentBlock::Text(TextContent::new(NON_VISION_TOOL_IMAGE_PLACEHOLDER)),
                 image,
@@ -706,7 +676,7 @@ mod tests {
             usage: None,
             added_tool_names: None,
             is_error: false,
-            timestamp: 2,
+            timestamp: 2.0,
         }));
         let transformed = transform_messages(&[tool], &non_vision, None);
         let Message::ToolResult(message) = &transformed[0] else {
@@ -784,7 +754,7 @@ mod tests {
         responses.api = "openai-responses".into();
         responses.provider = "openai".into();
         let mut same_source = assistant(&responses, vec![]);
-        same_source.model = "other-model".to_owned();
+        same_source.model = "other-model".into();
         let allowed = BTreeSet::from(["openai".to_owned()]);
         assert_eq!(
             normalize_responses_tool_call_id("call_1|fc_1", &responses, &same_source, &allowed),
@@ -814,19 +784,17 @@ mod tests {
             "run",
             Map::from_iter([("x".to_owned(), json!(1))]),
         );
-        call.thought_signature = Some("signature".to_owned());
+        call.thought_signature = Some("signature".into());
         let message = Message::Assistant(Box::new(assistant(
             &target,
             vec![AssistantContent::ToolCall(call.clone())],
         )));
-        let normalizer = |_: &str, _: &Model, _: &AssistantMessage| panic!("must not normalize");
+        let normalizer =
+            |_: &JsString, _: &Model, _: &AssistantMessage| panic!("must not normalize");
         let transformed = transform_messages(&[message], &target, Some(&normalizer));
         let Message::Assistant(assistant) = &transformed[0] else {
             panic!("assistant")
         };
-        assert_eq!(
-            assistant.content,
-            vec![AssistantContent::ToolCall(call)].into()
-        );
+        assert_eq!(assistant.content, vec![AssistantContent::ToolCall(call)]);
     }
 }

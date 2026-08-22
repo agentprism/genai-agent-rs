@@ -2,7 +2,10 @@
 
 use serde_json::Value;
 
-pub const MAX_PROVIDER_ERROR_BODY_CHARS: usize = 4_000;
+use crate::types::{JsString, JsonValue};
+use crate::utils::ecma_json::{format_number, stringify};
+
+pub const MAX_PROVIDER_ERROR_BODY_CHARS: f64 = 4_000.0;
 
 pub(crate) fn trim_javascript_whitespace(value: &str) -> &str {
     value.trim_matches(|character| {
@@ -30,7 +33,7 @@ pub(crate) fn trim_javascript_whitespace(value: &str) -> &str {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProviderErrorBody {
-    Text(String),
+    Text(JsString),
     Parsed(Value),
     Opaque,
 }
@@ -38,19 +41,19 @@ pub enum ProviderErrorBody {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProviderErrorData {
     pub message: String,
-    pub status_code: Option<i64>,
-    pub status: Option<i64>,
+    pub status_code: Option<f64>,
+    pub status: Option<f64>,
     pub body: Option<ProviderErrorBody>,
     pub error: Option<ProviderErrorBody>,
-    pub metadata_http_status_code: Option<i64>,
-    pub response_status_code: Option<i64>,
+    pub metadata_http_status_code: Option<f64>,
+    pub response_status_code: Option<f64>,
     pub response_body: Option<ProviderErrorBody>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NormalizedProviderError {
-    pub status: Option<i64>,
-    pub body: Option<String>,
+    pub status: Option<f64>,
+    pub body: Option<JsString>,
     pub message: String,
     pub message_carries_body: bool,
 }
@@ -62,12 +65,12 @@ pub fn normalize_provider_error(error: &ProviderErrorData) -> NormalizedProvider
         .or(error.metadata_http_status_code)
         .or(error.response_status_code);
     let body = pick_body_text(error)
-        .map(|body| body.trim().to_owned())
+        .map(|body| trim_javascript_whitespace_js(&body))
         .filter(|body| !body.is_empty())
         .map(|body| truncate_error_text(&body, MAX_PROVIDER_ERROR_BODY_CHARS));
     let message_carries_body = body
         .as_ref()
-        .is_none_or(|body| error.message.contains(body));
+        .is_none_or(|body| JsString::from(&error.message).contains(body));
 
     NormalizedProviderError {
         status,
@@ -86,7 +89,7 @@ pub fn normalize_provider_error_value(value: &Value) -> NormalizedProviderError 
     }
 }
 
-fn pick_body_text(error: &ProviderErrorData) -> Option<String> {
+fn pick_body_text(error: &ProviderErrorData) -> Option<JsString> {
     match error.body.as_ref() {
         Some(ProviderErrorBody::Text(body)) => return Some(body.clone()),
         Some(ProviderErrorBody::Parsed(_)) | Some(ProviderErrorBody::Opaque) | None => {}
@@ -94,112 +97,110 @@ fn pick_body_text(error: &ProviderErrorData) -> Option<String> {
     if let Some(ProviderErrorBody::Parsed(value)) = error.error.as_ref()
         && is_plain_nonempty_object(value)
     {
-        return Some(safe_json_stringify(value));
+        return Some(safe_json_stringify(value).into());
     }
     match error.response_body.as_ref() {
         Some(ProviderErrorBody::Text(body)) => Some(body.clone()),
         Some(ProviderErrorBody::Parsed(value)) if is_plain_nonempty_object(value) => {
-            Some(safe_json_stringify(value))
+            Some(safe_json_stringify(value).into())
         }
         Some(ProviderErrorBody::Parsed(_)) | Some(ProviderErrorBody::Opaque) | None => None,
     }
+}
+
+fn trim_javascript_whitespace_js(value: &JsString) -> JsString {
+    let is_whitespace = |unit: &u16| {
+        matches!(
+            unit,
+            0x0009..=0x000d
+                | 0x0020
+                | 0x00a0
+                | 0x1680
+                | 0x2000..=0x200a
+                | 0x2028
+                | 0x2029
+                | 0x202f
+                | 0x205f
+                | 0x3000
+                | 0xfeff
+        )
+    };
+    let start = value
+        .as_utf16()
+        .iter()
+        .position(|unit| !is_whitespace(unit))
+        .unwrap_or(value.len());
+    let end = value
+        .as_utf16()
+        .iter()
+        .rposition(|unit| !is_whitespace(unit))
+        .map_or(start, |index| index + 1);
+    value.slice(start, end)
 }
 
 fn is_plain_nonempty_object(value: &Value) -> bool {
     value.as_object().is_some_and(|object| !object.is_empty())
 }
 
-pub fn format_provider_error(error: &NormalizedProviderError, prefix: Option<&str>) -> String {
+pub fn format_provider_error(error: &NormalizedProviderError, prefix: Option<&str>) -> JsString {
     if error.message_carries_body || error.status.is_none() || error.body.is_none() {
         return match (prefix, error.status) {
-            (Some(prefix), Some(status)) => format!("{prefix} ({status}): {}", error.message),
-            _ => error.message.clone(),
+            (Some(prefix), Some(status)) => {
+                format!("{prefix} ({}): {}", js_f64_string(status), error.message).into()
+            }
+            _ => error.message.clone().into(),
         };
     }
 
-    let status = error.status.expect("checked above");
-    let body = error.body.as_deref().expect("checked above");
-    match prefix {
-        Some(prefix) => format!("{prefix} ({status}): {body}"),
-        None => format!("{status}: {body}"),
+    let status = js_f64_string(error.status.unwrap_or_default());
+    let mut output = match prefix {
+        Some(prefix) => JsString::from(format!("{prefix} ({status}): ")),
+        None => JsString::from(format!("{status}: ")),
+    };
+    if let Some(body) = error.body.as_ref() {
+        output.push_str(body);
     }
+    output
 }
 
-pub fn truncate_error_text(text: &str, max_chars: usize) -> String {
-    let utf16_len = text.encode_utf16().count();
-    if utf16_len <= max_chars {
-        return text.to_owned();
+pub fn truncate_error_text(text: &JsString, max_chars: f64) -> JsString {
+    let length = text.len() as f64;
+    if length <= max_chars {
+        return text.clone();
     }
+    let end = javascript_slice_index(max_chars, text.len());
+    let mut output = text.slice(0, end);
+    output.push_utf8(&format!(
+        "... [truncated {} chars]",
+        js_f64_string(length - max_chars)
+    ));
+    output
+}
 
-    let mut end = 0;
-    let mut units = 0;
-    for (index, character) in text.char_indices() {
-        let width = character.len_utf16();
-        if units + width > max_chars {
-            break;
-        }
-        units += width;
-        end = index + character.len_utf8();
+fn javascript_slice_index(value: f64, length: usize) -> usize {
+    if value.is_nan() || value == 0.0 || value == f64::NEG_INFINITY {
+        return 0;
     }
-    format!(
-        "{}... [truncated {} chars]",
-        &text[..end],
-        utf16_len - max_chars
-    )
+    if value == f64::INFINITY {
+        return length;
+    }
+    let integer = value.trunc();
+    if integer < 0.0 {
+        ((length as f64 + integer).max(0.0).min(length as f64)) as usize
+    } else {
+        integer.min(length as f64) as usize
+    }
 }
 
 pub fn safe_json_stringify(value: &Value) -> String {
-    serde_json::to_string(&normalize_json_numbers(value)).unwrap_or_else(|_| value.to_string())
+    stringify(&JsonValue::from(value.clone()))
 }
 
 pub fn js_number_string(number: &serde_json::Number) -> String {
     let Some(value) = number.as_f64() else {
         return number.to_string();
     };
-    if value == 0.0 {
-        return "0".to_owned();
-    }
-    if value.fract() == 0.0 && value.abs() < 1e21 {
-        return format!("{value:.0}");
-    }
-    let rendered = number.to_string();
-    let Some((mantissa, exponent)) = rendered
-        .split_once('e')
-        .or_else(|| rendered.split_once('E'))
-    else {
-        return rendered;
-    };
-    let Ok(exponent) = exponent.parse::<i32>() else {
-        return rendered;
-    };
-    if (-6..21).contains(&exponent) {
-        let negative = mantissa.starts_with('-');
-        let mantissa = mantissa.trim_start_matches('-');
-        let dot = mantissa.find('.').unwrap_or(mantissa.len());
-        let digits = mantissa.replace('.', "");
-        let decimal = i32::try_from(dot).unwrap_or(i32::MAX) + exponent;
-        let mut output = if decimal <= 0 {
-            format!("0.{}{}", "0".repeat((-decimal) as usize), digits)
-        } else if usize::try_from(decimal).is_ok_and(|decimal| decimal >= digits.len()) {
-            format!(
-                "{}{}",
-                digits,
-                "0".repeat(usize::try_from(decimal).unwrap_or(usize::MAX) - digits.len())
-            )
-        } else {
-            let decimal = usize::try_from(decimal).expect("positive decimal position");
-            format!("{}.{}", &digits[..decimal], &digits[decimal..])
-        };
-        if negative {
-            output.insert(0, '-');
-        }
-        output
-    } else {
-        format!(
-            "{mantissa}e{}{exponent}",
-            if exponent >= 0 { "+" } else { "" }
-        )
-    }
+    format_number(value)
 }
 
 pub fn js_f64_string(number: f64) -> String {
@@ -210,34 +211,7 @@ pub fn js_f64_string(number: f64) -> String {
     } else if number == f64::NEG_INFINITY {
         "-Infinity".to_owned()
     } else {
-        js_number_string(&serde_json::Number::from_f64(number).expect("finite JSON number"))
-    }
-}
-
-fn normalize_json_numbers(value: &Value) -> Value {
-    match value {
-        Value::Number(number) if number.is_f64() => {
-            let value = number.as_f64().expect("f64 JSON number");
-            if value == 0.0 {
-                Value::from(0)
-            } else if value.is_finite()
-                && value.fract() == 0.0
-                && value >= i64::MIN as f64
-                && value <= i64::MAX as f64
-            {
-                Value::from(value as i64)
-            } else {
-                Value::Number(number.clone())
-            }
-        }
-        Value::Array(values) => Value::Array(values.iter().map(normalize_json_numbers).collect()),
-        Value::Object(values) => Value::Object(
-            values
-                .iter()
-                .map(|(key, value)| (key.clone(), normalize_json_numbers(value)))
-                .collect(),
-        ),
-        _ => value.clone(),
+        format_number(number)
     }
 }
 
@@ -256,12 +230,12 @@ mod tests {
     #[test]
     fn ports_error_body_test_sdk_shapes_and_edges() {
         let mut mistral = data("Mistral request failed");
-        mistral.status_code = Some(403);
+        mistral.status_code = Some(403.0);
         mistral.body = Some(ProviderErrorBody::Text(
-            r#"{"error":"blocked by gateway WAF"}"#.to_owned(),
+            r#"{"error":"blocked by gateway WAF"}"#.into(),
         ));
         let norm = normalize_provider_error(&mistral);
-        assert_eq!(norm.status, Some(403));
+        assert_eq!(norm.status, Some(403.0));
         assert_eq!(
             norm.body.as_deref(),
             Some(r#"{"error":"blocked by gateway WAF"}"#)
@@ -269,7 +243,7 @@ mod tests {
         assert!(!norm.message_carries_body);
 
         let mut openai = data("403 status code (no body)");
-        openai.status = Some(403);
+        openai.status = Some(403.0);
         openai.error = Some(ProviderErrorBody::Parsed(
             json!({"error":"blocked by gateway WAF"}),
         ));
@@ -282,16 +256,16 @@ mod tests {
 
         let google_body = json!({"error":{"code":403,"message":"Permission denied"}});
         let mut google = data(&google_body.to_string());
-        google.status = Some(403);
+        google.status = Some(403.0);
         let norm = normalize_provider_error(&google);
         assert!(norm.message_carries_body);
         assert_eq!(norm.message, google_body.to_string());
 
         let mut bedrock = data("UnknownError");
-        bedrock.metadata_http_status_code = Some(403);
-        bedrock.response_status_code = Some(403);
+        bedrock.metadata_http_status_code = Some(403.0);
+        bedrock.response_status_code = Some(403.0);
         bedrock.response_body = Some(ProviderErrorBody::Text(
-            r#"{"message":"blocked by gateway WAF"}"#.to_owned(),
+            r#"{"message":"blocked by gateway WAF"}"#.into(),
         ));
         assert_eq!(
             normalize_provider_error(&bedrock).body.as_deref(),
@@ -303,7 +277,7 @@ mod tests {
             "Input is too long for requested model.",
         ] {
             let mut error = data(opaque);
-            error.metadata_http_status_code = Some(400);
+            error.metadata_http_status_code = Some(400.0);
             error.response_body = Some(ProviderErrorBody::Opaque);
             let norm = normalize_provider_error(&error);
             assert_eq!(norm.body, None);
@@ -311,12 +285,12 @@ mod tests {
         }
 
         let mut class_error = data("TLS handshake failed");
-        class_error.status = Some(502);
+        class_error.status = Some(502.0);
         class_error.error = Some(ProviderErrorBody::Opaque);
         assert_eq!(normalize_provider_error(&class_error).body, None);
 
         let mut plain = data("400 status code (no body)");
-        plain.status = Some(400);
+        plain.status = Some(400.0);
         plain.error = Some(ProviderErrorBody::Parsed(
             json!({"message":"schema validation failed","field":"tools[0]"}),
         ));
@@ -330,16 +304,16 @@ mod tests {
         assert!(!non_error.message_carries_body);
 
         let mut empty = data("403 status code (no body)");
-        empty.status = Some(403);
+        empty.status = Some(403.0);
         empty.error = Some(ProviderErrorBody::Parsed(json!({})));
         let norm = normalize_provider_error(&empty);
         assert_eq!(norm.body, None);
         assert!(norm.message_carries_body);
 
         let mut long = data("failed");
-        long.status_code = Some(500);
+        long.status_code = Some(500.0);
         long.body = Some(ProviderErrorBody::Text(
-            "x".repeat(MAX_PROVIDER_ERROR_BODY_CHARS + 50),
+            "x".repeat(MAX_PROVIDER_ERROR_BODY_CHARS as usize + 50).into(),
         ));
         assert!(
             normalize_provider_error(&long)
@@ -349,15 +323,15 @@ mod tests {
         );
 
         let mut carried = data("500: upstream exploded");
-        carried.status_code = Some(500);
-        carried.body = Some(ProviderErrorBody::Text("upstream exploded".to_owned()));
+        carried.status_code = Some(500.0);
+        carried.body = Some(ProviderErrorBody::Text("upstream exploded".into()));
         assert!(normalize_provider_error(&carried).message_carries_body);
     }
 
     #[test]
     fn ports_error_body_test_formatting_cases() {
         let mut error = data("403 status code (no body)");
-        error.status = Some(403);
+        error.status = Some(403.0);
         error.error = Some(ProviderErrorBody::Parsed(
             json!({"error":"blocked by gateway WAF"}),
         ));
@@ -373,13 +347,13 @@ mod tests {
 
         let body = json!({"error":{"message":"Permission denied"}}).to_string();
         let mut carried = data(&body);
-        carried.status = Some(403);
+        carried.status = Some(403.0);
         assert_eq!(
             format_provider_error(
                 &normalize_provider_error(&carried),
                 Some("OpenAI API error")
             ),
-            format!("OpenAI API error (403): {body}")
+            format!("OpenAI API error (403): {body}").as_str()
         );
         assert_eq!(
             format_provider_error(
@@ -401,5 +375,75 @@ mod tests {
             })),
             r#"{"whole":1,"nested":[0,2.5,{"alsoWhole":3}]}"#
         );
+    }
+
+    /// Pins pi `src/utils/error-body.ts:137-139`: `slice` may retain one half
+    /// of an astral pair at the UTF-16 cap.
+    #[test]
+    fn truncation_retains_a_split_surrogate_code_unit() {
+        let text = JsString::from(format!("{}😀", "x".repeat(3_999)));
+        let truncated = truncate_error_text(&text, 4_000.0);
+        assert_eq!(&truncated.as_utf16()[3_999..4_000], &[0xd83d]);
+        assert!(
+            truncated
+                .to_json_source()
+                .ends_with("\\ud83d... [truncated 1 chars]")
+        );
+    }
+
+    /// Pins pi `src/utils/error-body.ts:76-81,137-139`: extraction itself is
+    /// lossless when the UTF-16 cap bisects an astral pair.
+    #[test]
+    fn normalization_and_formatting_retain_split_surrogate_bodies() {
+        let mut error = data("upstream failed");
+        error.status = Some(500.0);
+        error.body = Some(ProviderErrorBody::Text(JsString::from(format!(
+            "{}😀",
+            "x".repeat(3_999)
+        ))));
+        let normalized = normalize_provider_error(&error);
+        let body = normalized.body.as_ref().expect("body");
+        assert_eq!(&body.as_utf16()[3_999..4_000], &[0xd83d]);
+        assert!(
+            body.to_json_source()
+                .ends_with("\\ud83d... [truncated 1 chars]")
+        );
+        let formatted = format_provider_error(&normalized, None);
+        assert_eq!(formatted.as_utf16()[5 + 3_999], 0xd83d);
+    }
+
+    /// Pins pi `src/utils/error-body.ts:61-66,128-134`: status is any
+    /// JavaScript number and template interpolation uses ECMAScript spelling.
+    #[test]
+    fn negative_nan_and_negative_zero_statuses_format_like_javascript() {
+        for (status, expected) in [
+            (-1.5, "-1.5: body"),
+            (f64::NAN, "NaN: body"),
+            (-0.0, "0: body"),
+        ] {
+            let normalized = NormalizedProviderError {
+                status: Some(status),
+                body: Some("body".into()),
+                message: "failed".into(),
+                message_carries_body: false,
+            };
+            assert_eq!(format_provider_error(&normalized, None), expected);
+        }
+    }
+
+    /// Pins pi `src/utils/error-body.ts:137-139`: `maxChars` is an arbitrary
+    /// JavaScript number, and both `slice` coercion and suffix arithmetic remain observable.
+    #[test]
+    fn truncation_limit_uses_javascript_number_and_slice_semantics() {
+        let text = JsString::from("abcde");
+        for (limit, expected) in [
+            (2.75, "ab... [truncated 2.25 chars]"),
+            (-1.5, "abcd... [truncated 6.5 chars]"),
+            (f64::NEG_INFINITY, "... [truncated Infinity chars]"),
+            (f64::NAN, "... [truncated NaN chars]"),
+        ] {
+            assert_eq!(truncate_error_text(&text, limit), expected, "{limit:?}");
+        }
+        assert_eq!(truncate_error_text(&text, f64::INFINITY), text);
     }
 }

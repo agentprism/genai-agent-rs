@@ -39,9 +39,10 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS: u64 = 16;
+const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS: f64 = 16.0;
 const OPENAI_TOOL_CALL_PROVIDERS: [&str; 3] = ["openai", "openai-codex", "opencode"];
 
 fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
@@ -166,8 +167,12 @@ struct WireRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     prompt_cache_options: Option<PromptCacheOptions>,
     store: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    max_output_tokens: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_js_f64"
+    )]
+    max_output_tokens: Option<f64>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -236,7 +241,7 @@ pub fn stream_simple(
 fn terminal_setup_error(model: &Model, message: &str) -> AssistantMessageEventStream {
     let mut output = pending_message(model);
     output.stop_reason = StopReason::Error;
-    output.error_message = Some(message.to_owned());
+    output.error_message = Some(message.into());
     AssistantMessageEventStream::from_events(vec![AssistantMessageEvent::Error {
         reason: ErrorStopReason::Error,
         error: output,
@@ -252,12 +257,11 @@ fn pending_message(model: &Model) -> crate::types::AssistantMessage {
     )
 }
 
-fn now_millis() -> i64 {
+fn now_millis() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
-        .unwrap_or(i64::MAX)
+        .unwrap_or_default()
+        .as_millis() as f64
 }
 
 async fn run_stream(
@@ -294,7 +298,7 @@ async fn run_stream(
         } else {
             StopReason::Error
         };
-        output.error_message = Some(error.message);
+        output.error_message = Some(error.message.into());
         let _ = sender.send(AssistantMessageEvent::Error {
             reason: if aborted {
                 ErrorStopReason::Aborted
@@ -348,11 +352,13 @@ async fn run_stream_inner(
         &grammar_tool_input_properties,
     )?;
     if let Some(on_payload) = &options.stream.request.on_payload
-        && let Some(replacement) = on_payload(params.clone(), model)
+        && let Some(replacement) = on_payload(params.clone().into(), model)
             .await
             .map_err(ResponsesRunError::new)?
     {
-        params = replacement;
+        params = replacement
+            .to_serde_json_with_stringify_semantics()
+            .map_err(ResponsesRunError::display)?;
     }
 
     let retry_options = ProviderRetryOptions {
@@ -379,7 +385,9 @@ async fn run_stream_inner(
             .map_err(ResponsesRunError::new)?;
     }
     sender
-        .send(AssistantMessageEvent::Start)
+        .send(AssistantMessageEvent::Start {
+            partial: Arc::new(output.clone()),
+        })
         .map_err(ResponsesRunError::display)?;
 
     let apply_pricing = |usage: &mut Usage, service_tier: Option<Option<ResponseServiceTier>>| {
@@ -417,10 +425,10 @@ async fn run_stream_inner(
     }
     if matches!(output.stop_reason, StopReason::Aborted | StopReason::Error) {
         return Err(ResponsesRunError::new(
-            output
-                .error_message
-                .clone()
-                .unwrap_or_else(|| "An unknown error occurred".to_owned()),
+            output.error_message.as_ref().map_or_else(
+                || "An unknown error occurred".to_owned(),
+                |message| message.to_utf8_lossy(),
+            ),
         ));
     }
     let reason = successful_stop_reason(output.stop_reason).ok_or_else(|| {
@@ -764,7 +772,7 @@ fn build_params(
         max_output_tokens: options
             .stream
             .max_tokens
-            .filter(|tokens| *tokens != 0)
+            .filter(|tokens| *tokens != 0.0)
             .map(|tokens| tokens.max(OPENAI_RESPONSES_MIN_OUTPUT_TOKENS)),
         temperature: options.stream.temperature,
         service_tier: options.service_tier.clone(),
@@ -1131,8 +1139,8 @@ mod tests {
                 },
                 tiers: None,
             },
-            context_window: 272_000,
-            max_tokens: 128_000,
+            context_window: 272_000.0,
+            max_tokens: 128_000.0,
             sampling_params: None,
             headers: None,
             compat: Some(ModelCompat::OpenAIResponses(OpenAIResponsesCompat {
@@ -1147,11 +1155,11 @@ mod tests {
 
     fn context() -> Context {
         Context {
-            system_prompt: Some("sys".to_owned()),
+            system_prompt: Some(("sys".to_owned()).into()),
             messages: vec![crate::types::Message::User(Box::new(UserMessage {
                 role: UserRole::User,
-                content: UserContent::Text("hi".to_owned()),
-                timestamp: 1,
+                content: UserContent::Text(("hi".to_owned()).into()),
+                timestamp: 1.0,
             }))],
             tools: None,
         }
@@ -1320,7 +1328,7 @@ mod tests {
     fn request_fields_presence_reasoning_and_sampling_precedence_match_pi() {
         let mut model = base_model("unused".to_owned(), "gpt-5.4");
         let mut request_options = options();
-        request_options.stream.max_tokens = Some(1);
+        request_options.stream.max_tokens = Some(1.0);
         request_options.stream.temperature = Some(0.25);
         request_options.stream.session_id = Some("x".repeat(67));
         request_options.service_tier = Some(None);
@@ -1619,7 +1627,7 @@ mod tests {
                     usage: None,
                     added_tool_names: None,
                     is_error: false,
-                    timestamp: 2,
+                    timestamp: 2.0,
                 })));
             let (second, captured) = run_and_capture(model, test_context, options(), &server).await;
             assert_eq!(second.stop_reason, StopReason::Stop);
@@ -1737,7 +1745,7 @@ mod tests {
         let mut kinds = Vec::new();
         while let Some(event) = events.next().await {
             let kind = match event {
-                AssistantMessageEvent::Start => "start",
+                AssistantMessageEvent::Start { .. } => "start",
                 AssistantMessageEvent::TextStart { .. } => "text_start",
                 AssistantMessageEvent::TextDelta { .. } => "text_delta",
                 AssistantMessageEvent::TextEnd { .. } => "text_end",
@@ -1800,7 +1808,7 @@ mod tests {
         let result = events.result().await.unwrap();
         assert!(matches!(
             emitted.first(),
-            Some(AssistantMessageEvent::Start)
+            Some(AssistantMessageEvent::Start { .. })
         ));
         assert!(matches!(
             emitted.last(),
@@ -1837,7 +1845,7 @@ mod tests {
         let message = event_stream.result().await.unwrap();
 
         assert_eq!(events.len(), 2);
-        assert!(matches!(events[0], AssistantMessageEvent::Start));
+        assert!(matches!(events[0], AssistantMessageEvent::Start { .. }));
         assert!(matches!(events[1], AssistantMessageEvent::Error { .. }));
         assert_eq!(message.stop_reason, StopReason::Error);
         assert_eq!(
@@ -1885,7 +1893,7 @@ mod tests {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let response = response.as_ref().expect("provider response");
-        assert_eq!(response.status, 201);
+        assert_eq!(response.status, 201.0);
         assert_eq!(
             response
                 .headers

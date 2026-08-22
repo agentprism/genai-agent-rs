@@ -2,13 +2,11 @@
 //!
 //! Differences from the TypeScript listing are limited to what the port makes explicit:
 //! - provider/model are `deepseek` / `deepseek-v4-flash` (the owner's choice for this run);
-//! - pi carries a `partial: AssistantMessage` on every nonterminal event; the Rust wire is
-//!   partial-free and `MessageBuilder` reconstructs the same snapshot on demand;
 //! - the tool result uses a fixed clock so both ports hand the model identical text.
 //!
 //! Run: `DEEPSEEK_API_KEY=… cargo run -p agentprism-ai --example quickstart`
 
-use ai::event_stream::{AssistantMessageEvent, MessageBuilder};
+use ai::event_stream::AssistantMessageEvent;
 use ai::models::ModelsApiStreamOptions;
 use ai::providers::all::builtin_models;
 use ai::types::{
@@ -87,11 +85,11 @@ async fn main() {
 
     // Build a conversation context (easily serializable and transferable between models)
     let mut context = Context {
-        system_prompt: Some("You are a helpful assistant.".to_owned()),
+        system_prompt: Some(("You are a helpful assistant.".to_owned()).into()),
         messages: vec![Message::User(Box::new(UserMessage {
             role: UserRole::User,
-            content: UserContent::Text("What time is it?".to_owned()),
-            timestamp: now(),
+            content: UserContent::Text(("What time is it?".to_owned()).into()),
+            timestamp: (now() as f64),
         }))],
         tools: Some(tools),
     };
@@ -99,20 +97,10 @@ async fn main() {
     // Option 1: Streaming with all event types.
     // Auth resolves through the provider (DEEPSEEK_API_KEY from the environment here).
     let mut s = models.stream(&model, &context, ModelsApiStreamOptions::default());
-    let mut partial = MessageBuilder::new(AssistantMessage::pending(
-        model.api.clone(),
-        model.provider.clone(),
-        model.id.clone(),
-        now(),
-    ));
-
     while let Some(event) = s.next().await {
-        if !partial.is_terminal() {
-            partial.apply(&event).expect("event sequence reconstructs");
-        }
         match &event {
-            AssistantMessageEvent::Start => {
-                println!("Starting with {}", partial.snapshot().model);
+            AssistantMessageEvent::Start { partial } => {
+                println!("Starting with {}", partial.model);
             }
             AssistantMessageEvent::TextStart { .. } => println!("\n[Text started]"),
             AssistantMessageEvent::TextDelta { delta, .. } => {
@@ -129,10 +117,18 @@ async fn main() {
             AssistantMessageEvent::ToolCallStart { content_index, .. } => {
                 println!("\n[Tool call started: index {content_index}]");
             }
-            AssistantMessageEvent::ToolCallDelta { content_index, .. } => {
+            AssistantMessageEvent::ToolCallDelta {
+                content_index,
+                partial,
+                ..
+            } => {
                 // Partial tool arguments are being streamed
+                let index = (*content_index >= 0.0
+                    && content_index.is_finite()
+                    && content_index.fract() == 0.0)
+                    .then_some(*content_index as usize);
                 if let Some(AssistantContent::ToolCall(call)) =
-                    partial.snapshot().content.get(*content_index)
+                    index.and_then(|index| partial.content.get(index))
                 {
                     println!("[Streaming args for {}]", call.name);
                 }
@@ -166,8 +162,9 @@ async fn main() {
                 .get("timezone")
                 .and_then(|v| v.as_str())
                 .filter(|tz| !tz.is_empty())
-                .unwrap_or("UTC");
-            match timezone {
+                .and_then(|value| value.to_utf8().ok())
+                .unwrap_or_else(|| "UTC".to_owned());
+            match timezone.as_str() {
                 "UTC" => "Friday, August 21, 2026 at 5:30:00 PM UTC".to_owned(),
                 other => format!("Friday, August 21, 2026 at 5:30:00 PM {other}"),
             }
@@ -187,7 +184,7 @@ async fn main() {
                 usage: None,
                 added_tool_names: None,
                 is_error: false,
-                timestamp: now(),
+                timestamp: (now() as f64),
             })));
     }
 
@@ -208,8 +205,7 @@ async fn main() {
 
     println!(
         "Total tokens: {} in, {} out",
-        final_message.usage.input.as_number(),
-        final_message.usage.output.as_number()
+        final_message.usage.input, final_message.usage.output
     );
     println!("Cost: ${:.4}", final_message.usage.cost.total);
     println!(

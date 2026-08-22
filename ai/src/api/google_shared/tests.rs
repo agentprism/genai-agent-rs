@@ -1,8 +1,8 @@
 use super::*;
 use crate::types::{
-    Api, AssistantMessage, AssistantRole, Context, ImageContent, Message, ModelCost, ProviderId,
-    StopReason, TextContent, ThinkingContent, ToolCall, ToolResultMessage, ToolResultRole,
-    UserContent, UserMessage, UserRole,
+    Api, AssistantMessage, AssistantRole, Context, ImageContent, JsonObject, JsonValue, Message,
+    ModelCost, ProviderId, StopReason, TextContent, ThinkingContent, ToolCall, ToolResultMessage,
+    ToolResultRole, UserContent, UserMessage, UserRole,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -19,8 +19,8 @@ fn model(id: &str) -> Model {
         thinking_level_map: None,
         input: vec![ModelInput::Text, ModelInput::Image],
         cost: ModelCost::default(),
-        context_window: 128_000,
-        max_tokens: 8_192,
+        context_window: 128_000.0,
+        max_tokens: 8_192.0,
         sampling_params: None,
         headers: None,
         compat: None,
@@ -30,8 +30,8 @@ fn model(id: &str) -> Model {
 fn user(text: &str) -> Message {
     Message::User(Box::new(UserMessage {
         role: UserRole::User,
-        content: UserContent::Text(text.to_owned()),
-        timestamp: 1,
+        content: UserContent::Text((text.to_owned()).into()),
+        timestamp: 1.0,
     }))
 }
 
@@ -40,10 +40,10 @@ fn assistant(model: &Model, content: Vec<AssistantContent>) -> Message {
         model.api.clone(),
         model.provider.clone(),
         model.id.clone(),
-        2,
+        2.0,
     );
     message.role = AssistantRole::Assistant;
-    message.content = content.into();
+    message.content = content;
     message.stop_reason = StopReason::ToolUse;
     Message::Assistant(Box::new(message))
 }
@@ -51,14 +51,14 @@ fn assistant(model: &Model, content: Vec<AssistantContent>) -> Message {
 fn tool_result(id: &str, content: Vec<UserContentBlock>) -> Message {
     Message::ToolResult(Box::new(ToolResultMessage {
         role: ToolResultRole::ToolResult,
-        tool_call_id: id.to_owned(),
-        tool_name: "read".to_owned(),
+        tool_call_id: id.into(),
+        tool_name: "read".into(),
         content,
         details: None,
         usage: None,
         added_tool_names: None,
         is_error: false,
-        timestamp: 3,
+        timestamp: 3.0,
     }))
 }
 
@@ -240,9 +240,9 @@ fn signed_empty_blocks_are_kept_only_for_the_same_model() {
     const SIGNATURE: &str = "AAAAAAAAAAAAAAAAAAAAAA==";
     let target = model("gemini-3-pro-preview");
     let mut thinking = ThinkingContent::new("");
-    thinking.thinking_signature = Some(SIGNATURE.to_owned());
+    thinking.thinking_signature = Some(SIGNATURE.into());
     let mut text = TextContent::new("");
-    text.text_signature = Some(SIGNATURE.to_owned());
+    text.text_signature = Some(SIGNATURE.into());
     let converted = convert_messages(
         &target,
         &context(vec![
@@ -255,7 +255,7 @@ fn signed_empty_blocks_are_kept_only_for_the_same_model() {
                     AssistantContent::ToolCall(ToolCall::new(
                         "call_1",
                         "bash",
-                        json!({ "command": "ls" }),
+                        JsonObject::try_from(json!({ "command": "ls" })).expect("object arguments"),
                     )),
                 ],
             ),
@@ -289,7 +289,7 @@ fn signed_empty_blocks_are_kept_only_for_the_same_model() {
                     AssistantContent::ToolCall(ToolCall::new(
                         "call_1",
                         "bash",
-                        json!({ "command": "ls" }),
+                        JsonObject::try_from(json!({ "command": "ls" })).expect("object arguments"),
                     )),
                 ],
             ),
@@ -303,24 +303,6 @@ fn signed_empty_blocks_are_kept_only_for_the_same_model() {
     assert!(!model_turn.to_string().contains(SIGNATURE));
 }
 
-/// Pins pi `src/api/google-shared.ts:203-213` for JavaScript's nullish `arguments ?? {}`.
-#[test]
-fn null_tool_arguments_are_replayed_as_an_empty_object() {
-    let target = model("gemini-3-pro-preview");
-    let converted = convert_messages(
-        &target,
-        &context(vec![assistant(
-            &target,
-            vec![AssistantContent::ToolCall(ToolCall::new(
-                "call_1",
-                "empty",
-                Value::Null,
-            ))],
-        )]),
-    );
-    assert_eq!(converted[0]["parts"][0]["functionCall"]["args"], json!({}));
-}
-
 /// Ports pi `test/google-shared-gemini3-unsigned-tool-call.test.ts:80-167`.
 #[test]
 fn gemini_three_preserves_ids_without_fabricating_signatures() {
@@ -332,8 +314,8 @@ fn gemini_three_preserves_ids_without_fabricating_signatures() {
             assistant(
                 &target,
                 vec![
-                    AssistantContent::ToolCall(ToolCall::new("call_1", "bash", json!({}))),
-                    AssistantContent::ToolCall(ToolCall::new("call_2", "bash", json!({}))),
+                    AssistantContent::ToolCall(ToolCall::new("call_1", "bash", JsonObject::new())),
+                    AssistantContent::ToolCall(ToolCall::new("call_2", "bash", JsonObject::new())),
                 ],
             ),
             tool_result(
@@ -379,8 +361,8 @@ fn gemini_three_preserves_ids_without_fabricating_signatures() {
 fn tool_signatures_are_kept_only_when_valid_and_replayable() {
     const SIGNATURE: &str = "AAAAAAAAAAAAAAAAAAAAAA==";
     let target = model("gemini-3.6-flash");
-    let mut signed = ToolCall::new("call_1", "bash", json!({}));
-    signed.thought_signature = Some(SIGNATURE.to_owned());
+    let mut signed = ToolCall::new("call_1", "bash", JsonObject::new());
+    signed.thought_signature = Some(SIGNATURE.into());
     let converted = convert_messages(
         &target,
         &context(vec![assistant(
@@ -410,7 +392,7 @@ fn tool_signatures_are_kept_only_when_valid_and_replayable() {
                 vec![AssistantContent::ToolCall(ToolCall::new(
                     "call_1",
                     "bash",
-                    json!({}),
+                    JsonObject::new(),
                 ))],
             ),
             tool_result(
@@ -427,6 +409,38 @@ fn tool_signatures_are_kept_only_when_valid_and_replayable() {
     );
 }
 
+/// Pins pi `types.ts:372-380` and `src/api/google-shared.ts:203-214`:
+/// provider replay never replaces a valid dynamic argument object merely
+/// because one nested JavaScript number is non-finite.
+#[test]
+fn google_replay_preserves_dynamic_tool_arguments_around_nonfinite_leaves() {
+    let target = model("gemini-3.6-flash");
+    let mut arguments = JsonObject::new();
+    arguments.insert("before", -1e20_f64);
+    arguments.insert("nan", f64::NAN);
+    arguments.insert(
+        "nested",
+        JsonValue::Array(vec![1.into(), f64::NEG_INFINITY.into(), "after".into()]),
+    );
+    let converted = convert_messages(
+        &target,
+        &context(vec![assistant(
+            &target,
+            vec![AssistantContent::ToolCall(ToolCall::new(
+                "call", "lookup", arguments,
+            ))],
+        )]),
+    );
+    let args = &converted[0]["parts"][0]["functionCall"]["args"];
+    assert_eq!(args["before"].as_f64(), Some(-1e20_f64));
+    assert!(args["nan"].as_f64().is_some_and(f64::is_nan));
+    assert_eq!(args["nested"][1].as_f64(), Some(f64::NEG_INFINITY));
+    assert_eq!(
+        crate::utils::ecma_json::stringify_provider_json(args),
+        r#"{"before":-100000000000000000000,"nan":null,"nested":[1,null,"after"]}"#
+    );
+}
+
 /// Ports pi `test/google-shared-image-tool-result-routing.test.ts:68-102`.
 #[test]
 fn image_tool_results_use_separate_turn_before_gemini_three() {
@@ -437,9 +451,13 @@ fn image_tool_results_use_separate_turn_before_gemini_three() {
             assistant(
                 model,
                 vec![
-                    AssistantContent::ToolCall(ToolCall::new("call_a", "read", json!({}))),
-                    AssistantContent::ToolCall(ToolCall::new("call_img", "read", json!({}))),
-                    AssistantContent::ToolCall(ToolCall::new("call_b", "read", json!({}))),
+                    AssistantContent::ToolCall(ToolCall::new("call_a", "read", JsonObject::new())),
+                    AssistantContent::ToolCall(ToolCall::new(
+                        "call_img",
+                        "read",
+                        JsonObject::new(),
+                    )),
+                    AssistantContent::ToolCall(ToolCall::new("call_b", "read", JsonObject::new())),
                 ],
             ),
             tool_result(

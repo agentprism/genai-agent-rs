@@ -1,5 +1,7 @@
 //! Tool argument validation and coercion ⇐ pi `src/utils/validation.ts`.
 
+#[cfg(test)]
+use crate::types::JsonObject;
 use crate::types::{Tool, ToolCall};
 use jsonschema::error::ValidationErrorKind;
 use serde_json::{Map, Number, Value};
@@ -270,7 +272,9 @@ pub fn validate_tool_arguments(
     tool: &Tool,
     tool_call: &ToolCall,
 ) -> Result<Value, ToolValidationError> {
-    let mut arguments = tool_call.arguments.clone();
+    let mut arguments = crate::types::JsonValue::Object(tool_call.arguments.clone())
+        .to_serde_json()
+        .map_err(|error| ToolValidationError(error.to_string()))?;
     normalize_optional_nulls(&mut arguments, &tool.parameters);
     arguments = coerce(arguments, &tool.parameters);
     let validator = jsonschema::validator_for(&tool.parameters)
@@ -329,7 +333,11 @@ mod tests {
         };
         validate_tool_arguments(
             &tool,
-            &ToolCall::new("tool-1", "echo", json!({"value":input})),
+            &ToolCall::new(
+                "tool-1",
+                "echo",
+                JsonObject::try_from(json!({"value":input})).expect("object arguments"),
+            ),
         )
     }
 
@@ -379,7 +387,10 @@ mod tests {
         let call = ToolCall::new(
             "1",
             "echo",
-            json!({"path":"x","offset":null,"nullable":null,"metadata":{"enabled":null}}),
+            JsonObject::try_from(
+                json!({"path":"x","offset":null,"nullable":null,"metadata":{"enabled":null}}),
+            )
+            .expect("object arguments"),
         );
         assert_eq!(
             validate_tool_arguments(&tool, &call).expect("valid"),
@@ -403,7 +414,11 @@ mod tests {
         assert_eq!(
             validate_tool_arguments(
                 &referenced,
-                &ToolCall::new("1", "echo", json!({"value":null}))
+                &ToolCall::new(
+                    "1",
+                    "echo",
+                    JsonObject::try_from(json!({"value":null})).expect("object arguments"),
+                )
             )
             .expect("valid"),
             json!({"value":null})

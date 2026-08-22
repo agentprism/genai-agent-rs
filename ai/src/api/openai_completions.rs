@@ -20,18 +20,18 @@ use crate::event_stream::{
     AssistantMessageEvent, AssistantMessageEventStream, AssistantStreamSender,
 };
 use crate::models::{calculate_cost, clamp_thinking_level};
-#[cfg(test)]
-use crate::types::ModelCompat;
 use crate::types::{
     AssistantContent, AssistantMessage, CacheControlFormat, CacheRetention, ChatTemplateKwargValue,
-    Context, DeferredToolsMode, ErrorStopReason, ImageContent, MaxTokensField, Message, Model,
-    ModelInput, ModelThinkingLevel, OpenAICompletionsCompat, OpenRouterRouting, ProviderEnv,
+    Context, DeferredToolsMode, ErrorStopReason, ImageContent, JsonValue, MaxTokensField, Message,
+    Model, ModelInput, ModelThinkingLevel, OpenAICompletionsCompat, OpenRouterRouting, ProviderEnv,
     ProviderHeaders, SessionAffinityFormat, SimpleStreamOptions, StopReason, StreamOptions,
     SuccessfulStopReason, TextContent, ThinkingBudgets, ThinkingContent, ThinkingFormat,
     ThinkingLevel, ThinkingTokenBudgetField, ThinkingVariable, Tool, ToolCall, ToolChoice,
     ToolResultMessage, Usage, UsageValue, VercelGatewayRouting, serialize_optional_js_f64,
 };
-use crate::utils::json_parse::parse_streaming_json;
+#[cfg(test)]
+use crate::types::{JsonObject, ModelCompat};
+use crate::utils::ecma_json::stringify_object;
 use crate::utils::pi_user_agent::{get_pi_user_agent, openai_sdk_platform_headers};
 use crate::utils::provider_env::get_provider_env_value;
 use crate::utils::provider_retry::{
@@ -44,6 +44,7 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -380,10 +381,18 @@ struct WireRequest {
     stream_options: Option<WireStreamOptions>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     store: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    max_completion_tokens: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_js_f64"
+    )]
+    max_tokens: Option<f64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_js_f64"
+    )]
+    max_completion_tokens: Option<f64>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -449,7 +458,7 @@ pub fn stream_simple(
 fn terminal_setup_error(model: &Model, message: &str) -> AssistantMessageEventStream {
     let mut output = pending_message(model);
     output.stop_reason = StopReason::Error;
-    output.error_message = Some(message.to_owned());
+    output.error_message = Some(message.into());
     AssistantMessageEventStream::from_events(vec![AssistantMessageEvent::Error {
         reason: ErrorStopReason::Error,
         error: output,
@@ -465,12 +474,11 @@ fn pending_message(model: &Model) -> AssistantMessage {
     )
 }
 
-fn now_millis() -> i64 {
+fn now_millis() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
-        .unwrap_or(i64::MAX)
+        .unwrap_or_default()
+        .as_millis() as f64
 }
 
 async fn run_stream(
@@ -507,7 +515,7 @@ async fn run_stream(
         } else {
             StopReason::Error
         };
-        output.error_message = Some(error.message);
+        output.error_message = Some(error.message.into());
         let reason = if output.stop_reason == StopReason::Aborted {
             ErrorStopReason::Aborted
         } else {
@@ -563,11 +571,13 @@ async fn run_stream_inner(
         &grammar_tool_input_properties,
     )?;
     if let Some(on_payload) = &options.stream.request.on_payload
-        && let Some(replacement) = on_payload(params.clone(), model)
+        && let Some(replacement) = on_payload(params.clone().into(), model)
             .await
             .map_err(CompletionError::new)?
     {
-        params = replacement;
+        params = replacement
+            .to_serde_json_with_stringify_semantics()
+            .map_err(CompletionError::display)?;
     }
 
     let retry_options = ProviderRetryOptions {
@@ -594,7 +604,9 @@ async fn run_stream_inner(
     }
 
     sender
-        .send(AssistantMessageEvent::Start)
+        .send(AssistantMessageEvent::Start {
+            partial: Arc::new(output.clone()),
+        })
         .map_err(CompletionError::display)?;
     let mut sdk_stream = acquired.stream;
     let mut state = StreamingState::default();
@@ -634,10 +646,10 @@ async fn run_stream_inner(
     }
     if output.stop_reason == StopReason::Error {
         return Err(CompletionError::new(
-            output
-                .error_message
-                .clone()
-                .unwrap_or_else(|| "Provider returned an error stop reason".to_owned()),
+            output.error_message.as_ref().map_or_else(
+                || "Provider returned an error stop reason".to_owned(),
+                |message| message.to_utf8_lossy(),
+            ),
         ));
     }
     if (compat.supports_finish_reason && !state.has_finish_reason)
@@ -1013,7 +1025,6 @@ struct StreamingState {
     tool_by_stream_index: BTreeMap<usize, usize>,
     tool_by_id: BTreeMap<String, usize>,
     tool_scratch: BTreeMap<usize, ToolScratch>,
-    pending_reasoning_details_by_tool_call_id: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Default)]
@@ -1040,14 +1051,14 @@ fn process_chunk(
     if output.response_id.as_deref().is_none_or(str::is_empty)
         && let Some(id) = chunk.id
     {
-        output.response_id = Some(id);
+        output.response_id = Some(id.into());
     }
     if output.response_model.is_none()
         && let Some(response_model) = chunk
             .model
             .filter(|response_model| !response_model.is_empty() && response_model != &model.id)
     {
-        output.response_model = Some(response_model);
+        output.response_model = Some(response_model.into());
     }
     if let Some(usage) = chunk.usage.as_ref() {
         output.usage = parse_chunk_usage(usage, model);
@@ -1061,10 +1072,10 @@ fn process_chunk(
         output.usage = parse_chunk_usage(usage, model);
     }
     if let Some(reason) = choice.finish_reason.filter(|reason| !reason.is_empty()) {
-        output.raw_stop_reason = Some(reason.clone());
+        output.raw_stop_reason = Some(reason.clone().into());
         let (stop_reason, error_message) = map_stop_reason(&reason);
         output.stop_reason = stop_reason;
-        output.error_message = error_message;
+        output.error_message = error_message.map(Into::into);
         state.has_finish_reason = true;
     }
     let Some(delta) = choice.delta else {
@@ -1078,8 +1089,9 @@ fn process_chunk(
         block.text.push_str(&content);
         sender
             .send(AssistantMessageEvent::TextDelta {
-                content_index: index,
-                delta: content,
+                content_index: index as f64,
+                delta: content.into(),
+                partial: Arc::new(output.clone()),
             })
             .map_err(CompletionError::display)?;
     }
@@ -1107,9 +1119,9 @@ fn process_chunk(
         block.thinking.push_str(&reasoning);
         sender
             .send(AssistantMessageEvent::ThinkingDelta {
-                content_index: index,
-                delta: reasoning,
-                thinking_signature_delta: None,
+                content_index: index as f64,
+                delta: reasoning.into(),
+                partial: Arc::new(output.clone()),
             })
             .map_err(CompletionError::display)?;
     }
@@ -1126,21 +1138,18 @@ fn process_chunk(
         if !is_open_ai_reasoning_detail(&detail) {
             continue;
         }
-        output
-            .reasoning_details
-            .get_or_insert_with(Vec::new)
-            .push(detail.clone());
-        if let Some((id, serialized)) = encrypted_reasoning_detail(&detail) {
-            if let Some(index) = state.tool_by_id.get(id).copied() {
-                if let Some(AssistantContent::ToolCall(call)) = output.content.get_mut(index) {
-                    call.thought_signature = Some(serialized);
-                }
-            } else {
-                state
-                    .pending_reasoning_details_by_tool_call_id
-                    .insert(id.to_owned(), serialized);
-            }
-        }
+        let index = ensure_thinking_block(sender, output, state, "")?;
+        let Some(AssistantContent::Thinking(block)) = output.content.get_mut(index) else {
+            return Err(CompletionError::new("thinking block state is invalid"));
+        };
+        let mut preserved =
+            parse_open_ai_reasoning_details(block.thinking_signature.as_ref()).unwrap_or_default();
+        preserved.push(detail);
+        block.thinking_signature = Some(
+            serde_json::to_string(&preserved)
+                .map_err(CompletionError::display)?
+                .into(),
+        );
     }
     Ok(())
 }
@@ -1160,7 +1169,8 @@ fn ensure_text_block(
     state.text_index = Some(index);
     sender
         .send(AssistantMessageEvent::TextStart {
-            content_index: index,
+            content_index: index as f64,
+            partial: Arc::new(output.clone()),
         })
         .map_err(CompletionError::display)?;
     Ok(index)
@@ -1177,15 +1187,13 @@ fn ensure_thinking_block(
     }
     let index = output.content.len();
     let mut block = ThinkingContent::new("");
-    block.thinking_signature = Some(signature.to_owned());
+    block.thinking_signature = Some(signature.into());
     output.content.push(AssistantContent::Thinking(block));
     state.thinking_index = Some(index);
     sender
         .send(AssistantMessageEvent::ThinkingStart {
-            content_index: index,
-            thinking: None,
-            thinking_signature: Some(signature.to_owned()),
-            redacted: None,
+            content_index: index as f64,
+            partial: Arc::new(output.clone()),
         })
         .map_err(CompletionError::display)?;
     Ok(index)
@@ -1256,10 +1264,8 @@ fn process_tool_delta(
         }
         sender
             .send(AssistantMessageEvent::ToolCallStart {
-                content_index: index,
-                id: delta.id.clone().unwrap_or_default(),
-                tool_name: name.to_owned(),
-                namespace: None,
+                content_index: index as f64,
+                partial: Arc::new(output.clone()),
             })
             .map_err(CompletionError::display)?;
         index
@@ -1277,28 +1283,18 @@ fn process_tool_delta(
     if call.id.is_empty()
         && let Some(id) = &delta.id
     {
-        call.id.clone_from(id);
+        call.id = id.clone().into();
     }
     if call.name.is_empty() && !name.is_empty() {
-        call.name = name.to_owned();
+        call.name = name.into();
     }
-    if let Some(pending) = state
-        .pending_reasoning_details_by_tool_call_id
-        .remove(&call.id)
-    {
-        call.thought_signature = Some(pending);
-    }
-
     let scratch = state.tool_scratch.entry(index).or_default();
     if delta.custom.is_some() && scratch.custom_input.is_none() && delta.function.is_none() {
         let property = grammar_tool_input_properties
-            .get(&call.name)
+            .get(call.name.as_str())
             .cloned()
             .unwrap_or_else(|| "input".to_owned());
-        call.arguments = Value::Object(Map::from_iter([(
-            property.clone(),
-            Value::String(String::new()),
-        )]));
+        call.arguments = Map::from_iter([(property.clone(), Value::String(String::new()))]).into();
         scratch.custom_input = Some(CustomInputScratch {
             property,
             json_buffer: GrammarToolInputJsonBuffer::default(),
@@ -1311,7 +1307,8 @@ fn process_tool_delta(
         .filter(|arguments| !arguments.is_empty())
     {
         scratch.partial_args.push_str(&arguments);
-        call.arguments = parse_streaming_json(Some(&scratch.partial_args));
+        call.arguments =
+            crate::utils::json_parse::parse_streaming_json_object(Some(&scratch.partial_args));
         arguments
     } else if let Some(input) = delta
         .custom
@@ -1324,7 +1321,8 @@ fn process_tool_delta(
         let current = call
             .arguments
             .get(&custom.property)
-            .and_then(Value::as_str)
+            .and_then(JsonValue::as_str)
+            .and_then(|value| value.to_utf8().ok())
             .unwrap_or_default();
         let next = format!("{current}{input}");
         let emitted = append_grammar_tool_input_json_delta(
@@ -1335,18 +1333,16 @@ fn process_tool_delta(
         )
         .map_err(CompletionError::display)?
         .unwrap_or_default();
-        call.arguments = Value::Object(Map::from_iter([(
-            custom.property.clone(),
-            Value::String(next),
-        )]));
+        call.arguments = Map::from_iter([(custom.property.clone(), Value::String(next))]).into();
         emitted
     } else {
         String::new()
     };
     sender
         .send(AssistantMessageEvent::ToolCallDelta {
-            content_index: index,
-            delta: emitted_delta,
+            content_index: index as f64,
+            delta: emitted_delta.into(),
+            partial: Arc::new(output.clone()),
         })
         .map_err(CompletionError::display)
 }
@@ -1357,59 +1353,70 @@ fn finish_blocks(
     state: &mut StreamingState,
 ) -> Result<(), CompletionError> {
     for index in 0..output.content.len() {
-        match &mut output.content[index] {
-            AssistantContent::Text(block) => sender
+        if let AssistantContent::Text(block) = &output.content[index] {
+            sender
                 .send(AssistantMessageEvent::TextEnd {
-                    content_index: index,
+                    content_index: index as f64,
                     content: block.text.clone(),
-                    content_signature: block.text_signature.clone(),
+                    partial: Arc::new(output.clone()),
                 })
-                .map_err(CompletionError::display)?,
-            AssistantContent::Thinking(block) => sender
-                .send(AssistantMessageEvent::ThinkingEnd {
-                    content_index: index,
-                    content: block.thinking.clone(),
-                    content_signature: block.thinking_signature.clone(),
-                    redacted: block.redacted,
-                })
-                .map_err(CompletionError::display)?,
-            AssistantContent::ToolCall(call) => {
-                if let Some(scratch) = state.tool_scratch.get_mut(&index) {
-                    if let Some(custom) = scratch.custom_input.as_mut() {
-                        let current = call
-                            .arguments
-                            .get(&custom.property)
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_owned();
-                        if let Some(delta) = append_grammar_tool_input_json_delta(
-                            &mut custom.json_buffer,
-                            &custom.property,
-                            &current,
-                            true,
-                        )
-                        .map_err(CompletionError::display)?
-                        {
-                            sender
-                                .send(AssistantMessageEvent::ToolCallDelta {
-                                    content_index: index,
-                                    delta,
-                                })
-                                .map_err(CompletionError::display)?;
-                        }
-                    } else {
-                        call.arguments = parse_streaming_json(Some(&scratch.partial_args));
-                    }
-                }
-                sender
-                    .send(AssistantMessageEvent::ToolCallEnd {
-                        content_index: index,
-                        tool_call: call.clone(),
-                    })
-                    .map_err(CompletionError::display)?;
-            }
-            AssistantContent::Unknown(_) => {}
+                .map_err(CompletionError::display)?;
+            continue;
         }
+        if let AssistantContent::Thinking(block) = &output.content[index] {
+            sender
+                .send(AssistantMessageEvent::ThinkingEnd {
+                    content_index: index as f64,
+                    content: block.thinking.clone(),
+                    partial: Arc::new(output.clone()),
+                })
+                .map_err(CompletionError::display)?;
+            continue;
+        }
+        let (delta, tool_call) = {
+            let AssistantContent::ToolCall(call) = &mut output.content[index] else {
+                unreachable!("assistant content union is exhaustive")
+            };
+            let mut delta = None;
+            if let Some(scratch) = state.tool_scratch.get_mut(&index) {
+                if let Some(custom) = scratch.custom_input.as_mut() {
+                    let current = call
+                        .arguments
+                        .get(&custom.property)
+                        .and_then(JsonValue::as_str)
+                        .map(crate::utils::sanitize_unicode::sanitize_surrogates)
+                        .unwrap_or_default();
+                    delta = append_grammar_tool_input_json_delta(
+                        &mut custom.json_buffer,
+                        &custom.property,
+                        &current,
+                        true,
+                    )
+                    .map_err(CompletionError::display)?;
+                } else {
+                    call.arguments = crate::utils::json_parse::parse_streaming_json_object(Some(
+                        &scratch.partial_args,
+                    ));
+                }
+            }
+            (delta, call.clone())
+        };
+        if let Some(delta) = delta {
+            sender
+                .send(AssistantMessageEvent::ToolCallDelta {
+                    content_index: index as f64,
+                    delta: delta.into(),
+                    partial: Arc::new(output.clone()),
+                })
+                .map_err(CompletionError::display)?;
+        }
+        sender
+            .send(AssistantMessageEvent::ToolCallEnd {
+                content_index: index as f64,
+                tool_call,
+                partial: Arc::new(output.clone()),
+            })
+            .map_err(CompletionError::display)?;
     }
     Ok(())
 }
@@ -1417,39 +1424,36 @@ fn finish_blocks(
 fn parse_chunk_usage(raw: &RawUsage, model: &Model) -> Usage {
     let js_or_zero =
         |value: Option<UsageValue>| value.filter(UsageValue::is_truthy).unwrap_or_default();
-    let prompt_tokens = js_or_zero(raw.prompt_tokens.clone());
+    let prompt_tokens = js_or_zero(raw.prompt_tokens);
     let cache_read = raw
         .prompt_tokens_details
         .as_ref()
-        .and_then(|details| details.cached_tokens.clone())
-        .or_else(|| raw.prompt_cache_hit_tokens.clone())
-        .or_else(|| raw.cached_tokens.clone())
+        .and_then(|details| details.cached_tokens)
+        .or(raw.prompt_cache_hit_tokens)
+        .or(raw.cached_tokens)
         .unwrap_or_default();
     let cache_write = js_or_zero(
         raw.prompt_tokens_details
             .as_ref()
-            .and_then(|details| details.cache_write_tokens.clone()),
+            .and_then(|details| details.cache_write_tokens),
     );
     let input =
         (prompt_tokens.as_number() - cache_read.as_number() - cache_write.as_number()).max(0.0);
-    let output_tokens = js_or_zero(raw.completion_tokens.clone());
+    let output_tokens = js_or_zero(raw.completion_tokens);
     let reasoning = js_or_zero(
         raw.completion_tokens_details
             .as_ref()
-            .and_then(|details| details.reasoning_tokens.clone()),
+            .and_then(|details| details.reasoning_tokens),
     );
-    let input_value: UsageValue = input.into();
-    let total_tokens = input_value
-        .js_add(&output_tokens)
-        .js_add(&cache_read)
-        .js_add(&cache_write);
+    let total_tokens =
+        input + output_tokens.as_number() + cache_read.as_number() + cache_write.as_number();
     let mut usage = Usage {
-        input: input_value,
-        output: output_tokens,
-        cache_read,
-        cache_write,
+        input,
+        output: output_tokens.as_number(),
+        cache_read: cache_read.as_number(),
+        cache_write: cache_write.as_number(),
         cache_write_1h: None,
-        reasoning: Some(reasoning),
+        reasoning: Some(reasoning.as_number()),
         total_tokens,
         cost: Default::default(),
     };
@@ -1498,19 +1502,35 @@ fn is_open_ai_reasoning_detail(detail: &Value) -> bool {
     }
 }
 
-fn encrypted_reasoning_detail(detail: &Value) -> Option<(&str, String)> {
-    let detail = detail.as_object()?;
-    if detail.get("type")?.as_str()? != "reasoning.encrypted" {
+fn parse_open_ai_reasoning_details(
+    signature: Option<&crate::types::JsString>,
+) -> Option<Vec<Value>> {
+    let signature = signature?.try_as_str()?;
+    if signature.is_empty() {
         return None;
     }
-    let id = detail.get("id")?.as_str().filter(|id| !id.is_empty())?;
-    detail
-        .get("data")?
-        .as_str()
-        .filter(|data| !data.is_empty())?;
-    serde_json::to_string(detail)
-        .ok()
-        .map(|encoded| (id, encoded))
+    let parsed = serde_json::from_str::<Value>(signature).ok()?;
+    let details = parsed.as_array()?;
+    (!details.is_empty() && details.iter().all(is_open_ai_reasoning_detail))
+        .then(|| details.clone())
+}
+
+fn parse_legacy_encrypted_reasoning_detail(
+    signature: Option<&crate::types::JsString>,
+) -> Option<Value> {
+    let parsed = serde_json::from_str::<Value>(signature?.try_as_str()?).ok()?;
+    let detail = parsed.as_object()?;
+    (is_open_ai_reasoning_detail(&parsed)
+        && detail.get("type").and_then(Value::as_str) == Some("reasoning.encrypted")
+        && detail
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty())
+        && detail
+            .get("data")
+            .and_then(Value::as_str)
+            .is_some_and(|data| !data.is_empty()))
+    .then_some(parsed)
 }
 
 fn build_params(
@@ -1549,7 +1569,7 @@ fn build_params(
         tool_choice: options.tool_choice.clone(),
         dialect: Map::new(),
     };
-    if let Some(max_tokens) = options.stream.max_tokens.filter(|value| *value != 0) {
+    if let Some(max_tokens) = options.stream.max_tokens.filter(|value| *value != 0.0) {
         match compat.max_tokens_field {
             MaxTokensField::MaxTokens => request.max_tokens = Some(max_tokens),
             MaxTokensField::MaxCompletionTokens => {
@@ -1569,7 +1589,7 @@ fn build_params(
         .map(|tools| {
             tools
                 .iter()
-                .filter(|tool| !deferred_tool_names.contains(&tool.name))
+                .filter(|tool| !deferred_tool_names.iter().any(|name| name == &tool.name))
                 .cloned()
                 .collect::<Vec<_>>()
         })
@@ -1681,7 +1701,7 @@ fn resolve_clamped_thinking_budget(
         .unwrap_or(model.max_tokens);
     let budget = clamp_thinking_budget_to_answer_room(
         thinking_budget_for_level(effort, options.thinking_budgets.as_ref()),
-        ceiling as f64,
+        ceiling,
     );
     (budget > 0.0).then_some(budget)
 }
@@ -1958,7 +1978,7 @@ fn has_tool_history(messages: &[Message]) -> bool {
     })
 }
 
-fn get_deferred_tool_names(messages: &[Message]) -> Vec<String> {
+fn get_deferred_tool_names(messages: &[Message]) -> Vec<crate::types::JsString> {
     let mut names = Vec::new();
     for name in messages
         .iter()
@@ -1975,7 +1995,10 @@ fn get_deferred_tool_names(messages: &[Message]) -> Vec<String> {
     names
 }
 
-fn get_tools_by_name<'a>(tools: Option<&'a [Tool]>, names: &[String]) -> Vec<&'a Tool> {
+fn get_tools_by_name<'a>(
+    tools: Option<&'a [Tool]>,
+    names: &[crate::types::JsString],
+) -> Vec<&'a Tool> {
     let by_name = tools
         .unwrap_or_default()
         .iter()
@@ -2021,8 +2044,9 @@ fn convert_messages_wire(
     compat: &ResolvedCompat,
     grammar_tool_input_properties: &BTreeMap<String, String>,
 ) -> Result<Vec<WireMessage>, CompletionError> {
-    let normalizer =
-        |id: &str, target: &Model, _: &AssistantMessage| normalize_tool_call_id(id, target);
+    let normalizer = |id: &crate::types::JsString, target: &Model, _: &AssistantMessage| {
+        crate::types::JsString::from(normalize_tool_call_id(&id.to_utf8_lossy(), target))
+    };
     let transformed = transform_messages(&context.messages, model, Some(&normalizer));
     let mut params = Vec::new();
     if let Some(system_prompt) = &context.system_prompt {
@@ -2065,21 +2089,20 @@ fn convert_messages_wire(
                     crate::types::UserContent::Blocks(blocks) => {
                         let parts = blocks
                             .iter()
-                            .filter_map(|block| match block {
+                            .map(|block| match block {
                                 crate::types::UserContentBlock::Text(text) => {
-                                    Some(WireContentPart::Text {
+                                    WireContentPart::Text {
                                         text: sanitize_surrogates(&text.text),
                                         cache_control: None,
-                                    })
+                                    }
                                 }
                                 crate::types::UserContentBlock::Image(image) => {
-                                    Some(WireContentPart::ImageUrl {
+                                    WireContentPart::ImageUrl {
                                         image_url: WireImageUrl {
                                             url: data_url(image),
                                         },
-                                    })
+                                    }
                                 }
-                                crate::types::UserContentBlock::Unknown(_) => None,
                             })
                             .collect::<Vec<_>>();
                         if parts.is_empty() {
@@ -2097,7 +2120,7 @@ fn convert_messages_wire(
                     .content
                     .iter()
                     .filter_map(|block| match block {
-                        AssistantContent::Text(block) if !block.text.trim().is_empty() => {
+                        AssistantContent::Text(block) if !block.text.is_blank() => {
                             Some(WireContentPart::Text {
                                 text: sanitize_surrogates(&block.text),
                                 cache_control: None,
@@ -2113,15 +2136,34 @@ fn convert_messages_wire(
                         WireContentPart::ImageUrl { .. } => None,
                     })
                     .collect::<String>();
-                let thinking = message
+                let thinking_blocks = message
                     .content
                     .iter()
                     .filter_map(|block| match block {
-                        AssistantContent::Thinking(block) if !block.thinking.trim().is_empty() => {
-                            Some(block)
+                        AssistantContent::Thinking(block) => Some(block),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let signed_reasoning_details = thinking_blocks.iter().find_map(|block| {
+                    parse_open_ai_reasoning_details(block.thinking_signature.as_ref())
+                });
+                let legacy_reasoning_details = message
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        AssistantContent::ToolCall(call) => {
+                            parse_legacy_encrypted_reasoning_detail(call.thought_signature.as_ref())
                         }
                         _ => None,
                     })
+                    .collect::<Vec<_>>();
+                let preserved_reasoning_details = signed_reasoning_details.or_else(|| {
+                    (!legacy_reasoning_details.is_empty()).then_some(legacy_reasoning_details)
+                });
+                let thinking = thinking_blocks
+                    .iter()
+                    .copied()
+                    .filter(|block| !block.thinking.is_blank())
                     .collect::<Vec<_>>();
                 let mut content = if compat.requires_assistant_after_tool_result {
                     Some(WireContent::String(String::new()))
@@ -2148,34 +2190,33 @@ fn convert_messages_wire(
                         if !assistant_text.is_empty() {
                             content = Some(WireContent::String(assistant_text));
                         }
-                        let mut signature = thinking[0].thinking_signature.as_deref();
-                        if model.provider.as_str() == "opencode-go"
-                            && signature == Some("reasoning")
-                        {
-                            signature = Some("reasoning_content");
-                        }
-                        let joined = thinking
-                            .iter()
-                            .map(|block| block.thinking.as_str())
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        match signature {
-                            Some("reasoning") => reasoning = Some(joined),
-                            Some("reasoning_content") => reasoning_content = Some(joined),
-                            Some("reasoning_text") => reasoning_text = Some(joined),
-                            _ => {}
+                        if preserved_reasoning_details.is_none() {
+                            let mut signature = thinking[0]
+                                .thinking_signature
+                                .as_ref()
+                                .and_then(crate::types::JsString::try_as_str);
+                            if model.provider.as_str() == "opencode-go"
+                                && signature == Some("reasoning")
+                            {
+                                signature = Some("reasoning_content");
+                            }
+                            let joined = crate::types::JsString::join_refs(
+                                thinking.iter().map(|block| &block.thinking),
+                                "\n",
+                            );
+                            let joined = sanitize_surrogates(&joined);
+                            match signature {
+                                Some("reasoning") => reasoning = Some(joined),
+                                Some("reasoning_content") => reasoning_content = Some(joined),
+                                Some("reasoning_text") => reasoning_text = Some(joined),
+                                _ => {}
+                            }
                         }
                     }
                 } else if !assistant_text.is_empty() {
                     content = Some(WireContent::String(assistant_text));
                 }
 
-                let same_model_reasoning_details = (message.provider == model.provider
-                    && message.api == model.api
-                    && message.model == model.id)
-                    .then(|| message.reasoning_details.clone())
-                    .flatten()
-                    .filter(|details| !details.is_empty());
                 let tool_calls = message
                     .content
                     .iter()
@@ -2184,12 +2225,14 @@ fn convert_messages_wire(
                         _ => None,
                     })
                     .map(|call| {
-                        if let Some(property) = grammar_tool_input_properties.get(&call.name) {
+                        if let Some(property) =
+                            grammar_tool_input_properties.get(call.name.as_str())
+                        {
                             Ok(WireAssistantToolCall::Custom(WireAssistantCustomCall {
-                                id: call.id.clone(),
+                                id: call.id.to_utf8_lossy(),
                                 kind: WireCustomTag::Custom,
                                 custom: WireCustomCall {
-                                    name: call.name.clone(),
+                                    name: call.name.to_utf8_lossy(),
                                     input: sanitize_surrogates(
                                         &get_grammar_tool_input(
                                             &call.name,
@@ -2202,35 +2245,18 @@ fn convert_messages_wire(
                             }))
                         } else {
                             Ok(WireAssistantToolCall::Function(WireAssistantFunctionCall {
-                                id: call.id.clone(),
+                                id: call.id.to_utf8_lossy(),
                                 kind: WireFunctionTag::Function,
                                 function: WireFunctionCall {
-                                    name: call.name.clone(),
-                                    arguments: serde_json::to_string(&call.arguments)
-                                        .map_err(CompletionError::display)?,
+                                    name: call.name.to_utf8_lossy(),
+                                    arguments: stringify_object(&call.arguments),
                                 },
                             }))
                         }
                     })
                     .collect::<Result<Vec<_>, CompletionError>>()?;
                 let tool_calls = (!tool_calls.is_empty()).then_some(tool_calls);
-                let reasoning_details = same_model_reasoning_details.or_else(|| {
-                    tool_calls.as_ref().and_then(|_| {
-                        let details = message
-                            .content
-                            .iter()
-                            .filter_map(|block| match block {
-                                AssistantContent::ToolCall(call) => {
-                                    call.thought_signature.as_deref()
-                                }
-                                _ => None,
-                            })
-                            .filter_map(|signature| serde_json::from_str::<Value>(signature).ok())
-                            .filter(is_open_ai_reasoning_detail)
-                            .collect::<Vec<_>>();
-                        (!details.is_empty()).then_some(details)
-                    })
-                });
+                let reasoning_details = preserved_reasoning_details;
                 if compat.requires_reasoning_content_on_assistant_messages
                     && model.reasoning
                     && reasoning_content.is_none()
@@ -2325,18 +2351,16 @@ fn append_tool_result_message(
     model: &Model,
     compat: &ResolvedCompat,
     image_parts: &mut Vec<WireContentPart>,
-    deferred_tool_names: &mut Vec<String>,
+    deferred_tool_names: &mut Vec<crate::types::JsString>,
 ) {
-    let text = tool_result
-        .content
-        .iter()
-        .filter_map(|block| match block {
-            crate::types::UserContentBlock::Text(block) => Some(block.text.as_str()),
-            crate::types::UserContentBlock::Image(_)
-            | crate::types::UserContentBlock::Unknown(_) => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let text = crate::types::JsString::join_refs(
+        tool_result.content.iter().filter_map(|block| match block {
+            crate::types::UserContentBlock::Text(block) => Some(&block.text),
+            crate::types::UserContentBlock::Image(_) => None,
+        }),
+        "\n",
+    );
+    let text = sanitize_surrogates(&text);
     let has_images = tool_result
         .content
         .iter()
@@ -2350,13 +2374,13 @@ fn append_tool_result_message(
     };
     params.push(WireMessage::Tool {
         content: WireContent::String(sanitize_surrogates(&content)),
-        tool_call_id: tool_result.tool_call_id.clone(),
+        tool_call_id: tool_result.tool_call_id.to_utf8_lossy(),
         name: (compat.requires_tool_result_name && !tool_result.tool_name.is_empty())
-            .then(|| tool_result.tool_name.clone()),
+            .then(|| tool_result.tool_name.to_utf8_lossy()),
     });
     if compat.deferred_tools_mode == Some(DeferredToolsMode::Kimi) {
         for name in tool_result.added_tool_names.iter().flatten() {
-            if !deferred_tool_names.contains(name) {
+            if !deferred_tool_names.iter().any(|existing| existing == name) {
                 deferred_tool_names.push(name.clone());
             }
         }
@@ -2369,7 +2393,6 @@ fn append_tool_result_message(
                 },
             }),
             crate::types::UserContentBlock::Text(_) => None,
-            crate::types::UserContentBlock::Unknown(_) => None,
         }));
     }
 }
@@ -2983,8 +3006,8 @@ mod tests {
                 rates: ModelCostRates::default(),
                 tiers: None,
             },
-            context_window: 128_000,
-            max_tokens: 4_096,
+            context_window: 128_000.0,
+            max_tokens: 4_096.0,
             sampling_params: None,
             headers: None,
             compat: None,
@@ -2993,11 +3016,11 @@ mod tests {
 
     fn context() -> Context {
         Context {
-            system_prompt: Some("System prompt".to_owned()),
+            system_prompt: Some(("System prompt".to_owned()).into()),
             messages: vec![Message::User(Box::new(UserMessage {
                 role: UserRole::User,
-                content: UserContent::Text("hello".to_owned()),
-                timestamp: 1,
+                content: UserContent::Text(("hello".to_owned()).into()),
+                timestamp: 1.0,
             }))],
             tools: None,
         }
@@ -3275,7 +3298,7 @@ mod tests {
         test_model.provider = "cloudflare-ai-gateway".into();
         test_model.reasoning = true;
         let mut request_options = options();
-        request_options.stream.max_tokens = Some(1_234);
+        request_options.stream.max_tokens = Some(1_234.0);
         request_options.reasoning_effort = Some(ThinkingLevel::High);
         let body = payload(&test_model, &context(), &request_options);
         assert_eq!(body["max_tokens"], 1_234);
@@ -3389,28 +3412,23 @@ mod tests {
             constrained_sampling: None,
         };
         let mut assistant =
-            AssistantMessage::pending("openai-completions", "moonshotai", "test-model", 2);
+            AssistantMessage::pending("openai-completions", "moonshotai", "test-model", 2.0);
         assistant.stop_reason = StopReason::ToolUse;
         assistant.content = vec![AssistantContent::ToolCall(ToolCall::new(
             "call-1",
             "bootstrap",
             Map::new(),
-        ))]
-        .into();
+        ))];
         let tool_result = Message::ToolResult(Box::new(ToolResultMessage {
             role: ToolResultRole::ToolResult,
-            tool_call_id: "call-1".to_owned(),
-            tool_name: "bootstrap".to_owned(),
+            tool_call_id: "call-1".into(),
+            tool_name: "bootstrap".into(),
             content: vec![crate::types::UserContentBlock::Text(TextContent::new("ok"))],
             details: None,
             usage: None,
-            added_tool_names: Some(vec![
-                "zeta".to_owned(),
-                "alpha".to_owned(),
-                "zeta".to_owned(),
-            ]),
+            added_tool_names: Some(vec!["zeta".into(), "alpha".into(), "zeta".into()]),
             is_error: false,
-            timestamp: 3,
+            timestamp: 3.0,
         }));
         let test_context = Context {
             system_prompt: None,
@@ -3438,7 +3456,7 @@ mod tests {
     }
 
     /// Pins pi `src/api/openai-completions.ts:539-566,1491-1509`: wrong-typed
-    /// content is ignored while truthy usage values retain JavaScript semantics.
+    /// content is ignored and malformed provider counters normalize at the adapter.
     #[test]
     fn raw_chunk_tolerance_matches_pi_source() {
         let chunk: RawChunk = serde_json::from_value(json!({
@@ -3456,12 +3474,12 @@ mod tests {
         .unwrap();
         let usage = chunk.usage.expect("usage object");
         assert_eq!(
-            serde_json::to_value(&usage.prompt_tokens).unwrap(),
+            serde_json::to_value(usage.prompt_tokens).unwrap(),
             json!(1.5)
         );
         assert_eq!(
-            serde_json::to_value(&usage.completion_tokens).unwrap(),
-            json!("2")
+            serde_json::to_value(usage.completion_tokens).unwrap(),
+            json!(0.0)
         );
         assert!(usage.prompt_tokens_details.is_none());
         let choice = chunk.choices.first().expect("choice");
@@ -3470,19 +3488,19 @@ mod tests {
         assert_eq!(delta.reasoning, None);
         let usage = choice.usage.as_ref().expect("choice usage");
         assert_eq!(
-            serde_json::to_value(&usage.prompt_tokens).unwrap(),
+            serde_json::to_value(usage.prompt_tokens).unwrap(),
             json!(1.5)
         );
         assert_eq!(
-            serde_json::to_value(&usage.completion_tokens).unwrap(),
-            json!("2")
+            serde_json::to_value(usage.completion_tokens).unwrap(),
+            json!(0.0)
         );
         let parsed = parse_chunk_usage(usage, &model("https://example.invalid/v1".to_owned()));
         let parsed = serde_json::to_value(parsed).expect("usage wire");
         assert_eq!(parsed["input"], 1.5);
-        assert_eq!(parsed["output"], "2");
+        assert_eq!(parsed["output"], 0);
         assert_eq!(parsed["reasoning"], 0);
-        assert_eq!(parsed["totalTokens"], "1.5200");
+        assert_eq!(parsed["totalTokens"], 1.5);
 
         let chunk: RawChunk = serde_json::from_value(json!({"choices":null,"usage":null})).unwrap();
         assert!(chunk.choices.is_empty());
@@ -3497,7 +3515,7 @@ mod tests {
     fn thinking_token_budget_payload_matrix_matches_pi() {
         let mut test_model = model("https://example.invalid/v1".to_owned());
         test_model.reasoning = true;
-        test_model.max_tokens = 16_384;
+        test_model.max_tokens = 16_384.0;
         let mut request_options = options();
         request_options.reasoning_effort = Some(ThinkingLevel::Medium);
         request_options.thinking_budgets = Some(ThinkingBudgets {
@@ -3542,12 +3560,12 @@ mod tests {
         }
 
         request_options.reasoning_effort = Some(ThinkingLevel::High);
-        request_options.stream.max_tokens = Some(8_192);
+        request_options.stream.max_tokens = Some(8_192.0);
         assert_eq!(
             payload(&test_model, &context(), &request_options)["thinking_token_budget"],
             7_168
         );
-        request_options.stream.max_tokens = Some(4_096);
+        request_options.stream.max_tokens = Some(4_096.0);
         assert_eq!(
             payload(&test_model, &context(), &request_options)["thinking_token_budget"],
             3_072
@@ -3611,12 +3629,17 @@ mod tests {
         let encrypted = json!({"type":"reasoning.encrypted","id":"call-1","data":"cipher"});
         let signed = json!({"type":"reasoning.text","text":"think","signature":"sig"});
         let mut assistant =
-            AssistantMessage::pending("openai-completions", "openrouter", "test-model", 2);
+            AssistantMessage::pending("openai-completions", "openrouter", "test-model", 2.0);
         assistant.stop_reason = StopReason::ToolUse;
-        assistant.reasoning_details = Some(vec![signed.clone()]);
+        let mut thinking = ThinkingContent::new("");
+        thinking.thinking_signature =
+            Some(serde_json::to_string(&vec![signed.clone()]).unwrap().into());
         let mut call = ToolCall::new("call-1", "read", Map::new());
-        call.thought_signature = Some(serde_json::to_string(&encrypted).unwrap());
-        assistant.content = vec![AssistantContent::ToolCall(call)].into();
+        call.thought_signature = Some(serde_json::to_string(&encrypted).unwrap().into());
+        assistant.content = vec![
+            AssistantContent::Thinking(thinking),
+            AssistantContent::ToolCall(call),
+        ];
         let replay_context = Context {
             system_prompt: None,
             messages: vec![Message::Assistant(Box::new(assistant.clone()))],
@@ -3625,7 +3648,9 @@ mod tests {
         let messages = convert_messages(&test_model, &replay_context).unwrap();
         assert_eq!(messages[0]["reasoning_details"], json!([signed]));
 
-        assistant.reasoning_details = None;
+        assistant
+            .content
+            .retain(|block| matches!(block, AssistantContent::ToolCall(_)));
         let replay_context = Context {
             system_prompt: None,
             messages: vec![Message::Assistant(Box::new(assistant))],
@@ -3639,10 +3664,9 @@ mod tests {
             ..OpenAICompletionsCompat::default()
         });
         let mut thinking_only =
-            AssistantMessage::pending("openai-completions", "openrouter", "test-model", 3);
+            AssistantMessage::pending("openai-completions", "openrouter", "test-model", 3.0);
         thinking_only.stop_reason = StopReason::Stop;
-        thinking_only.content =
-            vec![AssistantContent::Thinking(ThinkingContent::new("private"))].into();
+        thinking_only.content = vec![AssistantContent::Thinking(ThinkingContent::new("private"))];
         let messages = convert_messages(
             &test_model,
             &Context {
@@ -3686,14 +3710,13 @@ mod tests {
             ..OpenAICompletionsCompat::default()
         });
         let mut assistant =
-            AssistantMessage::pending("openai-completions", "opencode-go", "kimi-k2.6", 2);
+            AssistantMessage::pending("openai-completions", "opencode-go", "kimi-k2.6", 2.0);
         assistant.stop_reason = StopReason::ToolUse;
         assistant.content = vec![AssistantContent::ToolCall(ToolCall::new(
             "call-1",
             "read",
             Map::new(),
-        ))]
-        .into();
+        ))];
         let messages = convert_messages(
             &test_model,
             &Context {
@@ -3706,7 +3729,7 @@ mod tests {
         assert_eq!(messages[0]["reasoning_content"], "");
 
         let mut thinking = ThinkingContent::new("private");
-        thinking.thinking_signature = Some("reasoning".to_owned());
+        thinking.thinking_signature = Some("reasoning".into());
         assistant
             .content
             .insert(0, AssistantContent::Thinking(thinking));
@@ -3787,12 +3810,12 @@ mod tests {
             },
             &test_model,
         );
-        assert_eq!(usage.input, 85);
-        assert_eq!(usage.output, 30);
-        assert_eq!(usage.cache_read, 10);
-        assert_eq!(usage.cache_write, 5);
+        assert_eq!(usage.input, 85.0);
+        assert_eq!(usage.output, 30.0);
+        assert_eq!(usage.cache_read, 10.0);
+        assert_eq!(usage.cache_write, 5.0);
         assert_eq!(usage.reasoning, Some(12.into()));
-        assert_eq!(usage.total_tokens, 130);
+        assert_eq!(usage.total_tokens, 130.0);
     }
 
     /// Pins provider/base-URL compatibility detection cases exercised by
@@ -3861,7 +3884,7 @@ mod tests {
             );
             assert_eq!(compat.supports_store, supports_store, "{provider}");
             let mut request_options = options();
-            request_options.stream.max_tokens = Some(1_234);
+            request_options.stream.max_tokens = Some(1_234.0);
             let body = payload(&test_model, &context(), &request_options);
             match max_field {
                 MaxTokensField::MaxTokens => {
@@ -3989,7 +4012,7 @@ mod tests {
         let test_model = model(server.base_url.clone());
         let mut simple = SimpleStreamOptions::default();
         simple.stream.request.api_key = Some("test-key".to_owned());
-        simple.stream.max_tokens = Some(1_234);
+        simple.stream.max_tokens = Some(1_234.0);
         let mut event_stream = stream_simple(&test_model, &context(), simple);
         while event_stream.next().await.is_some() {}
         assert_eq!(
@@ -3999,14 +4022,14 @@ mod tests {
 
         let server = start_server(vec![Script::sse(vec![stop_chunk("test-model")])], false).await;
         let mut constrained_model = model(server.base_url.clone());
-        constrained_model.context_window = 10_000;
-        constrained_model.max_tokens = 8_000;
+        constrained_model.context_window = 10_000.0;
+        constrained_model.max_tokens = 8_000.0;
         let long_context = Context {
             system_prompt: None,
             messages: vec![Message::User(Box::new(UserMessage {
                 role: UserRole::User,
-                content: UserContent::Text("x".repeat(8_000)),
-                timestamp: 1,
+                content: UserContent::Text(("x".repeat(8_000)).into()),
+                timestamp: 1.0,
             }))],
             tools: None,
         };
@@ -4023,7 +4046,7 @@ mod tests {
         constrained_model.base_url.clone_from(&server.base_url);
         let mut simple = SimpleStreamOptions::default();
         simple.stream.request.api_key = Some("test-key".to_owned());
-        simple.stream.max_tokens = Some(7_000);
+        simple.stream.max_tokens = Some(7_000.0);
         let mut event_stream = stream_simple(&constrained_model, &long_context, simple);
         while event_stream.next().await.is_some() {}
         assert_eq!(
@@ -4033,14 +4056,13 @@ mod tests {
 
         let server = start_server(vec![Script::sse(vec![stop_chunk("test-model")])], false).await;
         let mut assistant =
-            AssistantMessage::pending("openai-completions", "openai", "test-model", 2);
+            AssistantMessage::pending("openai-completions", "openai", "test-model", 2.0);
         assistant.stop_reason = StopReason::ToolUse;
         assistant.content = vec![AssistantContent::ToolCall(ToolCall::new(
             "t1",
             "noop",
             Map::new(),
-        ))]
-        .into();
+        ))];
         let tool_history = Context {
             system_prompt: None,
             messages: vec![
@@ -4246,24 +4268,23 @@ mod tests {
             "openai-completions",
             "openrouter",
             "anthropic/claude-sonnet-4",
-            2,
+            2.0,
         );
         assistant.stop_reason = StopReason::ToolUse;
         assistant.content = vec![AssistantContent::ToolCall(ToolCall::new(
             "call_1",
             "read",
             Map::from_iter([("path".to_owned(), Value::String("README.md".to_owned()))]),
-        ))]
-        .into();
+        ))];
         let tool_context = Context {
-            system_prompt: Some("System prompt".to_owned()),
+            system_prompt: Some(("System prompt".to_owned()).into()),
             messages: vec![
                 context().messages[0].clone(),
                 Message::Assistant(Box::new(assistant)),
                 Message::ToolResult(Box::new(ToolResultMessage {
                     role: ToolResultRole::ToolResult,
-                    tool_call_id: "call_1".to_owned(),
-                    tool_name: "read".to_owned(),
+                    tool_call_id: "call_1".into(),
+                    tool_name: "read".into(),
                     content: vec![crate::types::UserContentBlock::Text(TextContent::new(
                         "file contents",
                     ))],
@@ -4271,7 +4292,7 @@ mod tests {
                     usage: None,
                     added_tool_names: None,
                     is_error: false,
-                    timestamp: 3,
+                    timestamp: 3.0,
                 })),
             ],
             tools: test_context.tools.clone(),
@@ -4379,7 +4400,7 @@ mod tests {
         let message = event_stream.result().await.unwrap();
 
         assert_eq!(events.len(), 2);
-        assert!(matches!(events[0], AssistantMessageEvent::Start));
+        assert!(matches!(events[0], AssistantMessageEvent::Start { .. }));
         assert!(matches!(events[1], AssistantMessageEvent::Error { .. }));
         assert_eq!(message.stop_reason, StopReason::Error);
         assert_eq!(
@@ -4409,7 +4430,7 @@ mod tests {
         let message = event_stream.result().await.unwrap();
 
         assert_eq!(events.len(), 2);
-        assert!(matches!(events[0], AssistantMessageEvent::Start));
+        assert!(matches!(events[0], AssistantMessageEvent::Start { .. }));
         assert!(matches!(events[1], AssistantMessageEvent::Error { .. }));
         assert_eq!(message.stop_reason, StopReason::Error);
         assert_eq!(
@@ -4535,18 +4556,22 @@ mod tests {
             constrained_sampling: None,
         }]);
         let (message, _) = run_and_capture(test_model, test_context, options(), &server).await;
+        let AssistantContent::Thinking(thinking) = &message.content[0] else {
+            panic!("expected thinking block");
+        };
+        assert_eq!(thinking.thinking, "");
         assert_eq!(
-            message.reasoning_details,
-            Some(vec![signed, encrypted.clone(), summary])
+            parse_open_ai_reasoning_details(thinking.thinking_signature.as_ref()),
+            Some(vec![signed, encrypted, summary])
         );
-        let AssistantContent::ToolCall(call) = &message.content[0] else {
+        let AssistantContent::ToolCall(call) = &message.content[1] else {
             panic!("expected tool call");
         };
+        assert_eq!(call.thought_signature, None);
         assert_eq!(
-            call.thought_signature.as_deref(),
-            Some(serde_json::to_string(&encrypted).unwrap().as_str())
+            call.arguments,
+            JsonObject::try_from(json!({"path":"README.md"})).expect("object arguments")
         );
-        assert_eq!(call.arguments, json!({"path":"README.md"}));
     }
 
     /// Ports thinking-as-text.test.ts conversion and real SSE endpoint cases.
@@ -4560,13 +4585,12 @@ mod tests {
             ..OpenAICompletionsCompat::default()
         });
         let mut assistant =
-            AssistantMessage::pending("openai-completions", "openai", "test-model", 2);
+            AssistantMessage::pending("openai-completions", "openai", "test-model", 2.0);
         assistant.stop_reason = StopReason::Stop;
         assistant.content = vec![
             AssistantContent::Thinking(ThinkingContent::new("internal reasoning")),
             AssistantContent::Text(TextContent::new("visible answer")),
-        ]
-        .into();
+        ];
         let test_context = Context {
             system_prompt: None,
             messages: vec![
@@ -4574,8 +4598,8 @@ mod tests {
                 Message::Assistant(Box::new(assistant)),
                 Message::User(Box::new(UserMessage {
                     role: UserRole::User,
-                    content: UserContent::Text("continue".to_owned()),
-                    timestamp: 3,
+                    content: UserContent::Text(("continue".to_owned()).into()),
+                    timestamp: 3.0,
                 })),
             ],
             tools: None,
@@ -4600,7 +4624,7 @@ mod tests {
         let server = start_server(vec![Script::sse(vec![stop_chunk("test-model")])], false).await;
         let mut test_model = model(server.base_url.clone());
         test_model.reasoning = true;
-        test_model.max_tokens = 16_384;
+        test_model.max_tokens = 16_384.0;
         test_model.provider = "local-vllm".into();
         test_model.compat = completions_compat(OpenAICompletionsCompat {
             thinking_format: Some(ThinkingFormat::Zai),
@@ -4632,7 +4656,7 @@ mod tests {
         let mut simple = SimpleStreamOptions::default();
         simple.stream.request.api_key = Some("test".to_owned());
         simple.reasoning = Some(ThinkingLevel::High);
-        simple.stream.max_tokens = Some(4_096);
+        simple.stream.max_tokens = Some(4_096.0);
         let mut event_stream = stream_simple(&test_model, &context(), simple);
         while event_stream.next().await.is_some() {}
         let body = server.captured.lock().unwrap()[0].body.clone();
@@ -4677,13 +4701,12 @@ mod tests {
         let mut test_model = model("http://127.0.0.1:1".to_owned());
         test_model.input.push(ModelInput::Image);
         let mut assistant =
-            AssistantMessage::pending("openai-completions", "openai", "test-model", 2);
+            AssistantMessage::pending("openai-completions", "openai", "test-model", 2.0);
         assistant.stop_reason = StopReason::ToolUse;
         assistant.content = vec![
             AssistantContent::ToolCall(ToolCall::new("tool-1", "read", Map::new())),
             AssistantContent::ToolCall(ToolCall::new("tool-2", "read", Map::new())),
-        ]
-        .into();
+        ];
         let tool_result = |id: &str, image: bool| {
             let mut content = vec![crate::types::UserContentBlock::Text(TextContent::new(
                 if image { "read image" } else { "" },
@@ -4696,14 +4719,14 @@ mod tests {
             }
             Message::ToolResult(Box::new(ToolResultMessage {
                 role: ToolResultRole::ToolResult,
-                tool_call_id: id.to_owned(),
-                tool_name: "read".to_owned(),
+                tool_call_id: id.into(),
+                tool_name: "read".into(),
                 content,
                 details: None,
                 usage: None,
                 added_tool_names: None,
                 is_error: false,
-                timestamp: 3,
+                timestamp: 3.0,
             }))
         };
         let test_context = Context {
@@ -4769,12 +4792,12 @@ mod tests {
         let mut test_model = model(server.base_url.clone());
         test_model.reasoning = true;
         let (message, _) = run_and_capture(test_model, context(), options(), &server).await;
-        assert_eq!(message.usage.input, 70);
-        assert_eq!(message.usage.output, 30);
-        assert_eq!(message.usage.cache_read, 20);
-        assert_eq!(message.usage.cache_write, 10);
+        assert_eq!(message.usage.input, 70.0);
+        assert_eq!(message.usage.output, 30.0);
+        assert_eq!(message.usage.cache_read, 20.0);
+        assert_eq!(message.usage.cache_write, 10.0);
         assert_eq!(message.usage.reasoning, Some(12.into()));
-        assert_eq!(message.usage.total_tokens, 130);
+        assert_eq!(message.usage.total_tokens, 130.0);
 
         let server = start_server(
             vec![Script::sse(vec![json!({
@@ -4790,9 +4813,9 @@ mod tests {
         let mut test_model = model(server.base_url.clone());
         test_model.provider = "moonshotai".into();
         let (message, _) = run_and_capture(test_model, context(), options(), &server).await;
-        assert_eq!(message.usage.input, 6);
-        assert_eq!(message.usage.cache_read, 4);
-        assert_eq!(message.usage.total_tokens, 12);
+        assert_eq!(message.usage.input, 6.0);
+        assert_eq!(message.usage.cache_read, 4.0);
+        assert_eq!(message.usage.total_tokens, 12.0);
     }
 
     /// Ports tool-choice.test.ts payload compatibility families using inline
@@ -4876,29 +4899,31 @@ mod tests {
         let message = event_stream.result().await.unwrap();
 
         assert_eq!(events.len(), 5);
-        assert!(matches!(events[0], AssistantMessageEvent::Start));
+        assert!(matches!(events[0], AssistantMessageEvent::Start { .. }));
         assert!(matches!(
             &events[1],
             AssistantMessageEvent::ToolCallStart {
-                content_index: 0,
-                id,
-                tool_name,
-                ..
-            } if id == "call_1" && tool_name == "read"
+                content_index: 0.0,
+                partial,
+            } if matches!(partial.content.first(), Some(AssistantContent::ToolCall(call)) if call.id == "call_1" && call.name == "read")
         ));
         assert!(matches!(
             &events[2],
             AssistantMessageEvent::ToolCallDelta {
-                content_index: 0,
+                content_index: 0.0,
                 delta,
+                ..
             } if delta == "{\"path\":\"README.md\"}"
         ));
         assert!(matches!(
             &events[3],
             AssistantMessageEvent::ToolCallEnd {
-                content_index: 0,
+                content_index: 0.0,
                 tool_call,
-            } if tool_call.arguments == json!({"path":"README.md"})
+                ..
+            } if tool_call.arguments
+                == JsonObject::try_from(json!({"path":"README.md"}))
+                    .expect("object arguments")
         ));
         assert!(matches!(
             events[4],
@@ -4953,22 +4978,25 @@ mod tests {
         let AssistantContent::ToolCall(call) = &message.content[0] else {
             panic!("tool call");
         };
-        assert_eq!(call.arguments, json!({"input":"abc"}));
+        assert_eq!(
+            call.arguments,
+            JsonObject::try_from(json!({"input":"abc"})).expect("object arguments")
+        );
     }
 
     /// Pins pi `src/api/openai-completions.ts:423-431` start-time thinking signature state.
     #[tokio::test]
     async fn thinking_start_carries_the_signature_already_present_in_pi_partial() {
         let (sender, mut events) = AssistantMessageEventStream::channel();
-        let mut output = AssistantMessage::pending("openai-completions", "openai", "model", 1);
+        let mut output = AssistantMessage::pending("openai-completions", "openai", "model", 1.0);
         let mut state = StreamingState::default();
         ensure_thinking_block(&sender, &mut output, &mut state, "reasoning_content").unwrap();
         assert!(matches!(
             events.next().await,
             Some(AssistantMessageEvent::ThinkingStart {
-                thinking_signature: Some(signature),
+                partial,
                 ..
-            }) if signature == "reasoning_content"
+            }) if matches!(partial.content.last(), Some(AssistantContent::Thinking(thinking)) if thinking.thinking_signature.as_deref() == Some("reasoning_content"))
         ));
     }
 
@@ -5015,8 +5043,14 @@ mod tests {
         assert_eq!(thinking.thinking, "think more");
         assert_eq!(text.text, "answer done");
         assert_eq!(first.id, "old-id");
-        assert_eq!(first.arguments, json!({"a":1}));
-        assert_eq!(second.arguments, json!({"b":2}));
+        assert_eq!(
+            first.arguments,
+            JsonObject::try_from(json!({"a":1})).expect("object arguments")
+        );
+        assert_eq!(
+            second.arguments,
+            JsonObject::try_from(json!({"b":2})).expect("object arguments")
+        );
     }
 
     /// Pins pi `src/api/openai-completions.ts:291-318,664-683` and
@@ -5090,7 +5124,7 @@ mod tests {
         let mut kinds = Vec::new();
         while let Some(event) = events.next().await {
             let kind = match event {
-                AssistantMessageEvent::Start => "start",
+                AssistantMessageEvent::Start { .. } => "start",
                 AssistantMessageEvent::TextStart { .. } => "text_start",
                 AssistantMessageEvent::TextDelta { .. } => "text_delta",
                 AssistantMessageEvent::ThinkingStart { .. } => "thinking_start",
@@ -5227,13 +5261,12 @@ mod tests {
     fn assistant_tool_call_without_text_serializes_explicit_null_content() {
         let test_model = model("https://example.invalid/v1".to_owned());
         let mut assistant =
-            AssistantMessage::pending("openai-completions", "openai", "test-model", 2);
+            AssistantMessage::pending("openai-completions", "openai", "test-model", 2.0);
         assistant.content = vec![AssistantContent::ToolCall(ToolCall::new(
             "call-1",
             "read",
             Map::new(),
-        ))]
-        .into();
+        ))];
         assistant.stop_reason = StopReason::ToolUse;
         let test_context = Context {
             system_prompt: None,
@@ -5332,7 +5365,7 @@ mod tests {
         assert_eq!(message.stop_reason, StopReason::Stop);
         let response = observed.lock().unwrap();
         let response = response.as_ref().unwrap();
-        assert_eq!(response.status, 201);
+        assert_eq!(response.status, 201.0);
         assert_eq!(
             response.headers.get("x-provider-response"),
             Some(&"real".to_owned())

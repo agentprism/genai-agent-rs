@@ -119,7 +119,7 @@ pub fn stream(
             } else {
                 StopReason::Error
             };
-            output.error_message = Some(error);
+            output.error_message = Some(error.into());
             let _ = sender.send(AssistantMessageEvent::Error {
                 reason: if output.stop_reason == StopReason::Aborted {
                     ErrorStopReason::Aborted
@@ -266,7 +266,7 @@ fn build_params(
     model: &Model,
     context: &Context,
     options: &GoogleVertexOptions,
-) -> Result<Value, String> {
+) -> Result<crate::types::JsonValue, String> {
     let google = crate::api::google_generative_ai::GoogleOptions {
         stream: options.stream.clone(),
         tool_choice: options.tool_choice,
@@ -281,7 +281,14 @@ fn build_params(
         && !is_gemini_3_pro_model(model)
         && !is_gemini_3_flash_model(model)
     {
-        params["config"]["thinkingConfig"] = json!({ "thinkingBudget": 0 });
+        params
+            .get_mut("config")
+            .and_then(crate::types::JsonValue::as_object_mut)
+            .expect("Google params always contain config")
+            .insert(
+                "thinkingConfig",
+                crate::types::JsonValue::from(json!({ "thinkingBudget": 0 })),
+            );
     }
     Ok(params)
 }
@@ -498,19 +505,18 @@ fn setup_error_stream(model: &Model, message: String) -> AssistantMessageEventSt
         now_millis(),
     );
     output.stop_reason = StopReason::Error;
-    output.error_message = Some(message);
+    output.error_message = Some(message.into());
     AssistantMessageEventStream::from_events(vec![AssistantMessageEvent::Error {
         reason: ErrorStopReason::Error,
         error: output,
     }])
 }
 
-fn now_millis() -> i64 {
+fn now_millis() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
-        .unwrap_or(0)
+        .unwrap_or_default()
+        .as_millis() as f64
 }
 
 #[cfg(test)]

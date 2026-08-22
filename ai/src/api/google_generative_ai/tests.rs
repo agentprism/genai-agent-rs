@@ -1,7 +1,8 @@
 use super::*;
 use crate::types::{
-    Api, Context, FetchFunction, ModelCost, ModelInput, ProviderHttpRequest, ProviderHttpResponse,
-    ProviderId, UserContent, UserMessage, UserRole,
+    Api, AssistantContent, AssistantMessage, Context, FetchFunction, JsString, JsonObject,
+    JsonValue, Message, ModelCost, ModelInput, ProviderHttpRequest, ProviderHttpResponse,
+    ProviderId, StopReason, ToolCall, UserContent, UserMessage, UserRole,
 };
 use futures::StreamExt;
 use reqwest_012::header::{HeaderMap, USER_AGENT};
@@ -20,8 +21,8 @@ fn model(id: &str) -> Model {
         thinking_level_map: None,
         input: vec![ModelInput::Text],
         cost: ModelCost::default(),
-        context_window: 128_000,
-        max_tokens: 4_096,
+        context_window: 128_000.0,
+        max_tokens: 4_096.0,
         sampling_params: None,
         headers: None,
         compat: None,
@@ -33,11 +34,48 @@ fn context() -> Context {
         system_prompt: None,
         messages: vec![crate::types::Message::User(Box::new(UserMessage {
             role: UserRole::User,
-            content: UserContent::Text("Hello".to_owned()),
-            timestamp: 0,
+            content: UserContent::Text(("Hello".to_owned()).into()),
+            timestamp: 0.0,
         }))],
         tools: None,
     }
+}
+
+/// Pins pi `src/api/google-shared.ts:203-214` at the request-body boundary:
+/// tool argument maps are replayed intact and JSON uses ECMAScript key order.
+#[test]
+fn request_wire_replays_lossless_ordered_tool_arguments() {
+    let target = model("gemini-3-pro-preview");
+    let mut arguments = JsonObject::new();
+    arguments.insert("10", "ten");
+    arguments.insert("2", "two");
+    arguments.insert(
+        JsString::from_utf16(vec![0xd83d]),
+        JsonValue::String(JsString::from_utf16(vec![0xde00])),
+    );
+    let mut replay = AssistantMessage::pending(
+        target.api.clone(),
+        target.provider.clone(),
+        target.id.clone(),
+        1.0,
+    );
+    replay.content = vec![AssistantContent::ToolCall(ToolCall::new(
+        JsString::from_utf16(vec![0xd801]),
+        JsString::from_utf16(vec![0xdc01]),
+        arguments,
+    ))];
+    replay.stop_reason = StopReason::ToolUse;
+    let request_context = Context {
+        system_prompt: None,
+        messages: vec![Message::Assistant(Box::new(replay))],
+        tools: None,
+    };
+    let params =
+        build_params(&target, &request_context, &GoogleOptions::default()).expect("request params");
+    let wire = crate::utils::ecma_json::stringify_provider_json(&params);
+    assert!(wire.contains(
+        r#""functionCall":{"name":"\udc01","args":{"2":"two","10":"ten","\ud83d":"\ude00"},"id":"\ud801"}"#
+    ));
 }
 
 struct UncalledFetch;
@@ -130,11 +168,11 @@ fn thinking_levels_and_budgets_match_google_model_families() {
 fn build_params_preserves_pi_payload_shape() {
     let target = model("gemini-3.7-flash");
     let mut context = context();
-    context.system_prompt = Some("Be useful".to_owned());
+    context.system_prompt = Some(("Be useful".to_owned()).into());
     let options = GoogleOptions {
         stream: StreamOptions {
             temperature: Some(0.25),
-            max_tokens: Some(321),
+            max_tokens: Some(321.0),
             ..StreamOptions::default()
         },
         tool_choice: None,
@@ -209,7 +247,7 @@ fn raw_finish_reasons_preserve_length_and_only_promote_stop_with_tools() {
         target.api.clone(),
         target.provider.clone(),
         target.id.clone(),
-        0,
+        0.0,
     );
     let mut current = None;
     process_chunk(
@@ -231,7 +269,7 @@ fn raw_finish_reasons_preserve_length_and_only_promote_stop_with_tools() {
     let AssistantContent::ToolCall(tool_call) = &output.content[0] else {
         panic!("tool call")
     };
-    assert_eq!(tool_call.arguments, json!({}));
+    assert_eq!(tool_call.arguments, JsonObject::new());
 
     output.stop_reason = StopReason::Pending;
     process_chunk(
@@ -316,7 +354,7 @@ fn raw_stream_decoder_accepts_missing_and_unmodeled_part_fields() {
         target.api.clone(),
         target.provider.clone(),
         target.id.clone(),
-        0,
+        0.0,
     );
     let mut current = None;
 
@@ -335,7 +373,7 @@ fn raw_stream_decoder_accepts_missing_and_unmodeled_part_fields() {
         panic!("tool call")
     };
     assert_eq!(tool_call.name, "get_time");
-    assert_eq!(tool_call.arguments, json!({}));
+    assert_eq!(tool_call.arguments, JsonObject::new());
     assert_eq!(output.stop_reason, StopReason::ToolUse);
 }
 
@@ -453,7 +491,7 @@ async fn streamed_metadata_and_signatures_preserve_the_first_response_id() {
         target.api.clone(),
         target.provider.clone(),
         target.id.clone(),
-        0,
+        0.0,
     );
     let mut current = None;
     process_chunk(
@@ -508,15 +546,18 @@ async fn streamed_metadata_and_signatures_preserve_the_first_response_id() {
             .usage
             .reasoning
             .as_ref()
-            .expect("reasoning usage")
-            .as_number(),
+            .copied()
+            .expect("reasoning usage"),
         1.25
     );
     assert_eq!(output.usage.total_tokens, 15.25);
 
     assert!(matches!(
         events.next().await,
-        Some(AssistantMessageEvent::TextStart { content_index: 0 })
+        Some(AssistantMessageEvent::TextStart {
+            content_index: 0.0,
+            ..
+        })
     ));
     assert!(
         matches!(events.next().await, Some(AssistantMessageEvent::TextDelta { delta, .. }) if delta == "hello")
@@ -526,10 +567,7 @@ async fn streamed_metadata_and_signatures_preserve_the_first_response_id() {
     );
     assert!(matches!(
         events.next().await,
-        Some(AssistantMessageEvent::TextEnd {
-            content_signature: None,
-            ..
-        })
+        Some(AssistantMessageEvent::TextEnd { .. })
     ));
 }
 

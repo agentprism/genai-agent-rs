@@ -1,6 +1,7 @@
-use crate::types::{AbortSignal, FetchFunction, ProviderHttpRequest, ProviderHttpResponse};
+use crate::types::{
+    AbortSignal, FetchFunction, JsonValue, ProviderHttpRequest, ProviderHttpResponse,
+};
 use futures::future::BoxFuture;
-use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use url::Url;
@@ -12,7 +13,7 @@ pub struct AiGatewayUniversalRequestLike {
     pub provider: String,
     pub endpoint: String,
     pub headers: BTreeMap<String, String>,
-    pub query: Value,
+    pub query: JsonValue,
 }
 
 #[derive(Clone, Default)]
@@ -95,7 +96,7 @@ impl FetchFunction for GatewayBindingFetch {
             return Box::pin(async move { Err(message) });
         };
         let body_text = String::from_utf8_lossy(body);
-        let query = match serde_json::from_str::<Value>(&body_text) {
+        let query = match crate::utils::ecma_json::parse(&body_text) {
             Ok(query) => query,
             Err(_) => {
                 let message = unexpressible("non-JSON body");
@@ -368,9 +369,33 @@ mod tests {
             .expect("normalized path");
         let captured = runs.lock().unwrap_or_else(PoisonError::into_inner);
         assert_eq!(captured.len(), 2);
-        assert_eq!(captured[0].data.query, Value::String("�".to_owned()));
+        assert_eq!(captured[0].data.query, JsonValue::String("�".into()));
         assert_eq!(captured[1].data.provider, "anthropic");
         assert_eq!(captured[1].data.endpoint, "v1/messages");
         assert!(!captured[1].has_signal);
+    }
+
+    /// Pins pi `src/api/cloudflare-gateway-binding.ts:127-141`: `JSON.parse`
+    /// stores every number as binary64 and accepts overflow as infinity.
+    #[tokio::test]
+    async fn parses_binding_query_numbers_with_ecmascript_semantics() {
+        let (fetch, runs) = setup();
+        fetch
+            .fetch(request(
+                format!("{BASE_URL}/openai/responses"),
+                "POST",
+                r#"{"integer":9007199254740993,"overflow":1e400}"#,
+            ))
+            .await
+            .expect("response");
+        let captured = runs.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(
+            captured[0].data.query.get("integer"),
+            Some(&JsonValue::Number(9_007_199_254_740_992.0))
+        );
+        assert_eq!(
+            captured[0].data.query.get("overflow"),
+            Some(&JsonValue::Number(f64::INFINITY))
+        );
     }
 }

@@ -90,14 +90,14 @@ mod tests {
     fn marker(names: &[&str]) -> Message {
         Message::ToolResult(Box::new(ToolResultMessage {
             role: ToolResultRole::ToolResult,
-            tool_call_id: "call".to_owned(),
-            tool_name: "base".to_owned(),
+            tool_call_id: "call".into(),
+            tool_name: "base".into(),
             content: Vec::<UserContentBlock>::new(),
             details: None,
             usage: None,
-            added_tool_names: Some(names.iter().map(|name| (*name).to_owned()).collect()),
+            added_tool_names: Some(names.iter().map(|name| (*name).into()).collect()),
             is_error: false,
-            timestamp: 2,
+            timestamp: 2.0,
         }))
     }
 
@@ -105,13 +105,12 @@ mod tests {
     /// `test/deferred-tools.test.ts:231-323`.
     #[test]
     fn preserves_order_usage_markers_normalization_and_last_definition() {
-        let mut used = AssistantMessage::pending("api", "provider", "model", 1);
+        let mut used = AssistantMessage::pending("api", "provider", "model", 1.0);
         used.content = vec![AssistantContent::ToolCall(ToolCall::new(
             "call",
             "Read",
             Map::new(),
-        ))]
-        .into();
+        ))];
         let context = Context {
             system_prompt: None,
             messages: vec![
