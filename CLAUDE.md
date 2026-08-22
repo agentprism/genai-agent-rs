@@ -1,17 +1,33 @@
 # The goal
 
-**Build a Rust crate that is pi-ai, and then a Rust crate that is pi-agent-core on top of it — behaviorally the same libraries, written as idiomatic Rust.**
+**Build the Rust crates that are pi-ai and pi-agent-core — and eventually pi-coding-agent — by porting pi's contracts and dependency boundaries, not its TypeScript implementation, into the architecture recorded in `docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part1-proposal.md` and `docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md`.** Part 2 takes precedence over Part 1 where they differ. The architecture was adopted by the owner on 2026-08-22 as written; it is not a starting point for negotiation.
 
-Two requirements, and they are not in tension:
+**Why Rust:** cross-platform, FFI bindings for other languages, performance, and size. Every design choice is measured against those four, and against pi's strongest idea — `pi-agent-core` consumes `pi-ai` through narrow seams (shared types, an injected stream function, and a `Models` instance only where the harness needs auxiliary calls) and never talks to providers itself.
 
-1. **Idiomatic Rust is about how the code is written.** Ownership, `Result`, traits, async, real types — not a transliteration of TypeScript, and not a Rust program pretending to be a JavaScript one. The crate never impersonates the JS runtime or the JS SDKs: no spawning `node`, no fabricated runtime versions, no JS-isms kept for their own sake. Its identity on the wire and in its outputs is truthful.
+**The central judgment** (Part 1 §11, Part 2 closing): `Models` is the full model/provider/auth/catalog control plane; `ModelRuntime` is its narrow execution capability; `Agent` depends only on the capability; the boundary between them carries a lossless, replay-aware assistant stream — not just text and tool deltas.
 
-2. **Behavioral parity is about what the code does.** Every feature and every observable behavior of pi-ai exists in the crate: the public surface, the event protocol (including what each event carries), what is sent to providers, how responses, errors, retries, aborts, and hooks behave, what is persisted and how it reads back, the catalog, auth resolution, OAuth flows. The litmus test is the one we just ran: **any pi-ai README example or test must be recreatable against the crate with the same observable results, without needing a workaround and without reading the Rust internals.** If pi's quickstart reads `event.partial`, the Rust event has the partial.
+## What parity means
 
-When the two seem to conflict, parity wins and idiom adapts. A feature is never dropped because the idiomatic or efficient Rust shape is less convenient — you find the idiomatic way to provide the same behavior (an `Arc<AssistantMessage>` snapshot on every event costs nothing a JS shared reference doesn't). Performance, "the proxy strips it anyway," or an earlier design note are not grounds for removing something a consumer can observe.
+Parity is **contract and invariant parity with pi at the pinned commit** (`c49906ec77788625aacbdc53ebca6fbe65bd20f5`, `earendil-works/pi`), defined operationally — not by reproducing the bytes a JavaScript runtime happens to emit:
 
-**What is free:** internals. An SDK's own framing, a different HTTP stack, how a snapshot is produced, memory strategy, module-private structure. The bar for anything SDK-backed is observable equivalence with what pi does with its SDK.
+1. **The parity manifest** (Part 2 §10): every upstream `packages/ai/test/**/*.test.ts` and `packages/agent/test/**/*.test.ts` file maps to named Rust tests, with status `semantic-parity` or `deliberate-divergence` plus a reason. CI fails on an unmapped upstream test, a mapped Rust test that does not exist, a divergence without a reason, or a pin change without regenerating the manifest.
+2. **The conformance suites** (Part 2 §10.1–§10.10) are the definition of correct behavior for streams, replay, retry, middleware, lowering, handoff, catalogs, auth, the agent loop, and the harness. Each test names its pi basis.
+3. **Provider request bodies are byte-identical to pi's** for the pinned fixture corpus, for every API family in §10.8 — including the turn-two replay goldens. This is the one place where byte fidelity is the standard, and it requires the ordered, `JSON.stringify`-compatible wire writer described there.
+4. **Divergences from pi are allowed only from the allowlist** (Part 2 §10.11), each with its replacement. Anything else that differs from pi is a defect.
 
-**What is not free:** silent deviation. Anything that genuinely cannot be preserved in Rust is reported as a four-column row for you to judge; the reviewer rejects any row Rust can in fact achieve. Docs and prior decisions are background — pi's pinned source is the only authority, and a doc that contradicts it is wrong, not binding.
+## The commitment gates
 
-**Why the bar is this high:** pi-agent-core is a *consumer* of pi-ai. It will be ported next, on top of this crate, by the same standard — so every pi-ai surface pi-agent-core touches has to already be there, behaving identically, or the next port inherits the gap.
+The architecture is not considered delivered until all four pass (Part 2, "Commitment gates"):
+
+1. **Replay gate** — all seven two-turn replay goldens pass after event assembly and a persistence round-trip.
+2. **Wire gate** — default request bodies for every supported API family are byte-identical to pi for the pinned fixture corpus.
+3. **Agent gate** — lifecycle, queue polling, tool scheduling, failed-message commitment, and event ordering pass the mapped pi conformance suite.
+4. **Session gate** — the Rust reader passes the pi v4 codec/storage corpus, and the compatibility writer rejects rather than loses unrepresentable native state.
+
+## Implementation order
+
+Part 1 §10's milestones, in order: contracts and `ScriptedRuntime` → agent loop against the scripted runtime → `Models` control plane → API/provider separation proven with two families → persistent credentials and FFI. Then the harness crates (Part 2 §7). No real provider is needed before Milestone 3; nothing is built against a live provider that can be built against `ScriptedRuntime`.
+
+## Authority
+
+pi's pinned source is the reference implementation for every behavior the manifest maps. The architecture documents are the authority for *shape*. Where an architecture document and pi source disagree about a behavior that is not on the divergence allowlist, pi is right and the document gets a correction note. The other documents in this folder are background. The previous standard — byte-observable parity with pi's JavaScript behavior, including its runtime semantics — was retired on 2026-08-22; work produced under it lives in the `ai/` crate and on `wip/parity-remediation-p01`, and may be mined for wire encoders, SSE decoders, OAuth flows, and fixtures, but it is not a baseline.

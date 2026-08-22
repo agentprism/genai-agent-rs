@@ -1,35 +1,33 @@
 # genai-agent-rs
 
 A Rust port of [pi](https://github.com/earendil-works)'s agent stack. The governing
-statement — what the port is, and the standard it is held to — is
-[`docs/porting-pi-ai-and-agent-core-docs/goal.md`](docs/porting-pi-ai-and-agent-core-docs/goal.md)
-(mirrored verbatim in `AGENTS.md` and `CLAUDE.md`). In one line: **idiomatic Rust with full
-behavioral parity to pi**, pi's pinned source being the only authority.
+statement is [`docs/porting-pi-ai-and-agent-core-docs/goal.md`](docs/porting-pi-ai-and-agent-core-docs/goal.md)
+(mirrored verbatim in `AGENTS.md` and `CLAUDE.md`), and the adopted architecture is
+[`architecture-v2-part1-proposal.md`](docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part1-proposal.md)
++ [`architecture-v2-part2-revision.md`](docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md).
+In one line: **port pi's contracts and dependency boundaries — not its TypeScript — into idiomatic Rust**,
+with parity defined operationally (parity manifest, conformance suites, byte-identical provider request
+bodies, a divergence allowlist) and four commitment gates.
 
-| pi package | this workspace | crate | status |
-|---|---|---|---|
-| `@earendil-works/pi-ai` | `ai/` | **`agentprism-ai`** (lib target `ai`) | the pi-ai port; remediation toward `goal.md` in progress |
-| `@earendil-works/pi-agent-core` | *(next)* | built **on `ai`** | design pending (`workflows/pi-agent-core-design.workflow.js`) |
+| pi package | crates (adopted architecture) | status |
+|---|---|---|
+| `@earendil-works/pi-ai` | `pi-ai` + provider crates + `pi-ai-providers-all` | to be built (Milestone 1 first) |
+| `@earendil-works/pi-agent-core` | `pi-agent-core`, `pi-agent-session`, `pi-agent-harness`, `pi-agent-env`, `pi-agent-runtime-tokio`, `pi-agent-compat-pi-jsonl` | to be built |
+| bindings | `pi-ffi` | to be built |
 
-## The pi-ai port — `ai/`
-
-`agentprism-ai` mirrors pi-ai's `src/` file for file (`types.rs` ⇐ `types.ts`,
-`event_stream.rs` ⇐ `utils/event-stream.ts`, `api/<name>.rs` ⇐ `api/<name>.ts`, …). Provider
-SDKs are decided: openai-oxide (types) with the crate's own SSE transport for the OpenAI
-family, `adk-anthropic`, `adk-gemini`, `aws-sdk-bedrockruntime`. Owner rulings exclude lazy
-module loading, `azure-openai-responses`, `mistral-conversations`, `pi-messages`, image
-generation, the agent package's proxy protocol, and Windows. Start with
-`ai/examples/quickstart.rs` — pi's README Quick Start recreated on the crate.
-
-Reading order for anyone working on the port: `goal.md`, then the pinned pi source, then the
-background documents listed in
+Reading order for anyone working on the port: `goal.md`, then the two architecture documents, then pi's
+pinned source (`c49906ec7`), then the index in
 [`docs/porting-pi-ai-and-agent-core-docs/README.md`](docs/porting-pi-ai-and-agent-core-docs/README.md).
 
-## Legacy crates — `genai/`, `agent/`, `ffi/`
+## Legacy crates — `ai/`, `genai/`, `agent/`, `ffi/`
 
-These predate the `ai` crate and are **not** the pi-ai / pi-agent-core ports described by
-`goal.md`. They still build and are kept for their existing consumers; their docs are marked
-legacy.
+None of these is the port described by `goal.md`; they predate the adopted architecture and are not
+baselines. They still build and are kept for their existing consumers and as a quarry.
+
+- **`ai/`** — `agentprism-ai`, the earlier pi-ai port built to a retired standard (byte-observable
+  parity with pi's JavaScript behavior). Its wire encoders, SSE decoders, OAuth flows, 430+ hermetic
+  tests, and the TS-capture harness under `ai/examples/` are reusable material. Unreviewed remediation
+  work from that standard is on the `wip/parity-remediation-p01` branch.
 
 - **`genai/`** — `genai-agentprism`, an owned fork of
   [`jeremychone/rust-genai`](https://github.com/jeremychone/rust-genai) (synced via `git subtree`)
@@ -46,12 +44,12 @@ legacy.
 ```
 genai-agent-rs/
 ├── Cargo.toml          # [workspace] members = ["genai", "agent", "ffi", "ai"]
-├── ai/                 # agentprism-ai   — the pi-ai port (goal.md)
+├── ai/                 # agentprism-ai   — legacy pi-ai port (retired standard; quarry)
 ├── genai/              # genai-agentprism — legacy rust-genai fork
 ├── agent/              # rust-genai-agent — legacy agent loop on genai
 ├── ffi/                # genai-agent-ffi  — Swift bindings for agent/
 ├── docs/               # goal.md + porting background; embedding/Swift docs
-└── workflows/          # AgentPrism workflow scripts (audit, remediation, design)
+└── workflows/          # AgentPrism workflow scripts (archive/ holds retired-standard runs)
 ```
 
 ## Build & test

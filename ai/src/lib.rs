@@ -1,11 +1,11 @@
-//! Faithful Rust port of pi-ai (`@earendil-works/pi-ai`, reference commit
-//! `496185f6e4267b979e3663c45f7eb70b0c6a97b4`; remediation toward
-//! `c49906ec77788625aacbdc53ebca6fbe65bd20f5` in progress).
-//!
-//! Governing statement: `docs/porting-pi-ai-and-agent-core-docs/goal.md` — idiomatic Rust
-//! with full behavioral parity to pi-ai; a consumer of this crate finds no feature or
-//! behavior difference from pi-ai; pi's pinned source is the only authority. The other
-//! documents in that folder are background.
+//! Earlier Rust port of pi-ai (`@earendil-works/pi-ai`, reference commit
+//! `496185f6e4267b979e3663c45f7eb70b0c6a97b4`), built to a standard that was retired on
+//! 2026-08-22: byte-observable parity with pi's JavaScript behavior, including runtime
+//! semantics. The adopted architecture and the current standard are in
+//! `docs/porting-pi-ai-and-agent-core-docs/goal.md` and the `architecture-v2-*` documents
+//! beside it; the crates described there are the port. This crate is kept as a quarry —
+//! wire encoders, SSE decoders, OAuth flows, hermetic tests, and the capture harness under
+//! `examples/` — and is not a baseline.
 //!
 //! Layout mirrors pi-ai's `src/` file for file (snake_case where module rules force it):
 //! `types.rs` ⇐ `types.ts`, `event_stream.rs` ⇐ `utils/event-stream.ts`,

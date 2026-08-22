@@ -12,12 +12,14 @@ lto = true
 codegen-units = 1
 strip = "debuginfo"
 
-# genai-agent-rs — four crates. The governing statement for the port is
-# docs/porting-pi-ai-and-agent-core-docs/goal.md (mirrored in AGENTS.md / CLAUDE.md).
+# genai-agent-rs — four legacy crates today; the adopted architecture's crates (pi-ai, pi-agent-core,
+# pi-agent-session, pi-agent-harness, pi-agent-env, pi-agent-runtime-tokio, pi-agent-compat-pi-jsonl,
+# provider crates, pi-ffi) are to be added per docs/porting-pi-ai-and-agent-core-docs/goal.md
+# (mirrored in AGENTS.md / CLAUDE.md).
 #
-#   ai      — agentprism-ai (lib target `ai`): THE pi-ai port — idiomatic Rust with full
-#             behavioral parity to @earendil-works/pi-ai at the pinned commit. The pi-agent-core
-#             port will be built on this crate. publish = false until the first reviewed milestone.
+#   ai      — agentprism-ai (lib target `ai`): the earlier pi-ai port, built to a standard retired
+#             on 2026-08-22 (see goal.md). Kept as a quarry for wire encoders, SSE decoders, OAuth
+#             flows, and fixtures; not a baseline for the adopted architecture. publish = false.
 #   genai   — genai-agentprism: legacy owned fork of jeremychone/rust-genai (git subtree; pull-only
 #             upstream sync via `git subtree pull --prefix=genai upstream main`) carrying an
 #             assistant/stream contract, GenaiStreamFn, and feature-gated `auth`/`codex` modules
