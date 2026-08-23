@@ -16,6 +16,12 @@ const BRANCH = A.branch || "main";
 const MILESTONE = A.milestone || "M1";
 const ONLY = Array.isArray(A.packages) ? A.packages : null;
 const MAX_ROUNDS = A.maxRounds || 6;
+// Resumption of a halted package: allowDirty lets preflight accept uncommitted work inside the allowed paths
+// (the implementer treats it as material), initialFeedback seeds round 1 with the last rejection, and
+// priorApproved lists packages already committed by an earlier run so the closeout record is complete.
+const ALLOW_DIRTY = A.allowDirty === true;
+const INITIAL_FEEDBACK = typeof A.initialFeedback === "string" && A.initialFeedback.trim() ? A.initialFeedback : null;
+const PRIOR_APPROVED = Array.isArray(A.priorApproved) ? A.priorApproved : [];
 const DOCS = REPO + "/docs/porting-pi-ai-and-agent-core-docs";
 const GOAL = DOCS + "/goal.md";
 const ARCH1 = DOCS + "/architecture-v2-part1-proposal.md";
@@ -318,6 +324,7 @@ if (!milestone) {
 const PACKAGES = ONLY ? milestone.packages.filter((p) => ONLY.includes(p.id)) : milestone.packages;
 
 function implPrompt(pkg, feedback, attempt) {
+  if (!feedback && attempt === 0 && INITIAL_FEEDBACK) feedback = INITIAL_FEEDBACK;
   return (
     "You are the IMPLEMENTER (" + MODEL + ", xhigh reasoning) working in " + REPO + ".\n\n" + COMMON + "\n" +
     "MILESTONE: " + milestone.title + "\n" +
@@ -428,7 +435,9 @@ log(milestone.title + " · " + PACKAGES.length + " package(s): " + PACKAGES.map(
 const preflight = await agent(
   "Preflight only; change nothing. In " + REPO + ": report `git branch --show-current`, `git rev-parse HEAD`, and whether " +
     "`git status --porcelain` is empty. In " + PI_ROOT + ": report `git rev-parse HEAD`. ok=true only if the branch is '" +
-    BRANCH + "', the tree is clean, and the pi HEAD is " + PIN + ".",
+    BRANCH + "', " + (ALLOW_DIRTY
+      ? "every path in `git status --porcelain` is under crates/, providers/, bindings/, examples/, parity/, docs/porting-pi-ai-and-agent-core-docs/, or is Cargo.toml/Cargo.lock (uncommitted work there is expected this run; set clean=false and list anything outside those paths in note), "
+      : "the tree is clean, ") + "and the pi HEAD is " + PIN + ".",
   { label: "preflight", phase: "Preflight", model: MODEL, mode: "read-only", cwd: REPO, configOptions: { reasoning_effort: "low" }, schema: PREFLIGHT_SCHEMA }
 );
 if (!preflight || !preflight.ok) {
@@ -495,7 +504,7 @@ const closeout = halted
   ? null
   : await agent(
       "You are the CLOSEOUT agent (" + MODEL + ", xhigh reasoning) in " + REPO + ".\n\n" + COMMON + "\n" +
-        "Milestone " + MILESTONE + " packages were approved and committed: " + JSON.stringify(approved.map((r) => ({ id: r.id, sha: r.sha }))) + "\n" +
+        "Milestone " + MILESTONE + " packages were approved and committed (earlier runs first): " + JSON.stringify(PRIOR_APPROVED.concat(approved.map((r) => ({ id: r.id, sha: r.sha })))) + "\n" +
         "Do three things. (1) Run every gate once more on the final tree and bash parity/check.sh if present; report the " +
         "coverage summary. (2) Append a dated entry to " + DOCS + "/milestones.md (create it if absent) recording the " +
         "milestone, its packages and SHAs, the §10 tests now passing, manifest counts by status, and every correction note " +
