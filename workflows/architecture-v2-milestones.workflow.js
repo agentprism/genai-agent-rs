@@ -419,12 +419,13 @@ const COMMIT_SCHEMA = {
 const PREFLIGHT_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["ok", "branch", "head", "clean", "piHead", "note"],
+  required: ["ok", "branch", "head", "clean", "dirtyOutsideAllowed", "piHead", "note"],
   properties: {
-    ok: { type: "boolean", description: "true only if branch matches, tree is clean, and the pi worktree is at the pin" },
+    ok: { type: "boolean", description: "true only if the branch matches, the tree state satisfies the instruction, and the pi worktree is at the pin" },
     branch: { type: "string", description: "git branch --show-current" },
     head: { type: "string", description: "git rev-parse HEAD" },
     clean: { type: "boolean", description: "git status --porcelain is empty" },
+    dirtyOutsideAllowed: { type: "boolean", description: "true if any path in git status --porcelain is outside crates/, providers/, bindings/, examples/, parity/, docs/porting-pi-ai-and-agent-core-docs/, Cargo.toml, Cargo.lock" },
     piHead: { type: "string", description: "git rev-parse HEAD in the pi worktree" },
     note: { type: "string", description: "Anything off" },
   },
@@ -440,7 +441,12 @@ const preflight = await agent(
       : "the tree is clean, ") + "and the pi HEAD is " + PIN + ".",
   { label: "preflight", phase: "Preflight", model: MODEL, mode: "read-only", cwd: REPO, configOptions: { reasoning_effort: "low" }, schema: PREFLIGHT_SCHEMA }
 );
-if (!preflight || !preflight.ok) {
+const preflightOk =
+  !!preflight &&
+  preflight.branch === BRANCH &&
+  String(preflight.piHead || "").trim() === PIN &&
+  (preflight.clean === true || (ALLOW_DIRTY && preflight.dirtyOutsideAllowed === false));
+if (!preflightOk) {
   log("✘ preflight failed: " + JSON.stringify(preflight));
   return { ok: false, reason: "preflight", preflight };
 }
