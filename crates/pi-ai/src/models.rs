@@ -2,19 +2,27 @@
 //! §3.6 and part 2 §2.6.
 
 use crate::{
-    AiError, ApiFamily, AttemptMiddleware, CancellationToken, ErasedPayloadTransform,
-    HeaderTransform, HeaderTransformContext, LocalAssistantStream, LocalAttemptMiddleware,
-    LocalBoxFuture, LocalErasedPayloadTransform, LocalHeaderTransform, LocalModelRuntime,
-    LocalPayloadTransform, LocalPayloadTransformAdapter, LocalProviderRegistration,
-    LocalResolvedApiRequest, LocalResponseObserver, ModelDescriptor, ModelRef, ModelRequest,
-    ModelRuntime, PayloadTransform, PayloadTransformAdapter, ProviderRegistration,
-    ProviderRegistrationError, RequestStartError, RequestStartErrorKind, ResolvedApiRequest,
-    ResponseObserver, SendBoxFuture, apply_header_spec, local_provider_default_headers,
-    merge_header_map, provider_default_headers,
+    AiError, ApiFamily, AttemptMiddleware, CancellationToken, CatalogError, CatalogFetchContext,
+    CatalogSnapshot, ErasedPayloadTransform, HeaderTransform, HeaderTransformContext,
+    InMemoryModelOverrideStore, InMemoryModelsStore, LocalAssistantStream, LocalAttemptMiddleware,
+    LocalBoxFuture, LocalErasedPayloadTransform, LocalHeaderTransform,
+    LocalInMemoryModelOverrideStore, LocalInMemoryModelsStore, LocalModelOverrideStore,
+    LocalModelRuntime, LocalModelsStore, LocalPayloadTransform, LocalPayloadTransformAdapter,
+    LocalProviderCatalogState, LocalProviderRefreshCoordination, LocalProviderRegistration,
+    LocalResolvedApiRequest, LocalResponseObserver, ModelDescriptor, ModelOverride,
+    ModelOverrideStore, ModelRef, ModelRequest, ModelRuntime, ModelsStore, PayloadTransform,
+    PayloadTransformAdapter, ProviderCatalogLayers, ProviderCatalogState,
+    ProviderRefreshCoordination, ProviderRefreshResult, ProviderRegistration,
+    ProviderRegistrationError, RefreshGeneration, RefreshReport, RefreshRequest, RequestStartError,
+    RequestStartErrorKind, ResolvedApiRequest, ResponseObserver, SendBoxFuture, apply_header_spec,
+    local_provider_default_headers, merge_header_map, provider_default_headers, publish_candidate,
+    publish_local_candidate, restore_local_persisted_candidate, restore_persisted_candidate,
 };
 use futures_util::future::{Either, select};
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use indexmap::IndexMap;
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::rc::Rc;
@@ -34,11 +42,22 @@ pub struct Models {
 }
 
 struct ModelsInner {
-    providers: RwLock<IndexMap<crate::ProviderId, Arc<ProviderRegistration>>>,
+    providers: RwLock<IndexMap<crate::ProviderId, ProviderSlot>>,
+    models_store: Arc<dyn ModelsStore>,
+    override_store: Arc<dyn ModelOverrideStore>,
     header_transforms: Arc<[Arc<dyn HeaderTransform>]>,
     payload_transforms: Arc<[Arc<dyn ErasedPayloadTransform>]>,
     response_observers: Arc<[Arc<dyn ResponseObserver>]>,
     attempt_middleware: Arc<[Arc<dyn AttemptMiddleware>]>,
+}
+
+struct ProviderSlot {
+    // Coordination is intentionally retained when registration is absent.
+    // Pinned pi keeps its generation and publication-chain maps across
+    // delete/re-add, so a stale durable write cannot escape serialization
+    // merely because the provider was temporarily removed.
+    registration: Option<Arc<ProviderRegistration>>,
+    coordination: Arc<ProviderRefreshCoordination>,
 }
 
 impl fmt::Debug for Models {
@@ -69,7 +88,7 @@ impl Models {
     pub fn providers(&self) -> ProviderSnapshot {
         let providers = read_unpoisoned(&self.inner.providers)
             .values()
-            .cloned()
+            .filter_map(|slot| slot.registration.as_ref().map(Arc::clone))
             .collect::<Vec<_>>();
         Arc::from(providers)
     }
@@ -79,7 +98,7 @@ impl Models {
     pub fn provider(&self, provider: &crate::ProviderId) -> Option<Arc<ProviderRegistration>> {
         read_unpoisoned(&self.inner.providers)
             .get(provider)
-            .cloned()
+            .and_then(|slot| slot.registration.as_ref().map(Arc::clone))
     }
 
     /// Returns a flattened snapshot of current provider catalog snapshots.
@@ -110,16 +129,90 @@ impl Models {
             .cloned()
     }
 
+    /// Atomically loads one provider's complete effective catalog snapshot.
+    pub fn catalog_snapshot(&self, provider: &crate::ProviderId) -> Option<Arc<CatalogSnapshot>> {
+        let registration = self.provider(provider)?;
+        Some(
+            registration
+                .catalog
+                .catalog_state()
+                .map(|state| state.published_snapshot())
+                .unwrap_or_else(|| {
+                    Arc::new(CatalogSnapshot::baseline(
+                        registration
+                            .catalog
+                            .snapshot()
+                            .iter()
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                    ))
+                }),
+        )
+    }
+
+    /// Returns one provider's current provenance layers.
+    pub fn catalog_layers(&self, provider: &crate::ProviderId) -> Option<ProviderCatalogLayers> {
+        self.provider(provider)?
+            .catalog
+            .catalog_state()
+            .map(|state| state.layers())
+    }
+
     /// Atomically validates and upserts a complete provider registration.
     pub fn set_provider(
         &self,
         provider: ProviderRegistration,
     ) -> Result<Option<Arc<ProviderRegistration>>, ProviderRegistrationError> {
+        if let Some(state) = provider.catalog.catalog_state() {
+            let host_overrides = self
+                .inner
+                .override_store
+                .snapshot(&provider.descriptor.id)
+                .map_err(|error| ProviderRegistrationError::Catalog {
+                    provider: provider.descriptor.id.clone(),
+                    message: error.message,
+                })?;
+            state
+                .replace_host_overrides(host_overrides)
+                .map_err(|error| ProviderRegistrationError::Catalog {
+                    provider: provider.descriptor.id.clone(),
+                    message: error.message,
+                })?;
+        }
         provider.validate()?;
         let provider = Arc::new(provider);
-        let previous = write_unpoisoned(&self.inner.providers)
-            .insert(provider.descriptor.id.clone(), Arc::clone(&provider));
-        Ok(previous)
+        let provider_id = provider.descriptor.id.clone();
+        let mut providers = write_unpoisoned(&self.inner.providers);
+        if let Some(slot) = providers.get_mut(&provider_id) {
+            // Pi supersedes by provider ID before exposing the replacement.
+            slot.coordination.supersede_refresh();
+            if let Some(state) = provider.catalog.catalog_state() {
+                state.bind_coordination(Arc::clone(&slot.coordination));
+            }
+            let previous = slot.registration.replace(provider);
+            if previous.is_none() {
+                // Map deletion followed by re-addition appends the provider to
+                // registration order while retaining its separate coordinator.
+                let slot = providers
+                    .shift_remove(&provider_id)
+                    .expect("provider slot was just observed");
+                providers.insert(provider_id, slot);
+            }
+            return Ok(previous);
+        }
+
+        let coordination = Arc::new(ProviderRefreshCoordination::new());
+        if let Some(state) = provider.catalog.catalog_state() {
+            state.bind_coordination(Arc::clone(&coordination));
+        }
+        providers.insert(
+            provider_id,
+            ProviderSlot {
+                registration: Some(provider),
+                coordination,
+            },
+        );
+        Ok(None)
     }
 
     /// Atomically removes one provider registration.
@@ -127,12 +220,300 @@ impl Models {
         &self,
         provider: &crate::ProviderId,
     ) -> Option<Arc<ProviderRegistration>> {
-        write_unpoisoned(&self.inner.providers).shift_remove(provider)
+        let mut providers = write_unpoisoned(&self.inner.providers);
+        if let Some(slot) = providers.get_mut(provider) {
+            slot.coordination.supersede_refresh();
+            return slot.registration.take();
+        }
+        let coordination = Arc::new(ProviderRefreshCoordination::new());
+        coordination.supersede_refresh();
+        providers.insert(
+            provider.clone(),
+            ProviderSlot {
+                registration: None,
+                coordination,
+            },
+        );
+        None
     }
 
     /// Atomically clears all provider registrations.
     pub fn clear_providers(&self) {
-        write_unpoisoned(&self.inner.providers).clear();
+        let mut providers = write_unpoisoned(&self.inner.providers);
+        for slot in providers.values() {
+            if slot.registration.is_some() {
+                slot.coordination.supersede_refresh();
+            }
+        }
+        for slot in providers.values_mut() {
+            slot.registration = None;
+        }
+    }
+
+    /// Recomposes every provider from the override store without writing a
+    /// flattened catalog to [`ModelsStore`]. Failed providers retain their
+    /// previously published complete snapshot.
+    pub fn refresh_host_overrides(&self) -> BTreeMap<crate::ProviderId, Result<(), CatalogError>> {
+        self.providers()
+            .iter()
+            .map(|provider| {
+                let result = provider.catalog.catalog_state().map_or_else(
+                    || Ok(()),
+                    |state| {
+                        self.inner
+                            .override_store
+                            .snapshot(&provider.descriptor.id)
+                            .map_err(CatalogError::from)
+                            .and_then(|overrides| state.replace_host_overrides(overrides))
+                    },
+                );
+                (provider.descriptor.id.clone(), result)
+            })
+            .collect()
+    }
+
+    /// Replaces process-local overrides for one provider and atomically
+    /// publishes the recomposed effective snapshot.
+    pub fn set_runtime_overrides(
+        &self,
+        provider: &crate::ProviderId,
+        overrides: Vec<ModelOverride>,
+    ) -> Result<(), CatalogError> {
+        let registration = self
+            .provider(provider)
+            .ok_or_else(|| CatalogError::validation(format!("unknown provider: {provider}")))?;
+        registration
+            .catalog
+            .catalog_state()
+            .ok_or_else(|| {
+                CatalogError::validation(format!(
+                    "provider {provider} uses an unmanaged custom catalog"
+                ))
+            })?
+            .replace_runtime_overrides(Arc::from(overrides))
+    }
+
+    /// Clears process-local overrides for one provider.
+    pub fn clear_runtime_overrides(
+        &self,
+        provider: &crate::ProviderId,
+    ) -> Result<(), CatalogError> {
+        self.set_runtime_overrides(provider, Vec::new())
+    }
+
+    /// Restores and refreshes selected dynamic providers concurrently. Static
+    /// and aborted providers are omitted; other failures are reported per
+    /// provider.
+    pub async fn refresh(
+        &self,
+        request: RefreshRequest,
+        cancellation: CancellationToken,
+    ) -> RefreshReport {
+        // Pinned pi returns before provider selection when the caller arrives
+        // already cancelled. In particular, it must not begin a generation
+        // that supersedes an unrelated in-flight refresh.
+        if cancellation.is_cancelled() {
+            return RefreshReport {
+                aborted: true,
+                providers: BTreeMap::new(),
+            };
+        }
+
+        let mut pending = FuturesUnordered::new();
+        for provider in self.providers().iter().cloned() {
+            if request
+                .providers
+                .as_ref()
+                .is_some_and(|selected| !selected.contains(&provider.descriptor.id))
+            {
+                continue;
+            }
+            // Pinned pi selects only providers that expose refreshModels;
+            // static providers are absent from the per-provider report.
+            if provider.catalog.catalog_source().is_none() {
+                continue;
+            }
+            pending.push(self.refresh_provider(provider, request.clone(), cancellation.clone()));
+        }
+
+        let mut providers = BTreeMap::new();
+        while let Some((provider, result)) = pending.next().await {
+            if let Some(result) = result {
+                providers.insert(provider, result);
+            }
+        }
+        RefreshReport {
+            aborted: cancellation.is_cancelled(),
+            providers,
+        }
+    }
+
+    async fn refresh_provider(
+        &self,
+        provider: Arc<ProviderRegistration>,
+        request: RefreshRequest,
+        cancellation: CancellationToken,
+    ) -> (crate::ProviderId, Option<ProviderRefreshResult>) {
+        let provider_id = provider.descriptor.id.clone();
+        let Some(source) = provider.catalog.catalog_source() else {
+            return (provider_id, None);
+        };
+        let Some(state) = provider.catalog.catalog_state() else {
+            return (provider_id, None);
+        };
+        let Some((generation, operation_cancellation)) =
+            self.begin_provider_refresh(&provider, state.as_ref(), &cancellation)
+        else {
+            return (provider_id, None);
+        };
+        let result = self
+            .refresh_provider_generation(
+                &provider,
+                source,
+                generation,
+                &request,
+                operation_cancellation.clone(),
+            )
+            .await;
+        state.finish_refresh(generation);
+        // Pinned pi suppresses provider errors whenever that provider's
+        // composed signal is aborted, including superseded generations.
+        let result = (!operation_cancellation.is_cancelled()).then_some(result);
+        (provider_id, result)
+    }
+
+    fn begin_provider_refresh(
+        &self,
+        provider: &Arc<ProviderRegistration>,
+        state: &ProviderCatalogState,
+        cancellation: &CancellationToken,
+    ) -> Option<(RefreshGeneration, CancellationToken)> {
+        let providers = read_unpoisoned(&self.inner.providers);
+        let slot = providers.get(&provider.descriptor.id)?;
+        let registration = slot.registration.as_ref()?;
+        if !Arc::ptr_eq(registration, provider) {
+            return None;
+        }
+        // Holding the registry read lock through begin_refresh makes provider
+        // replacement linearizable: set_provider either cancels this exact
+        // generation afterward or installs first and makes this Arc stale.
+        Some(state.begin_refresh(cancellation))
+    }
+
+    async fn refresh_provider_generation(
+        &self,
+        provider: &ProviderRegistration,
+        source: Arc<dyn crate::ModelCatalogSource>,
+        generation: RefreshGeneration,
+        request: &RefreshRequest,
+        cancellation: CancellationToken,
+    ) -> ProviderRefreshResult {
+        let Some(state) = provider.catalog.catalog_state() else {
+            return ProviderRefreshResult::NotRefreshable;
+        };
+        let state = state.as_ref();
+        let retained = || state.published_snapshot().models.len();
+        let failed = |error: CatalogError| ProviderRefreshResult::Failed {
+            restored_model_count: retained(),
+            error: error.report(),
+        };
+
+        let persisted = match await_catalog_or_cancelled(
+            self.inner
+                .models_store
+                .read(&provider.descriptor.id, cancellation.clone()),
+            &cancellation,
+        )
+        .await
+        {
+            Ok(Ok(value)) => value.map(Arc::new),
+            Ok(Err(error)) => return failed(CatalogError::from(error)),
+            Err(error) => return failed(error),
+        };
+
+        if let Some(snapshot) = &persisted
+            && let Err(error) = restore_persisted_candidate(
+                state,
+                generation,
+                snapshot,
+                self.inner.override_store.as_ref(),
+                cancellation.clone(),
+            )
+            .await
+        {
+            return failed(error);
+        }
+
+        if let Err(error) = state.verify_generation(generation, &cancellation) {
+            return failed(error);
+        }
+
+        if !request.allow_network {
+            return ProviderRefreshResult::RestoredOnly {
+                model_count: retained(),
+            };
+        }
+
+        // Pi restores cached provider state before any credential resolution.
+        let auth = match await_catalog_or_cancelled(
+            provider.auth.resolve(
+                crate::ResolveAuthRequest {
+                    provider: provider.descriptor.clone(),
+                    model: None,
+                },
+                cancellation.clone(),
+            ),
+            &cancellation,
+        )
+        .await
+        {
+            Ok(Ok(Some(auth))) => auth,
+            Ok(Ok(None)) => {
+                return ProviderRefreshResult::RestoredOnly {
+                    model_count: retained(),
+                };
+            }
+            Ok(Err(error)) => return failed(CatalogError::authentication(error.message)),
+            Err(error) => return failed(error),
+        };
+
+        let old_revision = state.published_snapshot().revision.clone();
+        let candidate = match await_catalog_or_cancelled(
+            source.fetch(
+                CatalogFetchContext {
+                    provider: provider.descriptor.id.clone(),
+                    stored: persisted,
+                    auth,
+                    force: request.force,
+                },
+                cancellation.clone(),
+            ),
+            &cancellation,
+        )
+        .await
+        {
+            Ok(Ok(candidate)) => candidate,
+            Ok(Err(error)) | Err(error) => return failed(error),
+        };
+        let new_revision = candidate.revision.clone();
+        match publish_candidate(
+            state,
+            generation,
+            candidate,
+            self.inner.models_store.as_ref(),
+            self.inner.override_store.as_ref(),
+            cancellation,
+        )
+        .await
+        {
+            Ok(true) => ProviderRefreshResult::Refreshed {
+                old_revision,
+                new_revision,
+                model_count: retained(),
+            },
+            Ok(false) => failed(CatalogError::superseded()),
+            Err(error) => failed(error),
+        }
     }
 
     /// Executes the complete simple request pipeline and releases the registry
@@ -186,7 +567,7 @@ impl Models {
                 provider.auth.resolve(
                     crate::ResolveAuthRequest {
                         provider: provider.descriptor.clone(),
-                        model: model.clone(),
+                        model: Some(model.clone()),
                     },
                     cancellation.clone(),
                 ),
@@ -302,16 +683,43 @@ impl LocalModelRuntime for Models {
 }
 
 /// Immutable Models configuration builder.
-#[derive(Default)]
 pub struct ModelsBuilder {
     providers: Vec<ProviderRegistration>,
+    models_store: Arc<dyn ModelsStore>,
+    override_store: Arc<dyn ModelOverrideStore>,
     header_transforms: Vec<Arc<dyn HeaderTransform>>,
     payload_transforms: Vec<Arc<dyn ErasedPayloadTransform>>,
     response_observers: Vec<Arc<dyn ResponseObserver>>,
     attempt_middleware: Vec<Arc<dyn AttemptMiddleware>>,
 }
 
+impl Default for ModelsBuilder {
+    fn default() -> Self {
+        Self {
+            providers: Vec::new(),
+            models_store: Arc::new(InMemoryModelsStore::default()),
+            override_store: Arc::new(InMemoryModelOverrideStore::default()),
+            header_transforms: Vec::new(),
+            payload_transforms: Vec::new(),
+            response_observers: Vec::new(),
+            attempt_middleware: Vec::new(),
+        }
+    }
+}
+
 impl ModelsBuilder {
+    /// Sets the durable provider-originated catalog store.
+    pub fn models_store(mut self, store: Arc<dyn ModelsStore>) -> Self {
+        self.models_store = store;
+        self
+    }
+
+    /// Sets the synchronous host-policy override store.
+    pub fn model_override_store(mut self, store: Arc<dyn ModelOverrideStore>) -> Self {
+        self.override_store = store;
+        self
+    }
+
     /// Adds or replaces a provider by identifier. The last registration wins
     /// while retaining the identifier's original position.
     pub fn provider(mut self, provider: ProviderRegistration) -> Self {
@@ -355,14 +763,51 @@ impl ModelsBuilder {
 
     /// Validates every provider before publishing the complete initial map.
     pub fn build(self) -> Result<Models, ProviderRegistrationError> {
-        let mut providers = IndexMap::new();
+        let mut providers: IndexMap<crate::ProviderId, ProviderSlot> = IndexMap::new();
         for provider in self.providers {
+            if let Some(state) = provider.catalog.catalog_state() {
+                let host_overrides = self
+                    .override_store
+                    .snapshot(&provider.descriptor.id)
+                    .map_err(|error| ProviderRegistrationError::Catalog {
+                        provider: provider.descriptor.id.clone(),
+                        message: error.message,
+                    })?;
+                state
+                    .replace_host_overrides(host_overrides)
+                    .map_err(|error| ProviderRegistrationError::Catalog {
+                        provider: provider.descriptor.id.clone(),
+                        message: error.message,
+                    })?;
+            }
             provider.validate()?;
-            providers.insert(provider.descriptor.id.clone(), Arc::new(provider));
+            let provider = Arc::new(provider);
+            let provider_id = provider.descriptor.id.clone();
+            if let Some(slot) = providers.get_mut(&provider_id) {
+                slot.coordination.supersede_refresh();
+                if let Some(state) = provider.catalog.catalog_state() {
+                    state.bind_coordination(Arc::clone(&slot.coordination));
+                }
+                slot.registration = Some(provider);
+            } else {
+                let coordination = Arc::new(ProviderRefreshCoordination::new());
+                if let Some(state) = provider.catalog.catalog_state() {
+                    state.bind_coordination(Arc::clone(&coordination));
+                }
+                providers.insert(
+                    provider_id,
+                    ProviderSlot {
+                        registration: Some(provider),
+                        coordination,
+                    },
+                );
+            }
         }
         Ok(Models {
             inner: Arc::new(ModelsInner {
                 providers: RwLock::new(providers),
+                models_store: self.models_store,
+                override_store: self.override_store,
                 header_transforms: Arc::from(self.header_transforms),
                 payload_transforms: Arc::from(self.payload_transforms),
                 response_observers: Arc::from(self.response_observers),
@@ -389,11 +834,20 @@ pub struct LocalModels {
 }
 
 struct LocalModelsInner {
-    providers: RefCell<IndexMap<crate::ProviderId, Rc<LocalProviderRegistration>>>,
+    providers: RefCell<IndexMap<crate::ProviderId, LocalProviderSlot>>,
+    models_store: Rc<dyn LocalModelsStore>,
+    override_store: Rc<dyn LocalModelOverrideStore>,
     header_transforms: Rc<[Rc<dyn LocalHeaderTransform>]>,
     payload_transforms: Rc<[Rc<dyn LocalErasedPayloadTransform>]>,
     response_observers: Rc<[Rc<dyn LocalResponseObserver>]>,
     attempt_middleware: Rc<[Rc<dyn LocalAttemptMiddleware>]>,
+}
+
+struct LocalProviderSlot {
+    // As in the Send registry, absence does not discard provider-ID-scoped
+    // generation/publication coordination.
+    registration: Option<Rc<LocalProviderRegistration>>,
+    coordination: Rc<LocalProviderRefreshCoordination>,
 }
 
 impl fmt::Debug for LocalModels {
@@ -427,14 +881,18 @@ impl LocalModels {
                 .providers
                 .borrow()
                 .values()
-                .cloned()
+                .filter_map(|slot| slot.registration.as_ref().map(Rc::clone))
                 .collect::<Vec<_>>(),
         )
     }
 
     /// Returns one registered local provider handle.
     pub fn provider(&self, provider: &crate::ProviderId) -> Option<Rc<LocalProviderRegistration>> {
-        self.inner.providers.borrow().get(provider).cloned()
+        self.inner
+            .providers
+            .borrow()
+            .get(provider)
+            .and_then(|slot| slot.registration.as_ref().map(Rc::clone))
     }
 
     /// Returns a flattened snapshot of current local catalogs.
@@ -466,18 +924,87 @@ impl LocalModels {
             .cloned()
     }
 
+    /// Loads one local provider's last complete effective catalog snapshot.
+    pub fn catalog_snapshot(&self, provider: &crate::ProviderId) -> Option<Rc<CatalogSnapshot>> {
+        let registration = self.provider(provider)?;
+        Some(
+            registration
+                .catalog
+                .catalog_state()
+                .map(|state| state.published_snapshot())
+                .unwrap_or_else(|| {
+                    Rc::new(CatalogSnapshot::baseline(
+                        registration
+                            .catalog
+                            .snapshot()
+                            .iter()
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                    ))
+                }),
+        )
+    }
+
+    /// Returns one local provider's current provenance layers.
+    pub fn catalog_layers(&self, provider: &crate::ProviderId) -> Option<ProviderCatalogLayers> {
+        self.provider(provider)?
+            .catalog
+            .catalog_state()
+            .map(|state| state.layers())
+    }
+
     /// Atomically validates and upserts a complete local provider.
     pub fn set_provider(
         &self,
         provider: LocalProviderRegistration,
     ) -> Result<Option<Rc<LocalProviderRegistration>>, ProviderRegistrationError> {
+        if let Some(state) = provider.catalog.catalog_state() {
+            let host_overrides = self
+                .inner
+                .override_store
+                .snapshot(&provider.descriptor.id)
+                .map_err(|error| ProviderRegistrationError::Catalog {
+                    provider: provider.descriptor.id.clone(),
+                    message: error.message,
+                })?;
+            state
+                .replace_host_overrides(host_overrides)
+                .map_err(|error| ProviderRegistrationError::Catalog {
+                    provider: provider.descriptor.id.clone(),
+                    message: error.message,
+                })?;
+        }
         provider.validate()?;
         let provider = Rc::new(provider);
-        Ok(self
-            .inner
-            .providers
-            .borrow_mut()
-            .insert(provider.descriptor.id.clone(), Rc::clone(&provider)))
+        let provider_id = provider.descriptor.id.clone();
+        let mut providers = self.inner.providers.borrow_mut();
+        if let Some(slot) = providers.get_mut(&provider_id) {
+            slot.coordination.supersede_refresh();
+            if let Some(state) = provider.catalog.catalog_state() {
+                state.bind_coordination(Rc::clone(&slot.coordination));
+            }
+            let previous = slot.registration.replace(provider);
+            if previous.is_none() {
+                let slot = providers
+                    .shift_remove(&provider_id)
+                    .expect("local provider slot was just observed");
+                providers.insert(provider_id, slot);
+            }
+            return Ok(previous);
+        }
+
+        let coordination = Rc::new(LocalProviderRefreshCoordination::new());
+        if let Some(state) = provider.catalog.catalog_state() {
+            state.bind_coordination(Rc::clone(&coordination));
+        }
+        providers.insert(
+            provider_id,
+            LocalProviderSlot {
+                registration: Some(provider),
+                coordination,
+            },
+        );
+        Ok(None)
     }
 
     /// Atomically removes one local provider registration.
@@ -485,12 +1012,286 @@ impl LocalModels {
         &self,
         provider: &crate::ProviderId,
     ) -> Option<Rc<LocalProviderRegistration>> {
-        self.inner.providers.borrow_mut().shift_remove(provider)
+        let mut providers = self.inner.providers.borrow_mut();
+        if let Some(slot) = providers.get_mut(provider) {
+            slot.coordination.supersede_refresh();
+            return slot.registration.take();
+        }
+        let coordination = Rc::new(LocalProviderRefreshCoordination::new());
+        coordination.supersede_refresh();
+        providers.insert(
+            provider.clone(),
+            LocalProviderSlot {
+                registration: None,
+                coordination,
+            },
+        );
+        None
     }
 
     /// Atomically clears all local provider registrations.
     pub fn clear_providers(&self) {
-        self.inner.providers.borrow_mut().clear();
+        let mut providers = self.inner.providers.borrow_mut();
+        for slot in providers.values() {
+            if slot.registration.is_some() {
+                slot.coordination.supersede_refresh();
+            }
+        }
+        for slot in providers.values_mut() {
+            slot.registration = None;
+        }
+    }
+
+    /// Recomposes every local provider from the local override store without
+    /// persisting a flattened effective catalog.
+    pub fn refresh_host_overrides(&self) -> BTreeMap<crate::ProviderId, Result<(), CatalogError>> {
+        self.providers()
+            .iter()
+            .map(|provider| {
+                let result = provider.catalog.catalog_state().map_or_else(
+                    || Ok(()),
+                    |state| {
+                        self.inner
+                            .override_store
+                            .snapshot(&provider.descriptor.id)
+                            .map_err(CatalogError::from)
+                            .and_then(|overrides| state.replace_host_overrides(overrides))
+                    },
+                );
+                (provider.descriptor.id.clone(), result)
+            })
+            .collect()
+    }
+
+    /// Replaces process-local overrides for one local provider.
+    pub fn set_runtime_overrides(
+        &self,
+        provider: &crate::ProviderId,
+        overrides: Vec<ModelOverride>,
+    ) -> Result<(), CatalogError> {
+        let registration = self
+            .provider(provider)
+            .ok_or_else(|| CatalogError::validation(format!("unknown provider: {provider}")))?;
+        registration
+            .catalog
+            .catalog_state()
+            .ok_or_else(|| {
+                CatalogError::validation(format!(
+                    "provider {provider} uses an unmanaged custom local catalog"
+                ))
+            })?
+            .replace_runtime_overrides(Rc::from(overrides))
+    }
+
+    /// Clears process-local overrides for one local provider.
+    pub fn clear_runtime_overrides(
+        &self,
+        provider: &crate::ProviderId,
+    ) -> Result<(), CatalogError> {
+        self.set_runtime_overrides(provider, Vec::new())
+    }
+
+    /// Restores and refreshes selected dynamic local providers concurrently on
+    /// the calling executor. Static and aborted providers are omitted.
+    pub async fn refresh(
+        &self,
+        request: RefreshRequest,
+        cancellation: CancellationToken,
+    ) -> RefreshReport {
+        if cancellation.is_cancelled() {
+            return RefreshReport {
+                aborted: true,
+                providers: BTreeMap::new(),
+            };
+        }
+
+        let mut pending = FuturesUnordered::new();
+        for provider in self.providers().iter().cloned() {
+            if request
+                .providers
+                .as_ref()
+                .is_some_and(|selected| !selected.contains(&provider.descriptor.id))
+            {
+                continue;
+            }
+            if provider.catalog.catalog_source().is_none() {
+                continue;
+            }
+            pending.push(self.refresh_provider(provider, request.clone(), cancellation.clone()));
+        }
+
+        let mut providers = BTreeMap::new();
+        while let Some((provider, result)) = pending.next().await {
+            if let Some(result) = result {
+                providers.insert(provider, result);
+            }
+        }
+        RefreshReport {
+            aborted: cancellation.is_cancelled(),
+            providers,
+        }
+    }
+
+    async fn refresh_provider(
+        &self,
+        provider: Rc<LocalProviderRegistration>,
+        request: RefreshRequest,
+        cancellation: CancellationToken,
+    ) -> (crate::ProviderId, Option<ProviderRefreshResult>) {
+        let provider_id = provider.descriptor.id.clone();
+        let Some(source) = provider.catalog.catalog_source() else {
+            return (provider_id, None);
+        };
+        let Some(state) = provider.catalog.catalog_state() else {
+            return (provider_id, None);
+        };
+        let Some((generation, operation_cancellation)) =
+            self.begin_provider_refresh(&provider, state.as_ref(), &cancellation)
+        else {
+            return (provider_id, None);
+        };
+        let result = self
+            .refresh_provider_generation(
+                &provider,
+                source,
+                generation,
+                &request,
+                operation_cancellation.clone(),
+            )
+            .await;
+        state.finish_refresh(generation);
+        let result = (!operation_cancellation.is_cancelled()).then_some(result);
+        (provider_id, result)
+    }
+
+    fn begin_provider_refresh(
+        &self,
+        provider: &Rc<LocalProviderRegistration>,
+        state: &LocalProviderCatalogState,
+        cancellation: &CancellationToken,
+    ) -> Option<(RefreshGeneration, CancellationToken)> {
+        let providers = self.inner.providers.borrow();
+        let slot = providers.get(&provider.descriptor.id)?;
+        let registration = slot.registration.as_ref()?;
+        if !Rc::ptr_eq(registration, provider) {
+            return None;
+        }
+        Some(state.begin_refresh(cancellation))
+    }
+
+    async fn refresh_provider_generation(
+        &self,
+        provider: &LocalProviderRegistration,
+        source: Rc<dyn crate::LocalModelCatalogSource>,
+        generation: RefreshGeneration,
+        request: &RefreshRequest,
+        cancellation: CancellationToken,
+    ) -> ProviderRefreshResult {
+        let Some(state) = provider.catalog.catalog_state() else {
+            return ProviderRefreshResult::NotRefreshable;
+        };
+        let state = state.as_ref();
+        let retained = || state.published_snapshot().models.len();
+        let failed = |error: CatalogError| ProviderRefreshResult::Failed {
+            restored_model_count: retained(),
+            error: error.report(),
+        };
+
+        let persisted = match await_catalog_or_cancelled(
+            self.inner
+                .models_store
+                .read(&provider.descriptor.id, cancellation.clone()),
+            &cancellation,
+        )
+        .await
+        {
+            Ok(Ok(value)) => value.map(Rc::new),
+            Ok(Err(error)) => return failed(CatalogError::from(error)),
+            Err(error) => return failed(error),
+        };
+
+        if let Some(snapshot) = &persisted
+            && let Err(error) = restore_local_persisted_candidate(
+                state,
+                generation,
+                snapshot,
+                self.inner.override_store.as_ref(),
+                cancellation.clone(),
+            )
+            .await
+        {
+            return failed(error);
+        }
+
+        if let Err(error) = state.verify_generation(generation, &cancellation) {
+            return failed(error);
+        }
+        if !request.allow_network {
+            return ProviderRefreshResult::RestoredOnly {
+                model_count: retained(),
+            };
+        }
+
+        let auth = match await_catalog_or_cancelled(
+            provider.auth.resolve(
+                crate::ResolveAuthRequest {
+                    provider: provider.descriptor.clone(),
+                    model: None,
+                },
+                cancellation.clone(),
+            ),
+            &cancellation,
+        )
+        .await
+        {
+            Ok(Ok(Some(auth))) => auth,
+            Ok(Ok(None)) => {
+                return ProviderRefreshResult::RestoredOnly {
+                    model_count: retained(),
+                };
+            }
+            Ok(Err(error)) => return failed(CatalogError::authentication(error.message)),
+            Err(error) => return failed(error),
+        };
+
+        let old_revision = state.published_snapshot().revision.clone();
+        let stored = persisted.map(|snapshot| Arc::new((*snapshot).clone()));
+        let candidate = match await_catalog_or_cancelled(
+            source.fetch(
+                CatalogFetchContext {
+                    provider: provider.descriptor.id.clone(),
+                    stored,
+                    auth,
+                    force: request.force,
+                },
+                cancellation.clone(),
+            ),
+            &cancellation,
+        )
+        .await
+        {
+            Ok(Ok(candidate)) => candidate,
+            Ok(Err(error)) | Err(error) => return failed(error),
+        };
+        let new_revision = candidate.revision.clone();
+        match publish_local_candidate(
+            state,
+            generation,
+            candidate,
+            self.inner.models_store.as_ref(),
+            self.inner.override_store.as_ref(),
+            cancellation,
+        )
+        .await
+        {
+            Ok(true) => ProviderRefreshResult::Refreshed {
+                old_revision,
+                new_revision,
+                model_count: retained(),
+            },
+            Ok(false) => failed(CatalogError::superseded()),
+            Err(error) => failed(error),
+        }
     }
 
     /// Executes the local simple request pipeline without retaining a registry
@@ -543,7 +1344,7 @@ impl LocalModels {
                 provider.auth.resolve(
                     crate::ResolveAuthRequest {
                         provider: provider.descriptor.clone(),
-                        model: model.clone(),
+                        model: Some(model.clone()),
                     },
                     cancellation.clone(),
                 ),
@@ -644,16 +1445,43 @@ impl LocalModelRuntime for LocalModels {
 }
 
 /// Immutable local Models configuration builder.
-#[derive(Default)]
 pub struct LocalModelsBuilder {
     providers: Vec<LocalProviderRegistration>,
+    models_store: Rc<dyn LocalModelsStore>,
+    override_store: Rc<dyn LocalModelOverrideStore>,
     header_transforms: Vec<Rc<dyn LocalHeaderTransform>>,
     payload_transforms: Vec<Rc<dyn LocalErasedPayloadTransform>>,
     response_observers: Vec<Rc<dyn LocalResponseObserver>>,
     attempt_middleware: Vec<Rc<dyn LocalAttemptMiddleware>>,
 }
 
+impl Default for LocalModelsBuilder {
+    fn default() -> Self {
+        Self {
+            providers: Vec::new(),
+            models_store: Rc::new(LocalInMemoryModelsStore::default()),
+            override_store: Rc::new(LocalInMemoryModelOverrideStore::default()),
+            header_transforms: Vec::new(),
+            payload_transforms: Vec::new(),
+            response_observers: Vec::new(),
+            attempt_middleware: Vec::new(),
+        }
+    }
+}
+
 impl LocalModelsBuilder {
+    /// Sets the local durable provider-originated catalog store.
+    pub fn models_store(mut self, store: Rc<dyn LocalModelsStore>) -> Self {
+        self.models_store = store;
+        self
+    }
+
+    /// Sets the local synchronous host-policy override store.
+    pub fn model_override_store(mut self, store: Rc<dyn LocalModelOverrideStore>) -> Self {
+        self.override_store = store;
+        self
+    }
+
     /// Adds or replaces a local provider by identifier.
     pub fn provider(mut self, provider: LocalProviderRegistration) -> Self {
         self.providers.push(provider);
@@ -699,14 +1527,51 @@ impl LocalModelsBuilder {
 
     /// Validates every local provider before publishing the initial map.
     pub fn build(self) -> Result<LocalModels, ProviderRegistrationError> {
-        let mut providers = IndexMap::new();
+        let mut providers: IndexMap<crate::ProviderId, LocalProviderSlot> = IndexMap::new();
         for provider in self.providers {
+            if let Some(state) = provider.catalog.catalog_state() {
+                let host_overrides = self
+                    .override_store
+                    .snapshot(&provider.descriptor.id)
+                    .map_err(|error| ProviderRegistrationError::Catalog {
+                        provider: provider.descriptor.id.clone(),
+                        message: error.message,
+                    })?;
+                state
+                    .replace_host_overrides(host_overrides)
+                    .map_err(|error| ProviderRegistrationError::Catalog {
+                        provider: provider.descriptor.id.clone(),
+                        message: error.message,
+                    })?;
+            }
             provider.validate()?;
-            providers.insert(provider.descriptor.id.clone(), Rc::new(provider));
+            let provider = Rc::new(provider);
+            let provider_id = provider.descriptor.id.clone();
+            if let Some(slot) = providers.get_mut(&provider_id) {
+                slot.coordination.supersede_refresh();
+                if let Some(state) = provider.catalog.catalog_state() {
+                    state.bind_coordination(Rc::clone(&slot.coordination));
+                }
+                slot.registration = Some(provider);
+            } else {
+                let coordination = Rc::new(LocalProviderRefreshCoordination::new());
+                if let Some(state) = provider.catalog.catalog_state() {
+                    state.bind_coordination(Rc::clone(&coordination));
+                }
+                providers.insert(
+                    provider_id,
+                    LocalProviderSlot {
+                        registration: Some(provider),
+                        coordination,
+                    },
+                );
+            }
         }
         Ok(LocalModels {
             inner: Rc::new(LocalModelsInner {
                 providers: RefCell::new(providers),
+                models_store: self.models_store,
+                override_store: self.override_store,
                 header_transforms: Rc::from(self.header_transforms),
                 payload_transforms: Rc::from(self.payload_transforms),
                 response_observers: Rc::from(self.response_observers),
@@ -728,6 +1593,18 @@ async fn await_or_cancelled<T, E>(
             RequestStartErrorKind::Cancelled,
             "request cancelled",
         )),
+    }
+}
+
+async fn await_catalog_or_cancelled<T, E>(
+    future: impl Future<Output = Result<T, E>>,
+    cancellation: &CancellationToken,
+) -> Result<Result<T, E>, CatalogError> {
+    let future = Box::pin(future);
+    let cancelled = Box::pin(cancellation.cancelled());
+    match select(future, cancelled).await {
+        Either::Left((result, _)) => Ok(result),
+        Either::Right(((), _)) => Err(CatalogError::cancelled()),
     }
 }
 

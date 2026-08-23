@@ -11,13 +11,15 @@ use crate::{
     DefaultRetryClassifier, ErasedApiOptionsPatch, ErasedPayloadContext, ErasedPayloadTransform,
     HeaderMapSpec, HttpRequest, HttpResponse, HttpTransport, LocalAssistantStream,
     LocalAttemptMiddleware, LocalBoxFuture, LocalDefaultRetryClassifier, LocalDefaultRetrySleeper,
-    LocalErasedPayloadTransform, LocalHttpResponse, LocalHttpTransport, LocalResponseObserver,
-    LocalRetryClassifier, LocalRetrySleeper, ModelDescriptor, ModelRef,
-    PayloadTransformDisposition, ProviderId, ProviderPayload, ProviderResponseMetadata,
-    RequestStartError, RequestStartErrorKind, ResponseObservationContext, ResponseObserver,
-    RetryClassifier, RetryDecision, RetryPolicy, RetrySleeper, SecretString, SendBoxFuture,
-    SimpleGenerationOptions, apply_header_spec, establish_with_retry_and_local_sleeper,
-    establish_with_retry_and_sleeper, request_id_from_headers,
+    LocalErasedPayloadTransform, LocalHttpResponse, LocalHttpTransport, LocalManagedModelCatalog,
+    LocalModelCatalogSource, LocalProviderCatalogState, LocalResponseObserver,
+    LocalRetryClassifier, LocalRetrySleeper, ManagedModelCatalog, ModelCatalogSource,
+    ModelDescriptor, ModelRef, PayloadTransformDisposition, ProviderCatalogState, ProviderId,
+    ProviderPayload, ProviderResponseMetadata, RequestStartError, RequestStartErrorKind,
+    ResponseObservationContext, ResponseObserver, RetryClassifier, RetryDecision, RetryPolicy,
+    RetrySleeper, SecretString, SendBoxFuture, SimpleGenerationOptions, apply_header_spec,
+    establish_with_retry_and_local_sleeper, establish_with_retry_and_sleeper,
+    request_id_from_headers,
 };
 use futures_util::future::{Either, select};
 use http::HeaderMap;
@@ -113,8 +115,9 @@ impl fmt::Debug for ResolvedAuth {
 pub struct ResolveAuthRequest {
     /// Registered provider metadata.
     pub provider: ProviderDescriptor,
-    /// Current catalog model.
-    pub model: ModelDescriptor,
+    /// Current catalog model for request execution, or `None` for a
+    /// provider-scoped catalog refresh.
+    pub model: Option<ModelDescriptor>,
 }
 
 /// Sanitized provider authentication failure.
@@ -210,12 +213,34 @@ impl LocalAuthResolver for AnonymousAuthResolver {
 pub trait ModelCatalog: Send + Sync + 'static {
     /// Returns the latest complete published snapshot.
     fn snapshot(&self) -> Arc<[ModelDescriptor]>;
+
+    /// Returns managed provenance state when this catalog participates in the
+    /// Models catalog control plane.
+    fn catalog_state(&self) -> Option<Arc<ProviderCatalogState>> {
+        None
+    }
+
+    /// Returns the dynamic source, absent for static catalogs.
+    fn catalog_source(&self) -> Option<Arc<dyn ModelCatalogSource>> {
+        None
+    }
 }
 
 /// Single-threaded synchronous immutable model snapshot.
 pub trait LocalModelCatalog: 'static {
     /// Returns the latest complete published snapshot.
     fn snapshot(&self) -> Rc<[ModelDescriptor]>;
+
+    /// Returns local managed provenance state when this catalog participates
+    /// in the LocalModels catalog control plane.
+    fn catalog_state(&self) -> Option<Rc<LocalProviderCatalogState>> {
+        None
+    }
+
+    /// Returns the non-`Send` dynamic source, absent for static catalogs.
+    fn catalog_source(&self) -> Option<Rc<dyn LocalModelCatalogSource>> {
+        None
+    }
 }
 
 /// Immutable catalog used by static providers and hermetic tests.
@@ -1089,6 +1114,7 @@ impl fmt::Debug for ProviderRegistration {
             .debug_struct("ProviderRegistration")
             .field("descriptor", &self.descriptor)
             .field("models", &self.catalog.snapshot().len())
+            .field("refreshable", &self.catalog.catalog_source().is_some())
             .field("apis", &self.apis.keys())
             .field("retry_policy", &self.retry_policy)
             .finish_non_exhaustive()
@@ -1127,6 +1153,8 @@ pub struct ProviderRegistrationBuilder {
     descriptor: ProviderDescriptor,
     auth: Arc<dyn AuthResolver>,
     catalog: Arc<dyn ModelCatalog>,
+    catalog_source: Option<Arc<dyn ModelCatalogSource>>,
+    preserve_catalog: bool,
     apis: HashMap<ApiId, Arc<dyn ChatApi>>,
     retry_policy: RetryPolicy,
     retry_classifier: Arc<dyn RetryClassifier>,
@@ -1139,6 +1167,8 @@ impl ProviderRegistrationBuilder {
             descriptor: ProviderDescriptor::new(id),
             auth: Arc::new(AnonymousAuthResolver),
             catalog: Arc::new(StaticModelCatalog::new(Vec::new())),
+            catalog_source: None,
+            preserve_catalog: false,
             apis: HashMap::new(),
             retry_policy: RetryPolicy::default(),
             retry_classifier: Arc::new(DefaultRetryClassifier::default()),
@@ -1172,12 +1202,24 @@ impl ProviderRegistrationBuilder {
     /// Sets the provider catalog.
     pub fn catalog(mut self, catalog: Arc<dyn ModelCatalog>) -> Self {
         self.catalog = catalog;
+        self.catalog_source = None;
+        self.preserve_catalog = true;
+        self
+    }
+
+    /// Sets a dynamic catalog source and uses its baseline as the initial
+    /// synchronous snapshot.
+    pub fn catalog_source(mut self, source: Arc<dyn ModelCatalogSource>) -> Self {
+        self.catalog_source = Some(source);
+        self.preserve_catalog = false;
         self
     }
 
     /// Sets a static catalog directly.
     pub fn models(mut self, models: Vec<ModelDescriptor>) -> Self {
         self.catalog = Arc::new(StaticModelCatalog::new(models));
+        self.catalog_source = None;
+        self.preserve_catalog = false;
         self
     }
 
@@ -1201,13 +1243,42 @@ impl ProviderRegistrationBuilder {
 
     /// Validates and creates an atomic provider registration.
     pub fn build(self) -> Result<ProviderRegistration, ProviderRegistrationError> {
+        let Self {
+            descriptor,
+            auth,
+            catalog,
+            catalog_source,
+            preserve_catalog,
+            apis,
+            retry_policy,
+            retry_classifier,
+        } = self;
+        let catalog = if preserve_catalog {
+            catalog
+        } else {
+            let baseline = catalog_source
+                .as_ref()
+                .map(|source| source.baseline())
+                .unwrap_or_else(|| catalog.snapshot());
+            let allowed_apis = Arc::from(apis.keys().cloned().collect::<Vec<_>>());
+            let catalog_state = Arc::new(
+                ProviderCatalogState::new(descriptor.id.clone(), baseline, allowed_apis).map_err(
+                    |error| ProviderRegistrationError::Catalog {
+                        provider: descriptor.id.clone(),
+                        message: error.message,
+                    },
+                )?,
+            );
+            Arc::new(ManagedModelCatalog::new(catalog_state, catalog_source))
+                as Arc<dyn ModelCatalog>
+        };
         let registration = ProviderRegistration {
-            descriptor: self.descriptor,
-            auth: self.auth,
-            catalog: self.catalog,
-            apis: self.apis,
-            retry_policy: self.retry_policy,
-            retry_classifier: self.retry_classifier,
+            descriptor,
+            auth,
+            catalog,
+            apis,
+            retry_policy,
+            retry_classifier,
         };
         registration.validate()?;
         Ok(registration)
@@ -1231,6 +1302,13 @@ pub enum ProviderRegistrationError {
         /// Missing API identifier.
         api: ApiId,
     },
+    /// Catalog baseline or managed state is invalid.
+    Catalog {
+        /// Provider being registered.
+        provider: ProviderId,
+        /// Secret-free validation detail.
+        message: String,
+    },
 }
 
 impl fmt::Display for ProviderRegistrationError {
@@ -1247,6 +1325,12 @@ impl fmt::Display for ProviderRegistrationError {
                 write!(
                     formatter,
                     "provider {provider} has no API implementation for {api}"
+                )
+            }
+            Self::Catalog { provider, message } => {
+                write!(
+                    formatter,
+                    "invalid catalog for provider {provider}: {message}"
                 )
             }
         }
@@ -1279,6 +1363,7 @@ impl fmt::Debug for LocalProviderRegistration {
             .debug_struct("LocalProviderRegistration")
             .field("descriptor", &self.descriptor)
             .field("models", &self.catalog.snapshot().len())
+            .field("refreshable", &self.catalog.catalog_source().is_some())
             .field("apis", &self.apis.keys())
             .field("retry_policy", &self.retry_policy)
             .finish_non_exhaustive()
@@ -1317,6 +1402,8 @@ pub struct LocalProviderRegistrationBuilder {
     descriptor: ProviderDescriptor,
     auth: Rc<dyn LocalAuthResolver>,
     catalog: Rc<dyn LocalModelCatalog>,
+    catalog_source: Option<Rc<dyn LocalModelCatalogSource>>,
+    preserve_catalog: bool,
     apis: HashMap<ApiId, Rc<dyn LocalChatApi>>,
     retry_policy: RetryPolicy,
     retry_classifier: Rc<dyn LocalRetryClassifier>,
@@ -1329,6 +1416,8 @@ impl LocalProviderRegistrationBuilder {
             descriptor: ProviderDescriptor::new(id),
             auth: Rc::new(AnonymousAuthResolver),
             catalog: Rc::new(LocalStaticModelCatalog::new(Vec::new())),
+            catalog_source: None,
+            preserve_catalog: false,
             apis: HashMap::new(),
             retry_policy: RetryPolicy::default(),
             retry_classifier: Rc::new(LocalDefaultRetryClassifier::default()),
@@ -1362,12 +1451,24 @@ impl LocalProviderRegistrationBuilder {
     /// Sets the local provider catalog.
     pub fn catalog(mut self, catalog: Rc<dyn LocalModelCatalog>) -> Self {
         self.catalog = catalog;
+        self.catalog_source = None;
+        self.preserve_catalog = true;
+        self
+    }
+
+    /// Sets a non-`Send` dynamic catalog source and uses its baseline as the
+    /// initial synchronous snapshot.
+    pub fn catalog_source(mut self, source: Rc<dyn LocalModelCatalogSource>) -> Self {
+        self.catalog_source = Some(source);
+        self.preserve_catalog = false;
         self
     }
 
     /// Sets a static local catalog directly.
     pub fn models(mut self, models: Vec<ModelDescriptor>) -> Self {
         self.catalog = Rc::new(LocalStaticModelCatalog::new(models));
+        self.catalog_source = None;
+        self.preserve_catalog = false;
         self
     }
 
@@ -1391,13 +1492,41 @@ impl LocalProviderRegistrationBuilder {
 
     /// Validates and creates an atomic local provider registration.
     pub fn build(self) -> Result<LocalProviderRegistration, ProviderRegistrationError> {
+        let Self {
+            descriptor,
+            auth,
+            catalog,
+            catalog_source,
+            preserve_catalog,
+            apis,
+            retry_policy,
+            retry_classifier,
+        } = self;
+        let catalog = if preserve_catalog {
+            catalog
+        } else {
+            let baseline = catalog_source
+                .as_ref()
+                .map(|source| source.baseline())
+                .unwrap_or_else(|| catalog.snapshot());
+            let allowed_apis = Rc::from(apis.keys().cloned().collect::<Vec<_>>());
+            let catalog_state = Rc::new(
+                LocalProviderCatalogState::new(descriptor.id.clone(), baseline, allowed_apis)
+                    .map_err(|error| ProviderRegistrationError::Catalog {
+                        provider: descriptor.id.clone(),
+                        message: error.message,
+                    })?,
+            );
+            Rc::new(LocalManagedModelCatalog::new(catalog_state, catalog_source))
+                as Rc<dyn LocalModelCatalog>
+        };
         let registration = LocalProviderRegistration {
-            descriptor: self.descriptor,
-            auth: self.auth,
-            catalog: self.catalog,
-            apis: self.apis,
-            retry_policy: self.retry_policy,
-            retry_classifier: self.retry_classifier,
+            descriptor,
+            auth,
+            catalog,
+            apis,
+            retry_policy,
+            retry_classifier,
         };
         registration.validate()?;
         Ok(registration)

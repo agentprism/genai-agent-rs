@@ -13,6 +13,7 @@
 mod async_types;
 mod auth;
 mod cancellation;
+mod catalog;
 mod handoff;
 mod ids;
 mod messages;
@@ -32,6 +33,7 @@ mod usage;
 pub use async_types::*;
 pub use auth::*;
 pub use cancellation::*;
+pub use catalog::*;
 pub use handoff::*;
 pub use ids::*;
 pub use messages::*;

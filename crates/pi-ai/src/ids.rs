@@ -115,6 +115,12 @@ impl ModelRef {
     }
 }
 
+impl fmt::Display for ModelRef {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}/{}", self.provider, self.model)
+    }
+}
+
 /// A Unix timestamp in milliseconds (Architecture v2 part 1 §3.1).
 #[derive(
     Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize,

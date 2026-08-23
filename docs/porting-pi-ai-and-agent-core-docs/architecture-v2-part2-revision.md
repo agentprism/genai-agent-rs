@@ -2852,6 +2852,8 @@ This avoids a removed override becoming permanently baked into the dynamic-provi
 
 Synchronous reads remain against the current immutable snapshot. Refresh is explicit and asynchronous. Static providers make refresh a no-op. That matches Pi's documented provider collection behavior.
 
+> Correction: Pinned Pi implements the static-provider no-op by filtering static and unknown providers out of the refresh work and result entirely. It also suppresses a provider error whenever that provider's composed signal is aborted, including a refresh superseded by a newer generation (`packages/ai/src/models.ts:306–430`; `packages/ai/test/models-runtime.test.ts:515–614`). The Rust `Models::refresh` report follows that observable behavior: only selected dynamic, non-aborted provider generations receive per-provider entries.
+
 ```rust
 pub struct RefreshReport {
     pub aborted: bool,

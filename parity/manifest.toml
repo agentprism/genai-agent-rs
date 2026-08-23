@@ -14,6 +14,11 @@ rust = ["headers_auth_before_model", "headers_explicit_before_transform", "heade
 status = "semantic-parity"
 
 [[mapping]]
+source = "packages/ai/src/models.ts#catalog-control-plane"
+rust = ["catalog_failed_persist_keeps_old_snapshot", "catalog_host_override_applies_after_dynamic_snapshot", "catalog_network_refresh_is_best_effort_per_provider", "catalog_persist_precedes_publish", "catalog_raw_snapshot_does_not_contain_flattened_override", "catalog_reader_never_sees_partial_candidate", "catalog_reads_last_published_snapshot_synchronously", "catalog_removed_override_reveals_provider_value", "catalog_restore_precedes_auth_resolution", "catalog_restore_precedes_network", "catalog_runtime_override_has_highest_precedence", "catalog_static_refresh_is_noop", "catalog_superseded_refresh_cannot_publish", "catalog_typed_compat_mismatch_is_rejected", "catalog_unknown_extensions_round_trip"]
+status = "semantic-parity"
+
+[[mapping]]
 source = "packages/ai/src/types.ts#request-middleware"
 rust = ["attempt_middleware_runs_per_retry", "injected_http_transport_receives_final_request", "payload_in_place_mutation_is_retained", "payload_replacement_is_retained", "payload_transform_runs_once_per_logical_request", "payload_transforms_run_in_registration_order", "request_debug_redacts_secrets", "response_observer_runs_before_body_consumption", "response_observer_runs_for_retry_responses", "timeout_ms_is_enforced_per_transport_attempt", "timeout_ms_is_forwarded_by_models", "typed_payload_transform_is_adapted_by_models"]
 status = "semantic-parity"
@@ -746,19 +751,19 @@ milestone = "M6"
 source = "packages/ai/test/model-catalog-types.test.ts"
 rust = []
 status = "planned"
-milestone = "M3.2"
+milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/model-data-validation.test.ts"
 rust = []
 status = "planned"
-milestone = "M3.2"
+milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/models-runtime.test.ts"
 rust = []
 status = "planned"
-milestone = "M3.2"
+milestone = "M3.3"
 
 [[mapping]]
 source = "packages/ai/test/node-http-proxy.test.ts"
