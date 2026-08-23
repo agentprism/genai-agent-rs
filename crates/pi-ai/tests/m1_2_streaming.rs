@@ -472,7 +472,7 @@ fn stream_failure_is_terminal_message() {
         "partial-replay",
         ReplayDataOperation::AppendUtf8("unfinished".into()),
     );
-    let message = assembler.finish_failed(public_error());
+    let message = assembler.finish_failed(public_error(), None);
     assert_eq!(message.id, MessageId::new("message-1"));
     assert_eq!(message.response_id.as_deref(), Some("chatcmpl-7"));
     assert_eq!(message.response_model, Some(ModelId::new("produced-model")));
@@ -662,7 +662,7 @@ fn stream_tool_json_scratch_not_persisted() {
             delta: "{\"path\":\"".into(),
         })
         .unwrap();
-    let failed = assembler.finish_failed(public_error());
+    let failed = assembler.finish_failed(public_error(), None);
     let json = serde_json::to_string(&failed).unwrap();
     assert!(!json.contains("arguments_scratch"));
     assert!(!json.contains("partialJson"));
@@ -706,7 +706,7 @@ fn stream_failure_preserves_partial_tool_arguments() {
     // §10.1 and §2.1 exact failed record; Pi basis: json-parse.ts
     // `parseStreamingJson` and the Anthropic/OpenAI/Bedrock error paths retain
     // parsed arguments while deleting only parser buffers.
-    let message = partial_tool_assembler().finish_failed(public_error());
+    let message = partial_tool_assembler().finish_failed(public_error(), None);
     assert_partial_tool_arguments(&message);
     assert_eq!(message.finish.reason, AssistantFinishReason::Error);
 }
@@ -750,7 +750,7 @@ fn stream_failure_preserves_partial_tool_with_incomplete_metadata() {
         )))
     );
 
-    let message = assembler.finish_failed(public_error());
+    let message = assembler.finish_failed(public_error(), None);
     assert!(matches!(
         &message.content[0],
         ContentBlock::ToolCall { call, .. }
@@ -838,7 +838,7 @@ fn stream_partial_tool_json_matches_pi() {
                 delta: fragment.into(),
             })
             .unwrap();
-        let message = assembler.finish_failed(public_error());
+        let message = assembler.finish_failed(public_error(), None);
         assert!(matches!(
             &message.content[0],
             ContentBlock::ToolCall { call, .. } if call.arguments == expected
@@ -877,7 +877,7 @@ fn stream_partial_tool_malformed_numbers_match_pi() {
                 delta: fragment.into(),
             })
             .unwrap();
-        let message = assembler.finish_failed(public_error());
+        let message = assembler.finish_failed(public_error(), None);
         assert!(matches!(
             &message.content[0],
             ContentBlock::ToolCall { call, .. } if call.arguments == expected
@@ -947,7 +947,7 @@ fn assembler_applies_finished_failed_and_cancelled_terminals() {
     let mut failed_source = started("openai", "openai-completions", "gpt-test");
     start_block(&mut failed_source, "text-0", 0, ContentBlockKind::Text);
     failed_source.apply(&delta).unwrap();
-    let failed = failed_source.finish_failed(public_error());
+    let failed = failed_source.finish_failed(public_error(), None);
     let mut failed_consumer = AssistantAssembler::new();
     for event in [&start, &block_start, &delta] {
         failed_consumer.apply(event).unwrap();
@@ -1100,7 +1100,7 @@ fn replay_r3_failed_and_cancelled_items_are_incomplete_and_ignored() {
         "r0",
         ReplayDataOperation::AppendUtf8("partial".into()),
     );
-    let failed = failed_assembler.finish_failed(public_error());
+    let failed = failed_assembler.finish_failed(public_error(), None);
 
     let mut cancelled_assembler = started("anthropic", "anthropic-messages", "claude");
     start_replay(
@@ -1319,7 +1319,7 @@ fn anthropic_failed_partial_signature_is_not_replayed() {
         "r0",
         ReplayDataOperation::AppendUtf8("partial-signature".into()),
     );
-    let message = assembler.finish_failed(public_error());
+    let message = assembler.finish_failed(public_error(), None);
     let target = complete_target(&message);
     assert!(
         !message
@@ -1372,7 +1372,7 @@ fn openai_chat_incomplete_reasoning_detail_is_not_replayed() {
         "detail-0",
         ReplayDataOperation::ReplaceJsonBytes(br#"{"type":"reasoning.encrypted"}"#.to_vec()),
     );
-    let message = assembler.finish_failed(public_error());
+    let message = assembler.finish_failed(public_error(), None);
     let target = complete_target(&message);
     assert!(
         message
@@ -1491,7 +1491,7 @@ fn responses_incomplete_output_item_is_not_replayed() {
         "output-0",
         ReplayDataOperation::ReplaceJsonBytes(br#"{"id":"rs_partial"}"#.to_vec()),
     );
-    let message = assembler.finish_failed(public_error());
+    let message = assembler.finish_failed(public_error(), None);
     let target = complete_target(&message);
     assert!(
         !message
@@ -1592,7 +1592,7 @@ fn bedrock_partial_redacted_payload_is_not_replayed() {
         "redacted-0",
         ReplayDataOperation::AppendBytes(vec![1, 2]),
     );
-    let message = assembler.finish_failed(public_error());
+    let message = assembler.finish_failed(public_error(), None);
     let target = complete_target(&message);
     assert!(
         !message

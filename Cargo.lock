@@ -895,6 +895,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-ai-openai"
+version = "0.1.0"
+dependencies = [
+ "futures-executor",
+ "futures-timer",
+ "futures-util",
+ "http",
+ "pi-ai",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"

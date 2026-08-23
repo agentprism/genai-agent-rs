@@ -1131,7 +1131,7 @@ macro_rules! agent_run_stream {
                                 }),
                             );
                             if outer_started {
-                                assembler.finish_failed(error)
+                                assembler.finish_failed(error, None)
                             } else {
                                 let message = empty_failed_message(
                                     $guard.agent.allocate_message_id("assistant"),

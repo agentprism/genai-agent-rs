@@ -17,7 +17,8 @@ use crate::{
     ProviderCatalogLayers, ProviderCatalogState, ProviderRefreshCoordination,
     ProviderRefreshResult, ProviderRegistration, ProviderRegistrationError, RefreshGeneration,
     RefreshReport, RefreshRequest, RequestStartError, RequestStartErrorKind, ResolvedApiRequest,
-    ResponseObserver, SendBoxFuture, apply_header_spec, local_provider_default_headers,
+    ResponseObserver, SendBoxFuture, apply_header_spec,
+    apply_openai_completions_session_affinity_headers, local_provider_default_headers,
     merge_header_map, provider_default_headers, publish_candidate, publish_local_candidate,
     restore_local_persisted_candidate, restore_persisted_candidate,
 };
@@ -736,6 +737,18 @@ impl Models {
                 RequestStartError::new(RequestStartErrorKind::InvalidRequest, error.message)
                     .with_model(request.model.clone())
             })?;
+            if let crate::ApiModelConfig::OpenAiCompletions(config) = &model.api {
+                apply_openai_completions_session_affinity_headers(
+                    &endpoint,
+                    &config.compat,
+                    &request.options,
+                    &mut headers,
+                )
+                .map_err(|error| {
+                    RequestStartError::new(RequestStartErrorKind::InvalidRequest, error.message)
+                        .with_model(request.model.clone())
+                })?;
+            }
             apply_header_spec(&mut headers, &request.options.headers).map_err(|error| {
                 RequestStartError::new(RequestStartErrorKind::InvalidRequest, error.message)
                     .with_model(request.model.clone())
@@ -1661,6 +1674,18 @@ impl LocalModels {
                 RequestStartError::new(RequestStartErrorKind::InvalidRequest, error.message)
                     .with_model(request.model.clone())
             })?;
+            if let crate::ApiModelConfig::OpenAiCompletions(config) = &model.api {
+                apply_openai_completions_session_affinity_headers(
+                    &endpoint,
+                    &config.compat,
+                    &request.options,
+                    &mut headers,
+                )
+                .map_err(|error| {
+                    RequestStartError::new(RequestStartErrorKind::InvalidRequest, error.message)
+                        .with_model(request.model.clone())
+                })?;
+            }
             apply_header_spec(&mut headers, &request.options.headers).map_err(|error| {
                 RequestStartError::new(RequestStartErrorKind::InvalidRequest, error.message)
                     .with_model(request.model.clone())

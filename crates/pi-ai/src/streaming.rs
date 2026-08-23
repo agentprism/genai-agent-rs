@@ -1048,10 +1048,14 @@ impl AssistantAssembler {
 
     /// Finishes a failed message, retaining complete replay items and marking
     /// unfinished items incomplete (Architecture v2 part 2 §2.1).
-    pub fn finish_failed(self, error: PublicError) -> AssistantMessage {
+    pub fn finish_failed(
+        self,
+        error: PublicError,
+        raw_provider_reason: Option<String>,
+    ) -> AssistantMessage {
         self.build_terminal_without_validation(AssistantFinish {
             reason: AssistantFinishReason::Error,
-            raw_provider_reason: None,
+            raw_provider_reason,
             error: Some(error.sanitized(&[])),
         })
     }

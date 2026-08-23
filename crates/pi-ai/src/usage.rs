@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Number of tokens in the denominator of every [`MoneyRate`].
-pub const TOKENS_PER_PRICE_RATE: u128 = 1_000_000;
+pub const TOKENS_PER_PRICE_RATE: i128 = 1_000_000;
 
 /// Provenance of a cumulative usage total (Architecture v2 part 1 §3.9).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -104,7 +104,7 @@ pub struct Cost {
     /// Currency in which the cost is denominated.
     pub currency: Currency,
     /// Cost in millionths of the currency unit.
-    pub micros: u128,
+    pub micros: i128,
 }
 
 /// Integer micro-currency units per million tokens
@@ -113,12 +113,12 @@ pub struct Cost {
 #[serde(transparent)]
 pub struct MoneyRate(
     /// Micro-currency units charged per million tokens.
-    pub u128,
+    pub i128,
 );
 
 impl MoneyRate {
     /// Creates an integer price rate.
-    pub const fn new(micros_per_million_tokens: u128) -> Self {
+    pub const fn new(micros_per_million_tokens: i128) -> Self {
         Self(micros_per_million_tokens)
     }
 
@@ -126,9 +126,9 @@ impl MoneyRate {
     ///
     /// Sub-micro-unit fractions are truncated, matching integer fixed-point
     /// arithmetic without ever overstating the provider charge.
-    pub fn cost_for_tokens(self, tokens: u64) -> Result<u128, CostArithmeticError> {
+    pub fn cost_for_tokens(self, tokens: u64) -> Result<i128, CostArithmeticError> {
         self.0
-            .checked_mul(u128::from(tokens))
+            .checked_mul(i128::from(tokens))
             .map(|value| value / TOKENS_PER_PRICE_RATE)
             .ok_or(CostArithmeticError::Overflow)
     }
@@ -231,10 +231,10 @@ impl ModelPricing {
         ];
         let numerator = priced_tokens
             .into_iter()
-            .try_fold(0_u128, |total, (rate, tokens)| {
+            .try_fold(0_i128, |total, (rate, tokens)| {
                 let part = rate
                     .0
-                    .checked_mul(u128::from(tokens))
+                    .checked_mul(i128::from(tokens))
                     .ok_or(CostArithmeticError::Overflow)?;
                 total.checked_add(part).ok_or(CostArithmeticError::Overflow)
             })?;

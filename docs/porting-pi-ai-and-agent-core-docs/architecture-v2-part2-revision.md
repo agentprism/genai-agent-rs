@@ -338,6 +338,8 @@ impl AssistantAssembler {
 }
 ```
 
+> Correction: Pinned Pi assigns `rawStopReason` before mapping a provider finish reason and retains it when that mapping produces a failed assistant (including `content_filter`). The Rust assembler's failed-terminal operation therefore also accepts `raw_provider_reason: Option<String>`; provider decoders pass the observed value while transport failures pass `None` (`packages/ai/src/api/openai-completions.ts:535–545,641–674`; `packages/ai/test/openai-completions-raw-stop-reason.test.ts`).
+
 Completion validation is strict:
 
 ```rust
@@ -1442,6 +1444,8 @@ pub struct ApiExecutionContext<'a> {
 }
 ```
 
+> Correction: Pinned OpenAI Completions decoding closes streamed custom grammar-tool input with the input-property name derived from the request's configured tool schema. The execution context must therefore retain the canonical request context (or an equivalent request-scoped decoder configuration) through response decoding; the Rust `ApiExecutionContext` and local counterpart include `context: &Context` for that purpose (`packages/ai/src/api/openai-completions.ts:290–490`; `packages/ai/src/api/constrained-sampling.ts:250–277`).
+
 ### Cancellable retry loop
 
 ```rust
@@ -2067,6 +2071,10 @@ pub enum OpenAiReasoningPlan {
 }
 ```
 
+> Correction: Pinned Pi's provider-neutral simple `ToolChoice` is only `"auto" | "none"`, but full `OpenAICompletionsOptions.toolChoice` is the optional native OpenAI SDK `ChatCompletionToolChoiceOption`. The Rust simple contract remains narrow; the full family options instead use `Option<OpenAiCompletionsToolChoice>` and represent `auto`, `none`, `required`, named function/custom choices, and `allowed_tools`. `None` retains omission, while simple lowering maps only an explicitly supplied provider-neutral choice into the native representation (`packages/ai/src/types.ts:82,310–318`; `packages/ai/src/api/openai-completions.ts:160–169,810–812`; OpenAI SDK 6.40.0 `ChatCompletionToolChoiceOption`).
+
+> Correction: The single-variant reasoning plan above cannot represent pinned Pi's wire behavior. Pi applies thinking-format fields first and the top-level thinking-token-budget field independently, and Baseten emits `chat_template_args` plus mapped `reasoning_effort`. The Rust plan is therefore the product of a format-specific `OpenAiReasoningMode` and an optional `OpenAiReasoningTokenBudget`; Baseten's chat-template mode also retains an optional reasoning effort. The reasoning-effort mode retains whether its string came from the model's thinking-level map or from the requested level, because Ant Ling emits `reasoning.effort` only for a mapped string. `OpenAiCompletionsOptions` additionally retains named `temperature` separately from the ordered late `samplingParams` overlay, because a named temperature is inserted early while an overlay-only temperature is inserted late, and an overlay replacing a named temperature keeps the early property position (`packages/ai/src/api/openai-completions.ts:880–951`; `packages/ai/test/openai-completions-thinking-token-budget.test.ts`; `packages/ai/test/openai-completions-tool-choice.test.ts:1769–1840`; `packages/ai/test/baseten-models.test.ts`; `packages/ai/test/sampling-options.test.ts`).
+
 ```rust
 impl ApiFamily for OpenAiCompletions {
     fn resolve_compat(
@@ -2119,6 +2127,8 @@ impl ApiFamily for OpenAiCompletions {
 ```
 
 Compatibility detection must use the **effective** base URL after authentication resolution. This matters for credentials such as Copilot or gateway credentials that supply a base URL.
+
+> Correction: Pinned Pi's `detectCompat` also uses provider identity and, for OpenRouter, the model-id prefix for developer-role and Anthropic cache-control behavior. The adopted `ApiFamily::resolve_compat` signature intentionally receives only the effective URL plus typed overrides, so built-in provider catalog adapters must materialize every provider/model-dependent Pi value into `OpenAiCompletionsCompat`; URL-dependent values continue to be detected from the effective post-authentication URL. Custom descriptors using a provider-dependent Pi convention that is not inferable from their effective URL must supply the corresponding typed override.
 
 ## 3.7 `xhigh` and unsupported mappings
 
@@ -2666,6 +2676,8 @@ pub struct CacheWriteRetentionPricing {
 ```
 
 This avoids `f64` monetary arithmetic and can represent cache-retention-specific rates without burying them in extensions.
+
+> Correction: Pinned Pi retains the published `-1000000` OpenRouter rates and `calculateCost` applies them directly. Rust therefore uses signed fixed-point integers for `MoneyRate` and `Cost.micros`, retaining and calculating those negative values without `f64` arithmetic (`packages/ai/src/models.ts:878–897`; published `openrouter/auto` and `openrouter/auto-beta` catalog records).
 
 ## 5.3 Catalog layers
 

@@ -252,6 +252,14 @@ impl OrderedJsonArray {
         &self.0
     }
 
+    /// Returns the ordered elements mutably.
+    ///
+    /// API-family encoders use this to attach provider metadata after the
+    /// canonical message shape has been assembled.
+    pub fn as_mut_slice(&mut self) -> &mut [OrderedJsonValue] {
+        &mut self.0
+    }
+
     /// Iterates in array order.
     pub fn iter(&self) -> std::slice::Iter<'_, OrderedJsonValue> {
         self.0.iter()

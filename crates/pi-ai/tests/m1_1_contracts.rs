@@ -67,7 +67,7 @@ fn empty_level_map<T>() -> ThinkingLevelMap<T> {
     }
 }
 
-fn rates(input: u128, output: u128, cache_read: u128, cache_write: u128) -> TokenPriceRates {
+fn rates(input: i128, output: i128, cache_read: i128, cache_write: i128) -> TokenPriceRates {
     TokenPriceRates {
         input: MoneyRate::new(input),
         output: MoneyRate::new(output),
@@ -689,7 +689,7 @@ fn request_wide_pricing_uses_highest_strictly_exceeded_tier() {
         MoneyRate::new(3_000_000)
     );
     assert_eq!(
-        MoneyRate::new(u128::MAX).cost_for_tokens(2),
+        MoneyRate::new(i128::MAX).cost_for_tokens(2),
         Err(CostArithmeticError::Overflow)
     );
 }

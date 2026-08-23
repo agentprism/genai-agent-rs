@@ -558,6 +558,8 @@ pub struct ResolvedApiRequest {
 pub struct ApiExecutionContext<'a> {
     /// Current catalog model.
     pub model: &'a ModelDescriptor,
+    /// Canonical request context retained for response-decoder configuration.
+    pub context: &'a Context,
     /// Effective endpoint.
     pub endpoint: &'a Url,
     /// Final logical headers.
@@ -678,6 +680,7 @@ impl HttpChatApi {
 
         let execution = ApiExecutionContext {
             model: &request.model,
+            context: &request.context,
             endpoint: &request.endpoint,
             headers: &request.headers,
             retry_policy: &request.retry_policy,
@@ -807,6 +810,7 @@ impl HttpChatApi {
 
         let execution = ApiExecutionContext {
             model: &request.model,
+            context: &request.context,
             endpoint: &request.endpoint,
             headers: &request.headers,
             retry_policy: &request.retry_policy,
@@ -864,6 +868,8 @@ pub struct LocalResolvedApiRequest {
 pub struct LocalApiExecutionContext<'a> {
     /// Current catalog model.
     pub model: &'a ModelDescriptor,
+    /// Canonical request context retained for response-decoder configuration.
+    pub context: &'a Context,
     /// Effective endpoint.
     pub endpoint: &'a Url,
     /// Final logical headers.
@@ -962,6 +968,7 @@ impl LocalHttpChatApi {
 
         let execution = LocalApiExecutionContext {
             model: &request.model,
+            context: &request.context,
             endpoint: &request.endpoint,
             headers: &request.headers,
             retry_policy: &request.retry_policy,
@@ -1097,6 +1104,7 @@ impl LocalHttpChatApi {
 
         let execution = LocalApiExecutionContext {
             model: &request.model,
+            context: &request.context,
             endpoint: &request.endpoint,
             headers: &request.headers,
             retry_policy: &request.retry_policy,

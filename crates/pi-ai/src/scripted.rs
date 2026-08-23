@@ -480,7 +480,7 @@ fn materialize(
         ScriptedTerminal::Failed(error) => AssistantEvent::Failed {
             message: assembler
                 .clone()
-                .finish_failed(error.sanitized(&request_secret_values(request))),
+                .finish_failed(error.sanitized(&request_secret_values(request)), None),
         },
         ScriptedTerminal::Cancelled(reason) => AssistantEvent::Cancelled {
             message: assembler.clone().finish_cancelled(reason),
@@ -562,14 +562,17 @@ fn validate_or_close_premature(
         terminal |= event.is_terminal();
     }
     if !terminal {
-        let message = assembler.finish_failed(PublicError {
-            code: "missing_provider_terminal".into(),
-            message: "scripted provider stream ended without a terminal event".into(),
-            retryable: false,
-            provider_code: None,
-            status: None,
-            request_id: None,
-        });
+        let message = assembler.finish_failed(
+            PublicError {
+                code: "missing_provider_terminal".into(),
+                message: "scripted provider stream ended without a terminal event".into(),
+                retryable: false,
+                provider_code: None,
+                status: None,
+                request_id: None,
+            },
+            None,
+        );
         events.push(AssistantEvent::Failed { message });
     }
     Ok(events)
