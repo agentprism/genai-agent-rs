@@ -7,7 +7,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::value::RawValue;
-use std::fmt;
+use std::{any::Any, fmt, sync::Arc};
 use url::Url;
 
 /// Provider-neutral reasoning level accepted by simple generation calls.
@@ -372,7 +372,7 @@ pub trait ApiFamily: Send + Sync + 'static {
     /// Typed API-family catalog configuration.
     type ModelConfig: Clone + Send + Sync;
     /// Fully planned API-family generation options.
-    type FullOptions: Clone + Send + Sync;
+    type FullOptions: Clone + Send + Sync + 'static;
     /// Typed patch applied after common simple options.
     type OptionsPatch: Clone + Send + Sync + Default;
     /// Provider wire request before transport middleware.
@@ -396,6 +396,94 @@ pub trait ApiFamily: Send + Sync + 'static {
         context: EncodeContext<'_, Self>,
         options: &Self::FullOptions,
     ) -> Result<Self::WireRequest, EncodeError>;
+}
+
+/// Type-erased fully API-specific options carried through provider dispatch.
+///
+/// Unlike [`ErasedApiOptionsPatch`], this value is an in-process typed Rust
+/// object rather than a serialized simple-options patch. The API handler that
+/// registered the matching family recovers the exact associated
+/// [`ApiFamily::FullOptions`] type without invoking simple lowering.
+#[derive(Clone)]
+pub struct ErasedApiFullOptions {
+    /// API family that owns the full options value.
+    pub api: ApiId,
+    value: Arc<dyn Any + Send + Sync>,
+}
+
+impl ErasedApiFullOptions {
+    /// Erases one API family's fully typed options.
+    pub fn new<A: ApiFamily>(value: A::FullOptions) -> Self {
+        Self {
+            api: ApiId::new(A::API_ID),
+            value: Arc::new(value),
+        }
+    }
+
+    /// Recovers the full options when this value belongs to `A`.
+    pub fn downcast_ref<A: ApiFamily>(&self) -> Option<&A::FullOptions> {
+        (self.api.as_str() == A::API_ID)
+            .then(|| self.value.downcast_ref::<A::FullOptions>())
+            .flatten()
+    }
+}
+
+impl fmt::Debug for ErasedApiFullOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ErasedApiFullOptions")
+            .field("api", &self.api)
+            .field("value", &"<redacted typed options>")
+            .finish()
+    }
+}
+
+/// API-independent transport controls for a fully API-specific request.
+///
+/// Pi's full provider options extend its common request options. Rust keeps
+/// those transport concerns separate from [`ApiFamily::FullOptions`] so the
+/// family type contains only lowering and wire-shaping data.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ApiRequestOptions {
+    /// Maximum retry attempts after the initial pre-stream request.
+    pub max_retries: Option<u32>,
+    /// Maximum provider-requested retry delay in milliseconds.
+    pub max_retry_delay_ms: Option<u64>,
+    /// HTTP response-establishment timeout in milliseconds.
+    pub timeout_ms: Option<u64>,
+    /// Optional provider session-affinity identifier.
+    pub session_id: Option<String>,
+    /// Explicit logical request headers, including deletion markers.
+    pub headers: HeaderMapSpec,
+}
+
+impl From<&SimpleGenerationOptions> for ApiRequestOptions {
+    fn from(options: &SimpleGenerationOptions) -> Self {
+        Self {
+            max_retries: options.max_retries,
+            max_retry_delay_ms: options.max_retry_delay_ms,
+            timeout_ms: options.timeout_ms,
+            session_id: options.session_id.clone(),
+            headers: options.headers.clone(),
+        }
+    }
+}
+
+impl fmt::Debug for ApiRequestOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ApiRequestOptions")
+            .field("max_retries", &self.max_retries)
+            .field("max_retry_delay_ms", &self.max_retry_delay_ms)
+            .field("timeout_ms", &self.timeout_ms)
+            .field(
+                "session_id",
+                &self.session_id.as_ref().map(|_| "<redacted session id>"),
+            )
+            .field("headers", &"<redacted headers>")
+            .finish()
+    }
 }
 
 /// Alternate typed and erased representations of one API-family patch

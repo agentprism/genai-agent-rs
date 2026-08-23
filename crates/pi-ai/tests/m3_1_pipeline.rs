@@ -322,6 +322,8 @@ fn resolved_request(
         model: model(),
         context: pi_ai::Context::new(None),
         options: SimpleGenerationOptions::default(),
+        full_options: None,
+        request_options: pi_ai::ApiRequestOptions::default(),
         endpoint: Url::parse("https://effective.example/v1").unwrap(),
         headers: headers(&[("content-type", "application/json")]),
         api_key: None,

@@ -9,6 +9,7 @@ members = [
     "crates/pi-agent-runtime-tokio",
     "crates/pi-agent-compat-pi-jsonl",
     "providers/pi-ai-openai",
+    "providers/pi-ai-anthropic",
 ]
 
 # genai-agent-rs — the Rust port of pi's agent stack, built to the architecture in

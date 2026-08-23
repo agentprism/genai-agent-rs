@@ -32,6 +32,11 @@ rust = ["openai_chat_reasoning_details_turn_two_pi_exact", "wire_openai_completi
 status = "semantic-parity"
 
 [[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#10.8-anthropic-messages"
+rust = ["anthropic_non_strict_null_schema_normalizes_pi_exact", "anthropic_redacted_thinking_turn_two_pi_exact", "anthropic_signed_thinking_turn_two_pi_exact", "wire_anthropic_messages_pi_exact"]
+status = "semantic-parity"
+
+[[mapping]]
 source = "packages/ai/src/types.ts"
 rust = ["all_api_model_config_variants_round_trip", "all_identifier_model_ref_and_timestamp_types_round_trip", "anthropic_compat_every_architecture_field_round_trips", "canonical_message_context_and_conversation_types_round_trip", "catalog_unknown_extensions_round_trip", "finish_and_public_error_types_round_trip", "local_provider_components_accept_rc_state", "model_descriptor_and_typed_compat_fields_round_trip", "model_runtime_is_a_narrow_arc_capability_and_local_runtime_accepts_rc_state", "openai_completions_compat_serialized_values_match_pi_contract", "openrouter_max_price_decimal_number_is_lossless_and_distinct_from_string", "pricing_types_round_trip_and_use_integer_arithmetic", "replay_helpers_reject_incomplete_and_cross_model_items", "replay_r1_complete_item_identity_is_stable", "replay_r2_success_rejects_incomplete_item", "replay_r3_failed_and_cancelled_items_are_incomplete_and_ignored", "replay_r4_same_provider_round_trip_is_deterministic_before_encoder", "replay_r5_cross_provider_projection_rejects_nonportable_item", "replay_r6_signature_target_is_exact_and_stable", "replay_r7_provider_order_is_independent_of_block_order", "replay_r8_scratch_state_is_not_in_persisted_schema", "replay_target_applicability_completeness_and_usage_sources_round_trip", "request_wide_pricing_uses_highest_strictly_exceeded_tier", "secret_types_are_not_serializable_and_redact_debug", "stream_error_sanitizes_secrets", "tool_call_spec_and_every_result_content_variant_round_trip", "tool_spec_constrained_sampling_serialized_values_match_pi_contract"]
 status = "semantic-parity"
@@ -48,7 +53,7 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/types.ts#request-middleware"
-rust = ["attempt_middleware_runs_per_retry", "injected_http_transport_receives_final_request", "payload_in_place_mutation_is_retained", "payload_replacement_is_retained", "payload_transform_runs_once_per_logical_request", "payload_transforms_run_in_registration_order", "request_debug_redacts_secrets", "response_observer_runs_before_body_consumption", "response_observer_runs_for_retry_responses", "timeout_ms_is_enforced_per_transport_attempt", "timeout_ms_is_forwarded_by_models", "typed_payload_transform_is_adapted_by_models"]
+rust = ["anthropic_payload_transform_cannot_disable_stream_local", "anthropic_payload_transform_cannot_disable_stream_send", "attempt_middleware_runs_per_retry", "injected_http_transport_receives_final_request", "payload_in_place_mutation_is_retained", "payload_replacement_is_retained", "payload_transform_runs_once_per_logical_request", "payload_transforms_run_in_registration_order", "request_debug_redacts_secrets", "response_observer_runs_before_body_consumption", "response_observer_runs_for_retry_responses", "timeout_ms_is_enforced_per_transport_attempt", "timeout_ms_is_forwarded_by_models", "typed_payload_transform_is_adapted_by_models"]
 status = "semantic-parity"
 
 [[mapping]]
@@ -68,12 +73,12 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/utils/json-parse.ts"
-rust = ["stream_cancellation_preserves_partial_tool_arguments", "stream_failure_preserves_partial_tool_arguments", "stream_length_preserves_truncated_tool_arguments", "stream_partial_tool_json_matches_pi", "stream_partial_tool_malformed_numbers_match_pi", "stream_tool_json_scratch_not_persisted"]
+rust = ["anthropic_sse_malformed_json_is_repaired", "stream_cancellation_preserves_partial_tool_arguments", "stream_failure_preserves_partial_tool_arguments", "stream_length_preserves_truncated_tool_arguments", "stream_partial_tool_json_matches_pi", "stream_partial_tool_malformed_numbers_match_pi", "stream_tool_json_scratch_not_persisted"]
 status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/api/anthropic-messages.ts"
-rust = ["anthropic_complete_replay_item_is_found_after_message_round_trip", "anthropic_failed_partial_signature_is_not_replayed", "anthropic_redacted_event_sequence_retains_exact_data", "anthropic_signature_fragments_append_in_order", "anthropic_signature_survives_message_round_trip", "persisted_anthropic_replay_item_json_matches_architecture", "persisted_anthropic_thinking_json_matches_architecture", "stream_cancellation_preserves_partial_tool_arguments", "stream_cancellation_preserves_partial_tool_with_incomplete_metadata", "stream_failure_preserves_partial_tool_arguments", "stream_partial_tool_json_matches_pi", "stream_partial_tool_malformed_numbers_match_pi"]
+rust = ["anthropic_adaptive_uses_effort", "anthropic_beta_and_user_agent_variants_match_pi", "anthropic_budget_model_uses_budget_tokens", "anthropic_cache_write_one_hour_mixed_cost_matches_pi", "anthropic_complete_replay_item_is_found_after_message_round_trip", "anthropic_content_start_and_replay_provider_index_are_preserved", "anthropic_deferred_tools_and_tool_references_match_pi", "anthropic_disabled_thinking_respects_compat", "anthropic_empty_signature_respects_compat", "anthropic_failed_partial_signature_is_not_replayed", "anthropic_final_headers_require_auth_local", "anthropic_final_headers_require_auth_send", "anthropic_full_options_interleaved_thinking_controls_beta_header", "anthropic_full_options_interleaved_thinking_controls_beta_header_local", "anthropic_full_options_temperature_suppression_matches_pi", "anthropic_image_only_tool_result_has_pi_placeholder", "anthropic_initial_utf8_bom_split_across_chunks_matches_pi", "anthropic_lowering_precedes_projection_for_output_cap", "anthropic_message_delta_without_usage_preserves_prior_usage", "anthropic_non_strict_null_schema_normalizes_pi_exact", "anthropic_oauth_tool_names_and_identity_round_trip", "anthropic_payload_transform_cannot_disable_stream_local", "anthropic_payload_transform_cannot_disable_stream_send", "anthropic_recognized_malformed_events_fail_stream", "anthropic_redacted_event_sequence_retains_exact_data", "anthropic_redacted_thinking_replays_exact_data", "anthropic_refusal_and_sensitive_stop_details_match_pi", "anthropic_signature_fragments_append_in_order", "anthropic_signature_never_crosses_model_boundary", "anthropic_signature_survives_message_round_trip", "anthropic_sse_malformed_json_is_repaired", "anthropic_sse_mixed_line_endings_split_across_chunks_match_pi", "anthropic_temperature_omitted_when_model_disallows_it", "anthropic_temperature_omitted_while_thinking", "anthropic_turn_two_replays_exact_signature", "anthropic_unknown_content_block_does_not_consume_content_index", "anthropic_unknown_sse_events_after_message_stop_are_ignored", "anthropic_unsigned_thinking_falls_back_to_text", "anthropic_user_text_block_array_preserves_blocks_pi_exact", "anthropic_zero_context_window_preserves_output_cap", "headers_explicit_before_transform", "headers_model_before_explicit", "headers_transform_can_delete_default", "persisted_anthropic_replay_item_json_matches_architecture", "persisted_anthropic_thinking_json_matches_architecture", "stream_cancellation_preserves_partial_tool_arguments", "stream_cancellation_preserves_partial_tool_with_incomplete_metadata", "stream_failure_preserves_partial_tool_arguments", "stream_partial_tool_json_matches_pi", "stream_partial_tool_malformed_numbers_match_pi", "stream_response_model_is_preserved", "wire_anthropic_messages_pi_exact"]
 status = "semantic-parity"
 
 [[mapping]]
@@ -102,8 +107,18 @@ rust = ["openai_completions_providers_share_api_implementation", "openai_provide
 status = "semantic-parity"
 
 [[mapping]]
+source = "packages/ai/src/providers/anthropic.ts"
+rust = ["anthropic_api_key_login_label_and_prompt_match_pi", "anthropic_auth_token_precedence_matches_pi", "anthropic_beta_and_user_agent_variants_match_pi", "anthropic_final_headers_require_auth_local", "anthropic_final_headers_require_auth_send", "anthropic_provider_registration_matches_pinned_catalog", "anthropic_stored_oauth_credential_resolves"]
+status = "semantic-parity"
+
+[[mapping]]
 source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#3.6-10.5"
 rust = ["openai_chat_template_budget_variable_uses_clamped_simple_budget", "openai_compat_is_detected_from_effective_base_url", "openai_max_tokens_field_matches_compat", "openai_model_compat_overrides_url_detection", "openai_reasoning_format_matches_compat", "openai_sampling_params_merge_after_named_fields", "openai_thinking_budget_field_matches_compat"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#3.5-10.5"
+rust = ["anthropic_adaptive_uses_effort", "anthropic_budget_model_uses_budget_tokens", "anthropic_disabled_thinking_respects_compat", "anthropic_full_options_interleaved_thinking_controls_beta_header", "anthropic_full_options_interleaved_thinking_controls_beta_header_local", "anthropic_full_options_temperature_suppression_matches_pi", "anthropic_temperature_omitted_when_model_disallows_it", "anthropic_temperature_omitted_while_thinking", "anthropic_zero_context_window_preserves_output_cap"]
 status = "semantic-parity"
 
 [[mapping]]
@@ -259,46 +274,6 @@ reason = "The pinned top-level harness is a scaffold, so Rust derives orchestrat
 # continuation append, and Rust turn-two encoding before byte comparison.
 
 [[planned_test]]
-rust = "wire_anthropic_messages_pi_exact"
-source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#10.8"
-milestone = "M4"
-
-[[planned_test]]
-rust = "anthropic_signed_thinking_turn_two_pi_exact"
-source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#10.8"
-milestone = "M4"
-
-[[planned_test]]
-rust = "anthropic_redacted_thinking_turn_two_pi_exact"
-source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#10.8"
-milestone = "M4"
-
-[[planned_test]]
-rust = "anthropic_turn_two_replays_exact_signature"
-source = "packages/ai/src/api/anthropic-messages.ts"
-milestone = "M4"
-
-[[planned_test]]
-rust = "anthropic_redacted_thinking_replays_exact_data"
-source = "packages/ai/src/api/anthropic-messages.ts"
-milestone = "M4"
-
-[[planned_test]]
-rust = "anthropic_unsigned_thinking_falls_back_to_text"
-source = "packages/ai/src/api/anthropic-messages.ts"
-milestone = "M4"
-
-[[planned_test]]
-rust = "anthropic_empty_signature_respects_compat"
-source = "packages/ai/src/api/anthropic-messages.ts"
-milestone = "M4"
-
-[[planned_test]]
-rust = "anthropic_signature_never_crosses_model_boundary"
-source = "packages/ai/src/api/anthropic-messages.ts"
-milestone = "M4"
-
-[[planned_test]]
 rust = "responses_different_model_drops_paired_item_id"
 source = "packages/ai/src/api/openai-responses-shared.ts"
 milestone = "M4"
@@ -392,6 +367,7 @@ rust = [
   "simple_request_sampling_overrides_model_defaults",
   "simple_typed_and_erased_patch_conflict",
   "simple_unknown_api_patch_rejected",
+  "anthropic_zero_context_window_preserves_output_cap",
   "thinking_budget_defaults_match_pi",
   "thinking_budget_expands_explicit_answer_cap",
   "thinking_budget_reserves_1024_answer_tokens",
@@ -430,87 +406,77 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/anthropic-adaptive-thinking-models.test.ts"
-rust = []
+rust = ["anthropic_adaptive_uses_effort", "anthropic_provider_registration_matches_pinned_catalog"]
 status = "planned"
 milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/anthropic-auth-token.test.ts"
-rust = []
-status = "planned"
-milestone = "M4"
+rust = ["anthropic_auth_token_precedence_matches_pi", "anthropic_beta_and_user_agent_variants_match_pi", "anthropic_final_headers_require_auth_local", "anthropic_final_headers_require_auth_send", "anthropic_oauth_tool_names_and_identity_round_trip"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/anthropic-cache-write-1h-cost.test.ts"
-rust = []
-status = "planned"
-milestone = "M4"
+rust = ["anthropic_cache_write_one_hour_mixed_cost_matches_pi"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/anthropic-eager-tool-input-compat.test.ts"
-rust = []
-status = "planned"
-milestone = "M4"
+rust = ["wire_anthropic_messages_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/anthropic-eager-tool-input-e2e.test.ts"
-rust = []
+rust = ["anthropic_provider_registration_matches_pinned_catalog", "wire_anthropic_messages_pi_exact"]
 status = "planned"
 milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/anthropic-empty-thinking-signature-compat.test.ts"
-rust = []
-status = "planned"
-milestone = "M4"
+rust = ["anthropic_empty_signature_respects_compat", "anthropic_unsigned_thinking_falls_back_to_text"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/anthropic-force-adaptive-thinking.test.ts"
-rust = []
-status = "planned"
-milestone = "M4"
+rust = ["anthropic_adaptive_uses_effort", "anthropic_budget_model_uses_budget_tokens", "anthropic_disabled_thinking_respects_compat"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/anthropic-long-cache-retention-e2e.test.ts"
-rust = []
+rust = ["wire_anthropic_messages_pi_exact"]
 status = "planned"
 milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/anthropic-oauth.test.ts"
-rust = []
+rust = ["anthropic_oauth_refresh_omits_scope", "anthropic_stored_oauth_credential_resolves"]
 status = "planned"
-milestone = "M4"
+milestone = "M5"
 
 [[mapping]]
 source = "packages/ai/test/anthropic-opus-4-8-smoke.test.ts"
-rust = []
-status = "planned"
-milestone = "M4"
+rust = ["anthropic_adaptive_uses_effort", "anthropic_signature_fragments_append_in_order", "anthropic_signed_thinking_turn_two_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/anthropic-sse-parsing.test.ts"
-rust = []
-status = "planned"
-milestone = "M4"
+rust = ["anthropic_content_start_and_replay_provider_index_are_preserved", "anthropic_initial_utf8_bom_split_across_chunks_matches_pi", "anthropic_message_delta_without_usage_preserves_prior_usage", "anthropic_recognized_malformed_events_fail_stream", "anthropic_refusal_and_sensitive_stop_details_match_pi", "anthropic_sse_malformed_json_is_repaired", "anthropic_sse_mixed_line_endings_split_across_chunks_match_pi", "anthropic_unknown_content_block_does_not_consume_content_index", "anthropic_unknown_sse_events_after_message_stop_are_ignored"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/anthropic-temperature-compat.test.ts"
-rust = []
-status = "planned"
-milestone = "M4"
+rust = ["anthropic_full_options_temperature_suppression_matches_pi", "anthropic_temperature_omitted_when_model_disallows_it", "anthropic_temperature_omitted_while_thinking"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/anthropic-thinking-disable.test.ts"
-rust = []
-status = "planned"
-milestone = "M4"
+rust = ["anthropic_adaptive_uses_effort", "anthropic_disabled_thinking_respects_compat"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/anthropic-tool-name-normalization.test.ts"
-rust = []
-status = "planned"
-milestone = "M4"
+rust = ["anthropic_oauth_tool_names_and_identity_round_trip"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/azure-openai-base-url.test.ts"

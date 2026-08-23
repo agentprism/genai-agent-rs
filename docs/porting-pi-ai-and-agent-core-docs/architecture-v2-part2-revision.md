@@ -564,6 +564,8 @@ fn encode_anthropic_thinking(
 }
 ```
 
+> Correction: Pinned Pi replays a redacted thinking block from its redacted payload independently of an ordinary thinking signature, and treats a signature as usable only when `thinkingSignature.trim().length > 0`. The Rust encoder therefore looks up `anthropic.messages.redacted-thinking` for redacted blocks, looks up `anthropic.messages.thinking-signature` only for ordinary thinking, and treats whitespace-only signatures as empty before applying `allow_empty_signature` (`packages/ai/src/api/anthropic-messages.ts:1218–1249`).
+
 This reconstructs Pi's same-provider turn-two request exactly, while making the signature observable and persistable during streaming.
 
 ---
@@ -2025,6 +2027,8 @@ impl ApiFamily for AnthropicMessages {
 
 This carries forward Pi's adaptive-versus-budget distinction and its 1024-token answer reserve. Pi's wire builder also suppresses temperature during extended thinking and for models whose compat says temperature is unsupported. See `packages/ai/src/api/anthropic-messages.ts:1030–1135`.
 
+> Correction: Pinned Pi's full Anthropic options distinguish an omitted `thinkingEnabled` from explicit `false`, retain the optional native tool-choice domain (`"auto"`, `"any"`, `"none"`, or a named tool), and carry the `interleavedThinking` request preference used during transport shaping. The Rust full-options shape therefore adds `AnthropicThinking::Omitted`, uses `tool_choice: Option<AnthropicToolChoice>`, and includes `interleaved_thinking: bool`; simple lowering still produces explicit disabled thinking when reasoning is absent and maps only the provider-neutral `auto`/`none` choices. This is necessary to preserve Pi's full-call wire omission, native tool choice, and beta-header behavior (`packages/ai/src/api/anthropic-messages.ts:168–277, 830–878, 880–970, 1030–1110`).
+
 ## 3.6 OpenAI-compatible Completions lowering
 
 ```rust
@@ -2583,7 +2587,11 @@ pub enum AnthropicThinkingValue {
     Effort(AnthropicEffort),
     Budget(u32),
 }
+```
 
+> Correction: Pinned Pi returns any string-valued `thinkingLevelMap` entry as an Anthropic effort, and the captured minimal-level corpus maps `minimal` to the provider string `"minimal"`. `AnthropicEffort` therefore includes `Minimal`; omitting it would make the captured request body diverge (`packages/ai/src/api/anthropic-messages.ts:805–814`; `providers/fixtures/anthropic-messages/reasoning-minimal`).
+
+```rust
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AnthropicMessagesCompat {
     pub supports_eager_tool_input_streaming: Option<bool>,
@@ -2678,6 +2686,8 @@ pub struct CacheWriteRetentionPricing {
 This avoids `f64` monetary arithmetic and can represent cache-retention-specific rates without burying them in extensions.
 
 > Correction: Pinned Pi retains the published `-1000000` OpenRouter rates and `calculateCost` applies them directly. Rust therefore uses signed fixed-point integers for `MoneyRate` and `Cost.micros`, retaining and calculating those negative values without `f64` arithmetic (`packages/ai/src/models.ts:878–897`; published `openrouter/auto` and `openrouter/auto-beta` catalog records).
+
+> Correction: Pinned Pi retains Anthropic's provider-reported one-hour cache-creation subset as `usage.cacheWrite1h` and prices only that subset at twice the input rate; remaining cache-write tokens use the ordinary published cache-write rate, and an absent breakdown means a zero one-hour subset. Rust `Usage` therefore includes `cache_write_one_hour_tokens: Option<u64>`, Anthropic decoding reads `cache_creation.ephemeral_1h_input_tokens`, and checked integer pricing separates the mixed-retention portions (`packages/ai/src/api/anthropic-messages.ts:600–615`; `packages/ai/src/models.ts:878–897`; `packages/ai/test/anthropic-cache-write-1h-cost.test.ts`).
 
 ## 5.3 Catalog layers
 

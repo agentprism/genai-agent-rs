@@ -418,6 +418,7 @@ impl DecodeState {
             reasoning_tokens: Some(reasoning),
             cache_read_tokens: Some(cache_read),
             cache_write_tokens: Some(cache_write),
+            cache_write_one_hour_tokens: None,
             source: UsageSource::ProviderReported,
         };
         self.emit(AssistantEvent::UsageUpdated {

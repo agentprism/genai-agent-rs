@@ -10,6 +10,7 @@
 
 #![deny(missing_docs)]
 
+mod anthropic_messages;
 mod async_types;
 mod auth;
 mod cancellation;
@@ -34,6 +35,7 @@ mod scripted;
 mod streaming;
 mod usage;
 
+pub use anthropic_messages::*;
 pub use async_types::*;
 pub use auth::*;
 pub use cancellation::*;

@@ -34,6 +34,9 @@ pub struct Usage {
     pub cache_read_tokens: Option<u64>,
     /// Cache-write input tokens, when available.
     pub cache_write_tokens: Option<u64>,
+    /// One-hour-retention subset of cache-write tokens, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_one_hour_tokens: Option<u64>,
     /// Provenance of these cumulative values.
     pub source: UsageSource,
 }
@@ -47,6 +50,7 @@ impl Usage {
             reasoning_tokens: None,
             cache_read_tokens: None,
             cache_write_tokens: None,
+            cache_write_one_hour_tokens: None,
             source,
         }
     }
@@ -211,23 +215,33 @@ impl ModelPricing {
         retention: CacheWriteRetention,
     ) -> Result<Cost, CostArithmeticError> {
         let rates = self.rates_for(usage);
-        let cache_write_rate = match retention {
+        let ordinary_cache_write_rate = match retention {
             CacheWriteRetention::Default => rates.cache_write,
             CacheWriteRetention::Short => self
                 .cache_write_retention
                 .short
                 .unwrap_or(rates.cache_write),
-            CacheWriteRetention::OneHour => self
-                .cache_write_retention
-                .one_hour
-                .unwrap_or(rates.cache_write),
+            CacheWriteRetention::OneHour => rates.cache_write,
         };
 
+        let total_cache_write = usage.cache_write_tokens.unwrap_or(0);
+        let one_hour_tokens = usage.cache_write_one_hour_tokens.unwrap_or(0);
+        let one_hour_rate = self
+            .cache_write_retention
+            .one_hour
+            .unwrap_or(rates.cache_write);
+        let one_hour_uplift = MoneyRate::new(
+            one_hour_rate
+                .0
+                .checked_sub(ordinary_cache_write_rate.0)
+                .ok_or(CostArithmeticError::Overflow)?,
+        );
         let priced_tokens = [
             (rates.input, usage.input_tokens),
             (rates.output, usage.output_tokens),
             (rates.cache_read, usage.cache_read_tokens.unwrap_or(0)),
-            (cache_write_rate, usage.cache_write_tokens.unwrap_or(0)),
+            (ordinary_cache_write_rate, total_cache_write),
+            (one_hour_uplift, one_hour_tokens),
         ];
         let numerator = priced_tokens
             .into_iter()

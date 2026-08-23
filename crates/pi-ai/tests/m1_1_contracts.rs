@@ -25,6 +25,7 @@ fn usage() -> Usage {
         reasoning_tokens: Some(25),
         cache_read_tokens: Some(1_000),
         cache_write_tokens: Some(500),
+        cache_write_one_hour_tokens: Some(500),
         source: UsageSource::ProviderReported,
     }
 }
@@ -674,6 +675,7 @@ fn request_wide_pricing_uses_highest_strictly_exceeded_tier() {
         reasoning_tokens: None,
         cache_read_tokens: None,
         cache_write_tokens: None,
+        cache_write_one_hour_tokens: None,
         source: UsageSource::ProviderReported,
     };
     assert_eq!(

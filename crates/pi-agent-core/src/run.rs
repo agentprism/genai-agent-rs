@@ -1963,6 +1963,10 @@ fn add_usage(mut total: Usage, next: &Usage) -> Usage {
     total.reasoning_tokens = add_optional(total.reasoning_tokens, next.reasoning_tokens);
     total.cache_read_tokens = add_optional(total.cache_read_tokens, next.cache_read_tokens);
     total.cache_write_tokens = add_optional(total.cache_write_tokens, next.cache_write_tokens);
+    total.cache_write_one_hour_tokens = add_optional(
+        total.cache_write_one_hour_tokens,
+        next.cache_write_one_hour_tokens,
+    );
     if total.source != next.source {
         total.source = UsageSource::Mixed;
     }

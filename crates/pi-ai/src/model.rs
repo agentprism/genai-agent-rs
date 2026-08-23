@@ -640,6 +640,9 @@ pub enum AnthropicThinkingValue {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AnthropicEffort {
+    /// Minimal effort, accepted by compatible Anthropic Messages models whose
+    /// catalog maps the provider-neutral minimal level verbatim.
+    Minimal,
     /// Low effort.
     Low,
     /// Medium effort.

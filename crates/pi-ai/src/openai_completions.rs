@@ -1462,7 +1462,9 @@ fn resolve_strict_tool(
     }
 }
 
-fn make_strict_json_schema(schema: &serde_json::Value) -> Result<serde_json::Value, String> {
+pub(crate) fn make_strict_json_schema(
+    schema: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
     let mut strict = schema.clone();
     make_json_schema_node_strict(&mut strict)?;
     if strict.get("type").and_then(serde_json::Value::as_str) != Some("object") {

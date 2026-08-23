@@ -7,18 +7,19 @@
 )]
 
 use crate::{
-    ApiId, AssistantStream, AttemptFailure, AttemptMiddleware, AuthError, CancellationToken,
-    Context, DefaultRetryClassifier, ErasedApiOptionsPatch, ErasedPayloadContext,
-    ErasedPayloadTransform, HeaderMapSpec, HttpRequest, HttpResponse, HttpTransport,
-    LocalAssistantStream, LocalAttemptMiddleware, LocalBoxFuture, LocalDefaultRetryClassifier,
-    LocalDefaultRetrySleeper, LocalErasedPayloadTransform, LocalHttpResponse, LocalHttpTransport,
-    LocalManagedModelCatalog, LocalModelCatalogSource, LocalProviderCatalogState,
-    LocalResponseObserver, LocalRetryClassifier, LocalRetrySleeper, ManagedModelCatalog,
-    ModelCatalogSource, ModelDescriptor, ModelRef, PayloadTransformDisposition,
-    ProviderCatalogState, ProviderId, ProviderPayload, ProviderResponseMetadata, RequestStartError,
-    RequestStartErrorKind, ResponseObservationContext, ResponseObserver, RetryClassifier,
-    RetryDecision, RetryPolicy, RetrySleeper, SecretString, SendBoxFuture, SimpleGenerationOptions,
-    apply_header_spec, establish_with_retry_and_local_sleeper, establish_with_retry_and_sleeper,
+    ApiId, ApiRequestOptions, AssistantStream, AttemptFailure, AttemptMiddleware, AuthError,
+    CancellationToken, Context, DefaultRetryClassifier, ErasedApiFullOptions,
+    ErasedApiOptionsPatch, ErasedPayloadContext, ErasedPayloadTransform, HeaderMapSpec,
+    HttpRequest, HttpResponse, HttpTransport, LocalAssistantStream, LocalAttemptMiddleware,
+    LocalBoxFuture, LocalDefaultRetryClassifier, LocalDefaultRetrySleeper,
+    LocalErasedPayloadTransform, LocalHttpResponse, LocalHttpTransport, LocalManagedModelCatalog,
+    LocalModelCatalogSource, LocalProviderCatalogState, LocalResponseObserver,
+    LocalRetryClassifier, LocalRetrySleeper, ManagedModelCatalog, ModelCatalogSource,
+    ModelDescriptor, ModelRef, PayloadTransformDisposition, ProviderCatalogState, ProviderId,
+    ProviderPayload, ProviderResponseMetadata, RequestStartError, RequestStartErrorKind,
+    ResponseObservationContext, ResponseObserver, RetryClassifier, RetryDecision, RetryPolicy,
+    RetrySleeper, SecretString, SendBoxFuture, SimpleGenerationOptions, apply_header_spec,
+    establish_with_retry_and_local_sleeper, establish_with_retry_and_sleeper,
     request_id_from_headers,
 };
 use futures_util::future::{Either, select};
@@ -532,6 +533,10 @@ pub struct ResolvedApiRequest {
     pub context: Context,
     /// Provider-neutral options and at most one erased API patch.
     pub options: SimpleGenerationOptions,
+    /// Fully API-specific options, present only for `Models::stream_api`.
+    pub full_options: Option<ErasedApiFullOptions>,
+    /// Common transport controls for either simple or full execution.
+    pub request_options: ApiRequestOptions,
     /// Effective endpoint after auth resolution.
     pub endpoint: Url,
     /// Final logical headers after all header transforms.
@@ -594,6 +599,49 @@ pub trait ErasedApiHandler: Send + Sync + 'static {
         execution: &ApiExecutionContext<'_>,
     ) -> Result<ProviderPayload, AiError>;
 
+    /// Encodes fully API-specific options without invoking simple lowering.
+    fn encode_full(
+        &self,
+        model: &ModelDescriptor,
+        context: &Context,
+        options: &ErasedApiFullOptions,
+        execution: &ApiExecutionContext<'_>,
+    ) -> Result<ProviderPayload, AiError> {
+        let _ = context;
+        let _ = execution;
+        Err(AiError::new(
+            AiErrorKind::InvalidRequest,
+            format!(
+                "API handler {} does not support fully typed options for {}",
+                self.api_id(),
+                options.api
+            ),
+        )
+        .with_model(model.common.model_ref.clone()))
+    }
+
+    /// Adds API-family defaults derived from fully typed options before model
+    /// and explicit request headers are applied.
+    fn apply_full_options_headers(
+        &self,
+        _model: &ModelDescriptor,
+        _context: &Context,
+        _options: &ErasedApiFullOptions,
+        _request_options: &ApiRequestOptions,
+        _headers: &mut HeaderMap,
+    ) -> Result<(), AiError> {
+        Ok(())
+    }
+
+    /// Reasserts API-family invariants after every logical payload transform.
+    fn finalize_payload(
+        &self,
+        _payload: &mut ProviderPayload,
+        _execution: &ApiExecutionContext<'_>,
+    ) -> Result<(), AiError> {
+        Ok(())
+    }
+
     /// Converts an established response body into normalized assistant events.
     fn decode_stream(
         &self,
@@ -625,9 +673,42 @@ fn validate_erased_api_patch(
     .with_model(model.clone()))
 }
 
+fn validate_erased_full_options(
+    request_api: &ApiId,
+    handler_api: &ApiId,
+    options: &ErasedApiFullOptions,
+    model: &ModelRef,
+) -> Result<(), AiError> {
+    if options.api == *request_api && options.api == *handler_api {
+        return Ok(());
+    }
+
+    Err(AiError::new(
+        AiErrorKind::InvalidRequest,
+        format!(
+            "full API options for {} cannot be applied to request API {} handled by {}",
+            options.api, request_api, handler_api
+        ),
+    )
+    .with_model(model.clone()))
+}
+
 /// Provider/API dispatch unit. Concrete HTTP APIs can use [`HttpChatApi`]; SDK
 /// and non-HTTP APIs implement this trait directly.
 pub trait ChatApi: Send + Sync + 'static {
+    /// Adds full-options-dependent API headers before Models applies the model
+    /// and explicit request overlays.
+    fn apply_full_options_headers(
+        &self,
+        _model: &ModelDescriptor,
+        _context: &Context,
+        _options: &ErasedApiFullOptions,
+        _request_options: &ApiRequestOptions,
+        _headers: &mut HeaderMap,
+    ) -> Result<(), AiError> {
+        Ok(())
+    }
+
     /// Establishes a normalized assistant stream.
     fn stream(
         &self,
@@ -689,19 +770,30 @@ impl HttpChatApi {
             cancellation: &cancellation,
             api_key: request.api_key.as_ref(),
         };
-        validate_erased_api_patch(
-            &request.api,
-            self.handler.api_id(),
-            request.options.api_options.as_ref(),
-            &request.model.common.model_ref,
-        )?;
-        let mut payload = self.handler.lower_and_encode(
-            &request.model,
-            &request.context,
-            &request.options,
-            request.options.api_options.as_ref(),
-            &execution,
-        )?;
+        let mut payload = if let Some(full_options) = request.full_options.as_ref() {
+            validate_erased_full_options(
+                &request.api,
+                self.handler.api_id(),
+                full_options,
+                &request.model.common.model_ref,
+            )?;
+            self.handler
+                .encode_full(&request.model, &request.context, full_options, &execution)?
+        } else {
+            validate_erased_api_patch(
+                &request.api,
+                self.handler.api_id(),
+                request.options.api_options.as_ref(),
+                &request.model.common.model_ref,
+            )?;
+            self.handler.lower_and_encode(
+                &request.model,
+                &request.context,
+                &request.options,
+                request.options.api_options.as_ref(),
+                &execution,
+            )?
+        };
 
         let payload_context = ErasedPayloadContext {
             model: &request.model.common.model_ref,
@@ -719,6 +811,8 @@ impl HttpChatApi {
                 PayloadTransformDisposition::Replace(replacement) => payload = replacement,
             }
         }
+
+        self.handler.finalize_payload(&mut payload, &execution)?;
 
         let body = payload
             .encode_body()
@@ -824,6 +918,18 @@ impl HttpChatApi {
 }
 
 impl ChatApi for HttpChatApi {
+    fn apply_full_options_headers(
+        &self,
+        model: &ModelDescriptor,
+        context: &Context,
+        options: &ErasedApiFullOptions,
+        request_options: &ApiRequestOptions,
+        headers: &mut HeaderMap,
+    ) -> Result<(), AiError> {
+        self.handler
+            .apply_full_options_headers(model, context, options, request_options, headers)
+    }
+
     fn stream(
         &self,
         request: ResolvedApiRequest,
@@ -842,6 +948,10 @@ pub struct LocalResolvedApiRequest {
     pub context: Context,
     /// Provider-neutral options and at most one erased API patch.
     pub options: SimpleGenerationOptions,
+    /// Fully API-specific options, present only for `LocalModels::stream_api`.
+    pub full_options: Option<ErasedApiFullOptions>,
+    /// Common transport controls for either simple or full execution.
+    pub request_options: ApiRequestOptions,
     /// Effective endpoint after auth resolution.
     pub endpoint: Url,
     /// Final logical headers.
@@ -904,6 +1014,48 @@ pub trait LocalErasedApiHandler: 'static {
         execution: &LocalApiExecutionContext<'_>,
     ) -> Result<ProviderPayload, AiError>;
 
+    /// Encodes fully API-specific options without invoking simple lowering.
+    fn encode_full(
+        &self,
+        model: &ModelDescriptor,
+        context: &Context,
+        options: &ErasedApiFullOptions,
+        execution: &LocalApiExecutionContext<'_>,
+    ) -> Result<ProviderPayload, AiError> {
+        let _ = context;
+        let _ = execution;
+        Err(AiError::new(
+            AiErrorKind::InvalidRequest,
+            format!(
+                "local API handler {} does not support fully typed options for {}",
+                self.api_id(),
+                options.api
+            ),
+        )
+        .with_model(model.common.model_ref.clone()))
+    }
+
+    /// Adds API-family defaults derived from fully typed options.
+    fn apply_full_options_headers(
+        &self,
+        _model: &ModelDescriptor,
+        _context: &Context,
+        _options: &ErasedApiFullOptions,
+        _request_options: &ApiRequestOptions,
+        _headers: &mut HeaderMap,
+    ) -> Result<(), AiError> {
+        Ok(())
+    }
+
+    /// Reasserts API-family invariants after local payload transforms.
+    fn finalize_payload(
+        &self,
+        _payload: &mut ProviderPayload,
+        _execution: &LocalApiExecutionContext<'_>,
+    ) -> Result<(), AiError> {
+        Ok(())
+    }
+
     /// Converts an established local response into normalized assistant events.
     fn decode_stream(
         &self,
@@ -914,6 +1066,18 @@ pub trait LocalErasedApiHandler: 'static {
 
 /// Single-threaded provider/API dispatch unit.
 pub trait LocalChatApi: 'static {
+    /// Adds full-options-dependent local API headers before later overlays.
+    fn apply_full_options_headers(
+        &self,
+        _model: &ModelDescriptor,
+        _context: &Context,
+        _options: &ErasedApiFullOptions,
+        _request_options: &ApiRequestOptions,
+        _headers: &mut HeaderMap,
+    ) -> Result<(), AiError> {
+        Ok(())
+    }
+
     /// Establishes a normalized local assistant stream.
     fn stream(
         &self,
@@ -977,19 +1141,30 @@ impl LocalHttpChatApi {
             cancellation: &cancellation,
             api_key: request.api_key.as_ref(),
         };
-        validate_erased_api_patch(
-            &request.api,
-            self.handler.api_id(),
-            request.options.api_options.as_ref(),
-            &request.model.common.model_ref,
-        )?;
-        let mut payload = self.handler.lower_and_encode(
-            &request.model,
-            &request.context,
-            &request.options,
-            request.options.api_options.as_ref(),
-            &execution,
-        )?;
+        let mut payload = if let Some(full_options) = request.full_options.as_ref() {
+            validate_erased_full_options(
+                &request.api,
+                self.handler.api_id(),
+                full_options,
+                &request.model.common.model_ref,
+            )?;
+            self.handler
+                .encode_full(&request.model, &request.context, full_options, &execution)?
+        } else {
+            validate_erased_api_patch(
+                &request.api,
+                self.handler.api_id(),
+                request.options.api_options.as_ref(),
+                &request.model.common.model_ref,
+            )?;
+            self.handler.lower_and_encode(
+                &request.model,
+                &request.context,
+                &request.options,
+                request.options.api_options.as_ref(),
+                &execution,
+            )?
+        };
 
         let payload_context = ErasedPayloadContext {
             model: &request.model.common.model_ref,
@@ -1007,6 +1182,8 @@ impl LocalHttpChatApi {
                 PayloadTransformDisposition::Replace(replacement) => payload = replacement,
             }
         }
+
+        self.handler.finalize_payload(&mut payload, &execution)?;
 
         let body = payload
             .encode_body()
@@ -1118,6 +1295,18 @@ impl LocalHttpChatApi {
 }
 
 impl LocalChatApi for LocalHttpChatApi {
+    fn apply_full_options_headers(
+        &self,
+        model: &ModelDescriptor,
+        context: &Context,
+        options: &ErasedApiFullOptions,
+        request_options: &ApiRequestOptions,
+        headers: &mut HeaderMap,
+    ) -> Result<(), AiError> {
+        self.handler
+            .apply_full_options_headers(model, context, options, request_options, headers)
+    }
+
     fn stream(
         &self,
         request: LocalResolvedApiRequest,

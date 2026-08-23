@@ -11,6 +11,7 @@ fn usage(input_tokens: u64, output_tokens: u64) -> Usage {
         reasoning_tokens: Some(output_tokens / 2),
         cache_read_tokens: Some(3),
         cache_write_tokens: Some(1),
+        cache_write_one_hour_tokens: None,
         source: UsageSource::ProviderReported,
     }
 }

@@ -841,6 +841,8 @@ fn send_patch_request(patch: ErasedApiOptionsPatch) -> ResolvedApiRequest {
             api_options: Some(patch),
             ..SimpleGenerationOptions::default()
         },
+        full_options: None,
+        request_options: pi_ai::ApiRequestOptions::default(),
         endpoint: Url::parse("https://effective.example/v1").unwrap(),
         headers: HeaderMap::new(),
         api_key: None,
@@ -862,6 +864,8 @@ fn local_patch_request(patch: ErasedApiOptionsPatch) -> LocalResolvedApiRequest 
             api_options: Some(patch),
             ..SimpleGenerationOptions::default()
         },
+        full_options: None,
+        request_options: pi_ai::ApiRequestOptions::default(),
         endpoint: Url::parse("https://effective.example/v1").unwrap(),
         headers: HeaderMap::new(),
         api_key: None,

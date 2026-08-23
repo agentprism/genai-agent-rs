@@ -1037,6 +1037,7 @@ data: [DONE]
             reasoning_tokens: Some(4),
             cache_read_tokens: Some(5),
             cache_write_tokens: Some(3),
+            cache_write_one_hour_tokens: None,
             source: UsageSource::ProviderReported,
         }
     );
@@ -1063,6 +1064,7 @@ data: [DONE]
             reasoning_tokens: Some(0),
             cache_read_tokens: Some(0),
             cache_write_tokens: Some(0),
+            cache_write_one_hour_tokens: None,
             source: UsageSource::ProviderReported,
         }
     );
@@ -1387,6 +1389,7 @@ fn openai_provider_catalogs_match_pinned_counts_and_profiles() {
                 reasoning_tokens: None,
                 cache_read_tokens: None,
                 cache_write_tokens: None,
+                cache_write_one_hour_tokens: None,
                 source: UsageSource::ProviderReported,
             },
             Currency::usd(),
@@ -1896,6 +1899,8 @@ fn resolved_request(model: ModelDescriptor) -> ResolvedApiRequest {
         model,
         context: one_user_context(),
         options: SimpleGenerationOptions::default(),
+        full_options: None,
+        request_options: pi_ai::ApiRequestOptions::default(),
         endpoint,
         headers: HeaderMap::new(),
         api_key: None,
@@ -1915,6 +1920,8 @@ fn local_resolved_request(model: ModelDescriptor) -> LocalResolvedApiRequest {
         model,
         context: one_user_context(),
         options: SimpleGenerationOptions::default(),
+        full_options: None,
+        request_options: pi_ai::ApiRequestOptions::default(),
         endpoint,
         headers: HeaderMap::new(),
         api_key: None,
@@ -3062,6 +3069,7 @@ fn fixture_usage(value: &Value) -> Usage {
         reasoning_tokens: value.get("reasoning").and_then(Value::as_u64),
         cache_read_tokens: value.get("cacheRead").and_then(Value::as_u64),
         cache_write_tokens: value.get("cacheWrite").and_then(Value::as_u64),
+        cache_write_one_hour_tokens: value.get("cacheWrite1h").and_then(Value::as_u64),
         source: UsageSource::Unknown,
     }
 }

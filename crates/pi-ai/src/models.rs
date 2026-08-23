@@ -2,10 +2,11 @@
 //! §3.6 and part 2 §2.6.
 
 use crate::{
-    AiError, ApiFamily, AttemptMiddleware, AuthContext, AuthInteraction, AuthResolutionOverrides,
-    AuthResolutionPurpose, CancellationToken, CatalogError, CatalogFetchContext, CatalogSnapshot,
-    Credential, CredentialInfo, CredentialStore, EmptyAuthContext, ErasedPayloadTransform,
-    HeaderTransform, HeaderTransformContext, InMemoryCredentialStore, InMemoryModelOverrideStore,
+    AiError, ApiFamily, ApiRequestOptions, AttemptMiddleware, AuthContext, AuthInteraction,
+    AuthResolutionOverrides, AuthResolutionPurpose, CancellationToken, CatalogError,
+    CatalogFetchContext, CatalogSnapshot, Context, Credential, CredentialInfo, CredentialStore,
+    EmptyAuthContext, ErasedApiFullOptions, ErasedPayloadTransform, HeaderTransform,
+    HeaderTransformContext, InMemoryCredentialStore, InMemoryModelOverrideStore,
     InMemoryModelsStore, LocalAssistantStream, LocalAttemptMiddleware, LocalAuthContext,
     LocalAuthInteraction, LocalBoxFuture, LocalCredentialStore, LocalErasedPayloadTransform,
     LocalHeaderTransform, LocalInMemoryCredentialStore, LocalInMemoryModelOverrideStore,
@@ -17,7 +18,8 @@ use crate::{
     ProviderCatalogLayers, ProviderCatalogState, ProviderRefreshCoordination,
     ProviderRefreshResult, ProviderRegistration, ProviderRegistrationError, RefreshGeneration,
     RefreshReport, RefreshRequest, RequestStartError, RequestStartErrorKind, ResolvedApiRequest,
-    ResponseObserver, SendBoxFuture, apply_header_spec,
+    ResponseObserver, SendBoxFuture, SimpleGenerationOptions,
+    apply_anthropic_messages_default_headers, apply_header_spec,
     apply_openai_completions_session_affinity_headers, local_provider_default_headers,
     merge_header_map, provider_default_headers, publish_candidate, publish_local_candidate,
     restore_local_persisted_candidate, restore_persisted_candidate,
@@ -656,6 +658,59 @@ impl Models {
         auth_overrides: AuthResolutionOverrides,
         cancellation: CancellationToken,
     ) -> SendBoxFuture<'_, Result<crate::AssistantStream, RequestStartError>> {
+        let request_options = ApiRequestOptions::from(&request.options);
+        self.stream_request_with_auth(request, None, request_options, auth_overrides, cancellation)
+    }
+
+    /// Executes fully API-specific options through the registered provider
+    /// pipeline without invoking [`ApiFamily::lower_simple`].
+    pub fn stream_api<A: ApiFamily>(
+        &self,
+        model: ModelRef,
+        context: Context,
+        options: A::FullOptions,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<crate::AssistantStream, RequestStartError>> {
+        self.stream_api_with_request_options::<A>(
+            model,
+            context,
+            options,
+            ApiRequestOptions::default(),
+            cancellation,
+        )
+    }
+
+    /// Executes fully API-specific options with common retry, timeout,
+    /// session-affinity, and request-header controls.
+    pub fn stream_api_with_request_options<A: ApiFamily>(
+        &self,
+        model: ModelRef,
+        context: Context,
+        options: A::FullOptions,
+        request_options: ApiRequestOptions,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<crate::AssistantStream, RequestStartError>> {
+        self.stream_request_with_auth(
+            ModelRequest {
+                model,
+                context,
+                options: SimpleGenerationOptions::default(),
+            },
+            Some(ErasedApiFullOptions::new::<A>(options)),
+            request_options,
+            AuthResolutionOverrides::default(),
+            cancellation,
+        )
+    }
+
+    fn stream_request_with_auth(
+        &self,
+        request: ModelRequest,
+        full_options: Option<ErasedApiFullOptions>,
+        request_options: ApiRequestOptions,
+        auth_overrides: AuthResolutionOverrides,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<crate::AssistantStream, RequestStartError>> {
         Box::pin(async move {
             cancellation.check().map_err(|_| {
                 RequestStartError::new(RequestStartErrorKind::Cancelled, "request cancelled")
@@ -695,6 +750,18 @@ impl Models {
                 )
                 .with_model(request.model.clone())
             })?;
+            if let Some(options) = full_options.as_ref()
+                && options.api != api
+            {
+                return Err(RequestStartError::new(
+                    RequestStartErrorKind::InvalidRequest,
+                    format!(
+                        "full API options for {} cannot be applied to model API {api}",
+                        options.api
+                    ),
+                )
+                .with_model(request.model.clone()));
+            }
 
             let auth = await_or_cancelled(
                 provider.auth.resolve(
@@ -733,11 +800,35 @@ impl Models {
             let mut headers =
                 provider_default_headers(&provider).map_err(AiError::into_request_start)?;
             merge_header_map(&mut headers, &auth.headers);
+            if let Some(options) = full_options.as_ref() {
+                implementation
+                    .apply_full_options_headers(
+                        &model,
+                        &request.context,
+                        options,
+                        &request_options,
+                        &mut headers,
+                    )
+                    .map_err(AiError::into_request_start)?;
+            } else if let crate::ApiModelConfig::AnthropicMessages(config) = &model.api {
+                apply_anthropic_messages_default_headers(
+                    config,
+                    &request.context,
+                    &request.options,
+                    &mut headers,
+                )
+                .map_err(|error| {
+                    RequestStartError::new(RequestStartErrorKind::InvalidRequest, error.message)
+                        .with_model(request.model.clone())
+                })?;
+            }
             apply_header_spec(&mut headers, &model.common.headers).map_err(|error| {
                 RequestStartError::new(RequestStartErrorKind::InvalidRequest, error.message)
                     .with_model(request.model.clone())
             })?;
-            if let crate::ApiModelConfig::OpenAiCompletions(config) = &model.api {
+            if full_options.is_none()
+                && let crate::ApiModelConfig::OpenAiCompletions(config) = &model.api
+            {
                 apply_openai_completions_session_affinity_headers(
                     &endpoint,
                     &config.compat,
@@ -749,7 +840,7 @@ impl Models {
                         .with_model(request.model.clone())
                 })?;
             }
-            apply_header_spec(&mut headers, &request.options.headers).map_err(|error| {
+            apply_header_spec(&mut headers, &request_options.headers).map_err(|error| {
                 RequestStartError::new(RequestStartErrorKind::InvalidRequest, error.message)
                     .with_model(request.model.clone())
             })?;
@@ -775,13 +866,13 @@ impl Models {
             }
 
             let mut retry_policy = provider.retry_policy.clone();
-            if let Some(max_retries) = request.options.max_retries {
+            if let Some(max_retries) = request_options.max_retries {
                 retry_policy.max_retries = max_retries;
             }
-            if let Some(max_delay_ms) = request.options.max_retry_delay_ms {
+            if let Some(max_delay_ms) = request_options.max_retry_delay_ms {
                 retry_policy.max_server_delay = Some(Duration::from_millis(max_delay_ms));
             }
-            let timeout = request.options.timeout_ms.map(Duration::from_millis);
+            let timeout = request_options.timeout_ms.map(Duration::from_millis);
 
             implementation
                 .stream(
@@ -789,6 +880,8 @@ impl Models {
                         model,
                         context: request.context,
                         options: request.options,
+                        full_options,
+                        request_options,
                         endpoint,
                         headers,
                         api,
@@ -1595,6 +1688,59 @@ impl LocalModels {
         auth_overrides: AuthResolutionOverrides,
         cancellation: CancellationToken,
     ) -> LocalBoxFuture<'_, Result<LocalAssistantStream, RequestStartError>> {
+        let request_options = ApiRequestOptions::from(&request.options);
+        self.stream_request_with_auth(request, None, request_options, auth_overrides, cancellation)
+    }
+
+    /// Executes fully API-specific options through a registered local
+    /// provider without invoking simple lowering.
+    pub fn stream_api<A: ApiFamily>(
+        &self,
+        model: ModelRef,
+        context: Context,
+        options: A::FullOptions,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<LocalAssistantStream, RequestStartError>> {
+        self.stream_api_with_request_options::<A>(
+            model,
+            context,
+            options,
+            ApiRequestOptions::default(),
+            cancellation,
+        )
+    }
+
+    /// Executes fully API-specific local options with common transport
+    /// controls.
+    pub fn stream_api_with_request_options<A: ApiFamily>(
+        &self,
+        model: ModelRef,
+        context: Context,
+        options: A::FullOptions,
+        request_options: ApiRequestOptions,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<LocalAssistantStream, RequestStartError>> {
+        self.stream_request_with_auth(
+            ModelRequest {
+                model,
+                context,
+                options: SimpleGenerationOptions::default(),
+            },
+            Some(ErasedApiFullOptions::new::<A>(options)),
+            request_options,
+            AuthResolutionOverrides::default(),
+            cancellation,
+        )
+    }
+
+    fn stream_request_with_auth(
+        &self,
+        request: ModelRequest,
+        full_options: Option<ErasedApiFullOptions>,
+        request_options: ApiRequestOptions,
+        auth_overrides: AuthResolutionOverrides,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<LocalAssistantStream, RequestStartError>> {
         Box::pin(async move {
             cancellation.check().map_err(|_| {
                 RequestStartError::new(RequestStartErrorKind::Cancelled, "request cancelled")
@@ -1633,6 +1779,18 @@ impl LocalModels {
                 )
                 .with_model(request.model.clone())
             })?;
+            if let Some(options) = full_options.as_ref()
+                && options.api != api
+            {
+                return Err(RequestStartError::new(
+                    RequestStartErrorKind::InvalidRequest,
+                    format!(
+                        "full API options for {} cannot be applied to model API {api}",
+                        options.api
+                    ),
+                )
+                .with_model(request.model.clone()));
+            }
 
             let auth = await_or_cancelled(
                 provider.auth.resolve(
@@ -1670,11 +1828,35 @@ impl LocalModels {
             let mut headers =
                 local_provider_default_headers(&provider).map_err(AiError::into_request_start)?;
             merge_header_map(&mut headers, &auth.headers);
+            if let Some(options) = full_options.as_ref() {
+                implementation
+                    .apply_full_options_headers(
+                        &model,
+                        &request.context,
+                        options,
+                        &request_options,
+                        &mut headers,
+                    )
+                    .map_err(AiError::into_request_start)?;
+            } else if let crate::ApiModelConfig::AnthropicMessages(config) = &model.api {
+                apply_anthropic_messages_default_headers(
+                    config,
+                    &request.context,
+                    &request.options,
+                    &mut headers,
+                )
+                .map_err(|error| {
+                    RequestStartError::new(RequestStartErrorKind::InvalidRequest, error.message)
+                        .with_model(request.model.clone())
+                })?;
+            }
             apply_header_spec(&mut headers, &model.common.headers).map_err(|error| {
                 RequestStartError::new(RequestStartErrorKind::InvalidRequest, error.message)
                     .with_model(request.model.clone())
             })?;
-            if let crate::ApiModelConfig::OpenAiCompletions(config) = &model.api {
+            if full_options.is_none()
+                && let crate::ApiModelConfig::OpenAiCompletions(config) = &model.api
+            {
                 apply_openai_completions_session_affinity_headers(
                     &endpoint,
                     &config.compat,
@@ -1686,7 +1868,7 @@ impl LocalModels {
                         .with_model(request.model.clone())
                 })?;
             }
-            apply_header_spec(&mut headers, &request.options.headers).map_err(|error| {
+            apply_header_spec(&mut headers, &request_options.headers).map_err(|error| {
                 RequestStartError::new(RequestStartErrorKind::InvalidRequest, error.message)
                     .with_model(request.model.clone())
             })?;
@@ -1712,10 +1894,10 @@ impl LocalModels {
             }
 
             let mut retry_policy = provider.retry_policy.clone();
-            if let Some(max_retries) = request.options.max_retries {
+            if let Some(max_retries) = request_options.max_retries {
                 retry_policy.max_retries = max_retries;
             }
-            if let Some(max_delay_ms) = request.options.max_retry_delay_ms {
+            if let Some(max_delay_ms) = request_options.max_retry_delay_ms {
                 retry_policy.max_server_delay = Some(Duration::from_millis(max_delay_ms));
             }
 
@@ -1724,8 +1906,10 @@ impl LocalModels {
                     LocalResolvedApiRequest {
                         model,
                         context: request.context,
-                        timeout: request.options.timeout_ms.map(Duration::from_millis),
+                        timeout: request_options.timeout_ms.map(Duration::from_millis),
                         options: request.options,
+                        full_options,
+                        request_options,
                         endpoint,
                         headers,
                         api,

@@ -1316,6 +1316,7 @@ fn tool_after_hook_can_replace_usage() {
         reasoning_tokens: Some(3),
         cache_read_tokens: Some(4),
         cache_write_tokens: Some(5),
+        cache_write_one_hour_tokens: None,
         source: UsageSource::Estimated,
     };
     let outcome = patched_outcome(
