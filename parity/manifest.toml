@@ -70,7 +70,27 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/auth/types.ts"
-rust = ["auth_provider_extra_fields_round_trip"]
+rust = ["auth_list_never_resolves_secrets", "auth_manual_code_can_be_cancelled_by_callback", "auth_provider_extra_fields_round_trip", "auth_secret_prompt", "auth_select_returns_option_id", "auth_text_prompt"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/ai/src/auth/credential-store.ts"
+rust = ["auth_login_persists_under_modify", "auth_oauth_refresh_is_serialized"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/ai/src/auth/resolve.ts"
+rust = ["auth_environment_used_only_without_stored_credential", "auth_explicit_request_value_wins", "auth_failed_oauth_refresh_never_falls_back_to_env", "auth_local_oauth_rotation_persists_before_explicit_minimum_rejection", "auth_oauth_refresh_is_serialized", "auth_oauth_rotation_persists_before_explicit_minimum_rejection", "auth_stored_credential_owns_provider"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/ai/src/auth/oauth/device-code.ts"
+rust = ["auth_device_deadline_is_enforced", "auth_device_default_interval_is_five_seconds", "auth_device_interval_minimum_is_one_second", "auth_device_poll_is_cancellable", "auth_device_server_interval_wins", "auth_device_slow_down_adds_five_seconds"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/ai/src/auth/oauth/pkce.ts"
+rust = ["auth_pkce_state_is_validated"]
 status = "semantic-parity"
 
 # Architecture v2 part 2 §10.11 divergence allowlist. Each row is represented
@@ -132,7 +152,7 @@ reason = "Provider replay artifacts use typed targets, applicability, completene
 
 [[mapping]]
 source = "packages/ai/src/auth/oauth/openai-codex.ts"
-rust = []
+rust = ["auth_callback_and_manual_first_valid_wins", "auth_late_losing_response_is_superseded", "auth_manual_code_can_be_cancelled_by_callback", "auth_mobile_custom_scheme_flow", "auth_mobile_unsupported_fixed_loopback_is_explicit", "auth_pkce_state_is_validated"]
 status = "deliberate-divergence"
 allowlist_row = "provider-owned-loopback-server"
 replacement = "Host-provided RedirectReceiver; core owns OAuth state machine."
@@ -343,7 +363,7 @@ milestone = "M4"
 source = "packages/ai/test/anthropic-auth-token.test.ts"
 rust = []
 status = "planned"
-milestone = "M3.3"
+milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/anthropic-cache-write-1h-cost.test.ts"
@@ -385,7 +405,7 @@ milestone = "M4"
 source = "packages/ai/test/anthropic-oauth.test.ts"
 rust = []
 status = "planned"
-milestone = "M3.3"
+milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/anthropic-opus-4-8-smoke.test.ts"
@@ -451,7 +471,7 @@ milestone = "M6"
 source = "packages/ai/test/bedrock-credentials.test.ts"
 rust = []
 status = "planned"
-milestone = "M3.3"
+milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/bedrock-custom-headers.test.ts"
@@ -565,7 +585,7 @@ milestone = "M6"
 source = "packages/ai/test/env-api-keys.test.ts"
 rust = []
 status = "planned"
-milestone = "M3.3"
+milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/error-body.test.ts"
@@ -607,7 +627,7 @@ milestone = "M4"
 source = "packages/ai/test/github-copilot-oauth.test.ts"
 rust = []
 status = "planned"
-milestone = "M3.3"
+milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/google-raw-stop-reason.test.ts"
@@ -703,7 +723,7 @@ milestone = "M6"
 source = "packages/ai/test/kimi-coding-oauth.test.ts"
 rust = []
 status = "planned"
-milestone = "M3.3"
+milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/lax-message-content.test.ts"
@@ -761,9 +781,8 @@ milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/models-runtime.test.ts"
-rust = []
-status = "planned"
-milestone = "M3.3"
+rust = ["auth_environment_used_only_without_stored_credential", "auth_explicit_request_value_wins", "auth_failed_oauth_refresh_never_falls_back_to_env", "auth_list_never_resolves_secrets", "auth_local_oauth_rotation_persists_before_explicit_minimum_rejection", "auth_login_persists_under_modify", "auth_oauth_refresh_is_serialized", "auth_oauth_rotation_persists_before_explicit_minimum_rejection", "auth_stored_credential_owns_provider", "catalog_failed_persist_keeps_old_snapshot", "catalog_host_override_applies_after_dynamic_snapshot", "catalog_network_refresh_is_best_effort_per_provider", "catalog_persist_precedes_publish", "catalog_raw_snapshot_does_not_contain_flattened_override", "catalog_reader_never_sees_partial_candidate", "catalog_reads_last_published_snapshot_synchronously", "catalog_removed_override_reveals_provider_value", "catalog_restore_precedes_auth_resolution", "catalog_restore_precedes_network", "catalog_runtime_override_has_highest_precedence", "catalog_static_refresh_is_noop", "catalog_superseded_refresh_cannot_publish", "catalog_typed_compat_mismatch_is_rejected", "catalog_unknown_extensions_round_trip", "headers_auth_before_model", "headers_explicit_before_transform", "headers_merge_case_insensitively", "headers_model_before_explicit", "headers_transform_can_delete_default", "headers_transform_not_forwarded_to_provider_options", "headers_transform_runs_once", "models_provider_registration_is_atomic", "models_registry_lock_is_released_before_auth_await"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/node-http-proxy.test.ts"
@@ -775,13 +794,12 @@ milestone = "M6"
 source = "packages/ai/test/oauth-auth.test.ts"
 rust = []
 status = "planned"
-milestone = "M3.3"
+milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/oauth-device-code.test.ts"
-rust = []
-status = "planned"
-milestone = "M3.3"
+rust = ["auth_device_deadline_is_enforced", "auth_device_default_interval_is_five_seconds", "auth_device_interval_minimum_is_one_second", "auth_device_poll_is_cancellable", "auth_device_server_interval_wins", "auth_device_slow_down_adds_five_seconds"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/openai-codex-cache-affinity-e2e.test.ts"
@@ -793,7 +811,7 @@ milestone = "M6"
 source = "packages/ai/test/openai-codex-oauth.test.ts"
 rust = []
 status = "planned"
-milestone = "M3.3"
+milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/openai-codex-stream.test.ts"
@@ -949,7 +967,7 @@ milestone = "M6"
 source = "packages/ai/test/openrouter-oauth.test.ts"
 rust = []
 status = "planned"
-milestone = "M3.3"
+milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/overflow.test.ts"
@@ -996,7 +1014,7 @@ milestone = "M6"
 source = "packages/ai/test/radius-oauth.test.ts"
 rust = []
 status = "planned"
-milestone = "M3.3"
+milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/reasoning-options.test.ts"
@@ -1109,7 +1127,7 @@ status = "semantic-parity"
 source = "packages/ai/test/xai-oauth.test.ts"
 rust = []
 status = "planned"
-milestone = "M3.3"
+milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/xai-responses.test.ts"

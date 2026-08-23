@@ -1687,7 +1687,7 @@ struct RcLocalAuth(Rc<Cell<usize>>);
 impl LocalAuthResolver for RcLocalAuth {
     fn resolve(
         &self,
-        _request: ResolveAuthRequest,
+        _request: LocalResolveAuthRequest,
         _cancellation: CancellationToken,
     ) -> LocalBoxFuture<'_, Result<Option<ResolvedAuth>, AuthError>> {
         self.0.set(self.0.get() + 1);

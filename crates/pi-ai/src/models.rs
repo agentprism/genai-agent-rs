@@ -2,21 +2,24 @@
 //! §3.6 and part 2 §2.6.
 
 use crate::{
-    AiError, ApiFamily, AttemptMiddleware, CancellationToken, CatalogError, CatalogFetchContext,
-    CatalogSnapshot, ErasedPayloadTransform, HeaderTransform, HeaderTransformContext,
-    InMemoryModelOverrideStore, InMemoryModelsStore, LocalAssistantStream, LocalAttemptMiddleware,
-    LocalBoxFuture, LocalErasedPayloadTransform, LocalHeaderTransform,
-    LocalInMemoryModelOverrideStore, LocalInMemoryModelsStore, LocalModelOverrideStore,
-    LocalModelRuntime, LocalModelsStore, LocalPayloadTransform, LocalPayloadTransformAdapter,
-    LocalProviderCatalogState, LocalProviderRefreshCoordination, LocalProviderRegistration,
-    LocalResolvedApiRequest, LocalResponseObserver, ModelDescriptor, ModelOverride,
-    ModelOverrideStore, ModelRef, ModelRequest, ModelRuntime, ModelsStore, PayloadTransform,
-    PayloadTransformAdapter, ProviderCatalogLayers, ProviderCatalogState,
-    ProviderRefreshCoordination, ProviderRefreshResult, ProviderRegistration,
-    ProviderRegistrationError, RefreshGeneration, RefreshReport, RefreshRequest, RequestStartError,
-    RequestStartErrorKind, ResolvedApiRequest, ResponseObserver, SendBoxFuture, apply_header_spec,
-    local_provider_default_headers, merge_header_map, provider_default_headers, publish_candidate,
-    publish_local_candidate, restore_local_persisted_candidate, restore_persisted_candidate,
+    AiError, ApiFamily, AttemptMiddleware, AuthContext, AuthInteraction, AuthResolutionOverrides,
+    AuthResolutionPurpose, CancellationToken, CatalogError, CatalogFetchContext, CatalogSnapshot,
+    Credential, CredentialInfo, CredentialStore, EmptyAuthContext, ErasedPayloadTransform,
+    HeaderTransform, HeaderTransformContext, InMemoryCredentialStore, InMemoryModelOverrideStore,
+    InMemoryModelsStore, LocalAssistantStream, LocalAttemptMiddleware, LocalAuthContext,
+    LocalAuthInteraction, LocalBoxFuture, LocalCredentialStore, LocalErasedPayloadTransform,
+    LocalHeaderTransform, LocalInMemoryCredentialStore, LocalInMemoryModelOverrideStore,
+    LocalInMemoryModelsStore, LocalModelOverrideStore, LocalModelRuntime, LocalModelsStore,
+    LocalPayloadTransform, LocalPayloadTransformAdapter, LocalProviderCatalogState,
+    LocalProviderRefreshCoordination, LocalProviderRegistration, LocalResolvedApiRequest,
+    LocalResponseObserver, ModelDescriptor, ModelOverride, ModelOverrideStore, ModelRef,
+    ModelRequest, ModelRuntime, ModelsStore, PayloadTransform, PayloadTransformAdapter,
+    ProviderCatalogLayers, ProviderCatalogState, ProviderRefreshCoordination,
+    ProviderRefreshResult, ProviderRegistration, ProviderRegistrationError, RefreshGeneration,
+    RefreshReport, RefreshRequest, RequestStartError, RequestStartErrorKind, ResolvedApiRequest,
+    ResponseObserver, SendBoxFuture, apply_header_spec, local_provider_default_headers,
+    merge_header_map, provider_default_headers, publish_candidate, publish_local_candidate,
+    restore_local_persisted_candidate, restore_persisted_candidate,
 };
 use futures_util::future::{Either, select};
 use futures_util::stream::{FuturesUnordered, StreamExt};
@@ -43,6 +46,8 @@ pub struct Models {
 
 struct ModelsInner {
     providers: RwLock<IndexMap<crate::ProviderId, ProviderSlot>>,
+    credentials: Arc<dyn CredentialStore>,
+    auth_context: Arc<dyn AuthContext>,
     models_store: Arc<dyn ModelsStore>,
     override_store: Arc<dyn ModelOverrideStore>,
     header_transforms: Arc<[Arc<dyn HeaderTransform>]>,
@@ -127,6 +132,117 @@ impl Models {
             .iter()
             .find(|model| model.common.model_ref == *model_ref)
             .cloned()
+    }
+
+    /// Returns the Models-owned credential-store capability.
+    pub fn credential_store(&self) -> Arc<dyn CredentialStore> {
+        Arc::clone(&self.inner.credentials)
+    }
+
+    /// Lists stored credential metadata without resolving or exposing secrets.
+    pub fn credential_info(
+        &self,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<Vec<CredentialInfo>, crate::AuthError>> {
+        Box::pin(async move {
+            self.inner
+                .credentials
+                .list(cancellation)
+                .await
+                .map_err(crate::AuthError::from)
+        })
+    }
+
+    /// Resolves provider-scoped authentication using explicit, stored, then
+    /// ambient precedence. Unknown providers resolve to `None`, matching Pi's
+    /// `Models.getAuth` behavior.
+    pub fn resolve_auth(
+        &self,
+        provider_id: crate::ProviderId,
+        overrides: AuthResolutionOverrides,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<Option<crate::ResolvedAuth>, crate::AuthError>> {
+        Box::pin(async move {
+            cancellation
+                .check()
+                .map_err(|_| crate::AuthError::Cancelled)?;
+            let Some(provider) = self.provider(&provider_id) else {
+                return Ok(None);
+            };
+            await_auth_or_cancelled(
+                provider.auth.resolve(
+                    crate::ResolveAuthRequest {
+                        provider: provider.descriptor.clone(),
+                        model: None,
+                        purpose: AuthResolutionPurpose::Request,
+                        credential_store: Arc::clone(&self.inner.credentials),
+                        auth_context: Arc::clone(&self.inner.auth_context),
+                        overrides,
+                    },
+                    cancellation.clone(),
+                ),
+                &cancellation,
+            )
+            .await
+        })
+    }
+
+    /// Runs provider-owned login and persists the result under a credential
+    /// lease, so it serializes with refresh and concurrent login.
+    pub fn login(
+        &self,
+        provider_id: crate::ProviderId,
+        interaction: Arc<dyn AuthInteraction>,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<Credential, crate::AuthError>> {
+        Box::pin(async move {
+            cancellation
+                .check()
+                .map_err(|_| crate::AuthError::Cancelled)?;
+            let provider = self.provider(&provider_id).ok_or_else(|| {
+                crate::AuthError::new(
+                    "unknown_provider",
+                    format!("unknown provider: {provider_id}"),
+                )
+            })?;
+            let credential = await_auth_or_cancelled(
+                provider.auth.login(interaction, cancellation.clone()),
+                &cancellation,
+            )
+            .await?;
+            let mut lease = self
+                .inner
+                .credentials
+                .acquire_lease(provider_id, cancellation.clone())
+                .await?;
+            cancellation
+                .check()
+                .map_err(|_| crate::AuthError::Cancelled)?;
+            lease.replace(Some(credential.clone()));
+            lease.commit().await?;
+            Ok(credential)
+        })
+    }
+
+    /// Deletes the stored credential under a provider-scoped lease. Matching
+    /// pinned Pi, provider cleanup is not invoked by this Models operation.
+    pub fn logout(
+        &self,
+        provider_id: crate::ProviderId,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<(), crate::AuthError>> {
+        Box::pin(async move {
+            let mut lease = self
+                .inner
+                .credentials
+                .acquire_lease(provider_id, cancellation.clone())
+                .await?;
+            cancellation
+                .check()
+                .map_err(|_| crate::AuthError::Cancelled)?;
+            lease.replace(None);
+            lease.commit().await.map_err(crate::AuthError::from)
+        })
     }
 
     /// Atomically loads one provider's complete effective catalog snapshot.
@@ -460,6 +576,10 @@ impl Models {
                 crate::ResolveAuthRequest {
                     provider: provider.descriptor.clone(),
                     model: None,
+                    purpose: AuthResolutionPurpose::CatalogRefresh,
+                    credential_store: Arc::clone(&self.inner.credentials),
+                    auth_context: Arc::clone(&self.inner.auth_context),
+                    overrides: AuthResolutionOverrides::default(),
                 },
                 cancellation.clone(),
             ),
@@ -473,7 +593,7 @@ impl Models {
                     model_count: retained(),
                 };
             }
-            Ok(Err(error)) => return failed(CatalogError::authentication(error.message)),
+            Ok(Err(error)) => return failed(CatalogError::authentication(error.to_string())),
             Err(error) => return failed(error),
         };
 
@@ -523,6 +643,18 @@ impl Models {
         request: ModelRequest,
         cancellation: CancellationToken,
     ) -> SendBoxFuture<'_, Result<crate::AssistantStream, RequestStartError>> {
+        self.stream_simple_with_auth(request, AuthResolutionOverrides::default(), cancellation)
+    }
+
+    /// Executes the complete request pipeline with explicit auth overrides.
+    /// This keeps secret request auth out of the serializable
+    /// [`crate::SimpleGenerationOptions`] schema.
+    pub fn stream_simple_with_auth(
+        &self,
+        request: ModelRequest,
+        auth_overrides: AuthResolutionOverrides,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<crate::AssistantStream, RequestStartError>> {
         Box::pin(async move {
             cancellation.check().map_err(|_| {
                 RequestStartError::new(RequestStartErrorKind::Cancelled, "request cancelled")
@@ -568,6 +700,10 @@ impl Models {
                     crate::ResolveAuthRequest {
                         provider: provider.descriptor.clone(),
                         model: Some(model.clone()),
+                        purpose: AuthResolutionPurpose::Request,
+                        credential_store: Arc::clone(&self.inner.credentials),
+                        auth_context: Arc::clone(&self.inner.auth_context),
+                        overrides: auth_overrides,
                     },
                     cancellation.clone(),
                 ),
@@ -575,7 +711,7 @@ impl Models {
             )
             .await?
             .map_err(|error| {
-                RequestStartError::new(RequestStartErrorKind::RuntimeUnavailable, error.message)
+                RequestStartError::new(RequestStartErrorKind::RuntimeUnavailable, error.to_string())
                     .with_model(request.model.clone())
             })?
             .ok_or_else(|| {
@@ -685,6 +821,8 @@ impl LocalModelRuntime for Models {
 /// Immutable Models configuration builder.
 pub struct ModelsBuilder {
     providers: Vec<ProviderRegistration>,
+    credentials: Arc<dyn CredentialStore>,
+    auth_context: Arc<dyn AuthContext>,
     models_store: Arc<dyn ModelsStore>,
     override_store: Arc<dyn ModelOverrideStore>,
     header_transforms: Vec<Arc<dyn HeaderTransform>>,
@@ -697,6 +835,8 @@ impl Default for ModelsBuilder {
     fn default() -> Self {
         Self {
             providers: Vec::new(),
+            credentials: Arc::new(InMemoryCredentialStore::default()),
+            auth_context: Arc::new(EmptyAuthContext),
             models_store: Arc::new(InMemoryModelsStore::default()),
             override_store: Arc::new(InMemoryModelOverrideStore::default()),
             header_transforms: Vec::new(),
@@ -708,6 +848,19 @@ impl Default for ModelsBuilder {
 }
 
 impl ModelsBuilder {
+    /// Sets the Models-owned credential store used for request resolution,
+    /// login, logout, and OAuth refresh leases.
+    pub fn credential_store(mut self, store: Arc<dyn CredentialStore>) -> Self {
+        self.credentials = store;
+        self
+    }
+
+    /// Sets the host-owned ambient authentication context.
+    pub fn auth_context(mut self, context: Arc<dyn AuthContext>) -> Self {
+        self.auth_context = context;
+        self
+    }
+
     /// Sets the durable provider-originated catalog store.
     pub fn models_store(mut self, store: Arc<dyn ModelsStore>) -> Self {
         self.models_store = store;
@@ -806,6 +959,8 @@ impl ModelsBuilder {
         Ok(Models {
             inner: Arc::new(ModelsInner {
                 providers: RwLock::new(providers),
+                credentials: self.credentials,
+                auth_context: self.auth_context,
                 models_store: self.models_store,
                 override_store: self.override_store,
                 header_transforms: Arc::from(self.header_transforms),
@@ -835,6 +990,8 @@ pub struct LocalModels {
 
 struct LocalModelsInner {
     providers: RefCell<IndexMap<crate::ProviderId, LocalProviderSlot>>,
+    credentials: Rc<dyn LocalCredentialStore>,
+    auth_context: Rc<dyn LocalAuthContext>,
     models_store: Rc<dyn LocalModelsStore>,
     override_store: Rc<dyn LocalModelOverrideStore>,
     header_transforms: Rc<[Rc<dyn LocalHeaderTransform>]>,
@@ -922,6 +1079,114 @@ impl LocalModels {
             .iter()
             .find(|model| model.common.model_ref == *model_ref)
             .cloned()
+    }
+
+    /// Returns the local Models-owned credential-store capability.
+    pub fn credential_store(&self) -> Rc<dyn LocalCredentialStore> {
+        Rc::clone(&self.inner.credentials)
+    }
+
+    /// Lists local stored credential metadata without resolving secrets.
+    pub fn credential_info(
+        &self,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<Vec<CredentialInfo>, crate::AuthError>> {
+        Box::pin(async move {
+            self.inner
+                .credentials
+                .list(cancellation)
+                .await
+                .map_err(crate::AuthError::from)
+        })
+    }
+
+    /// Resolves local provider-scoped authentication.
+    pub fn resolve_auth(
+        &self,
+        provider_id: crate::ProviderId,
+        overrides: AuthResolutionOverrides,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<Option<crate::ResolvedAuth>, crate::AuthError>> {
+        Box::pin(async move {
+            cancellation
+                .check()
+                .map_err(|_| crate::AuthError::Cancelled)?;
+            let Some(provider) = self.provider(&provider_id) else {
+                return Ok(None);
+            };
+            await_auth_or_cancelled(
+                provider.auth.resolve(
+                    crate::LocalResolveAuthRequest {
+                        provider: provider.descriptor.clone(),
+                        model: None,
+                        purpose: AuthResolutionPurpose::Request,
+                        credential_store: Rc::clone(&self.inner.credentials),
+                        auth_context: Rc::clone(&self.inner.auth_context),
+                        overrides,
+                    },
+                    cancellation.clone(),
+                ),
+                &cancellation,
+            )
+            .await
+        })
+    }
+
+    /// Runs local provider login and persists its credential under a lease.
+    pub fn login(
+        &self,
+        provider_id: crate::ProviderId,
+        interaction: Rc<dyn LocalAuthInteraction>,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<Credential, crate::AuthError>> {
+        Box::pin(async move {
+            cancellation
+                .check()
+                .map_err(|_| crate::AuthError::Cancelled)?;
+            let provider = self.provider(&provider_id).ok_or_else(|| {
+                crate::AuthError::new(
+                    "unknown_provider",
+                    format!("unknown provider: {provider_id}"),
+                )
+            })?;
+            let credential = await_auth_or_cancelled(
+                provider.auth.login(interaction, cancellation.clone()),
+                &cancellation,
+            )
+            .await?;
+            let mut lease = self
+                .inner
+                .credentials
+                .acquire_lease(provider_id, cancellation.clone())
+                .await?;
+            cancellation
+                .check()
+                .map_err(|_| crate::AuthError::Cancelled)?;
+            lease.replace(Some(credential.clone()));
+            lease.commit().await?;
+            Ok(credential)
+        })
+    }
+
+    /// Deletes a locally stored credential using Pi's delete-only logout
+    /// behavior.
+    pub fn logout(
+        &self,
+        provider_id: crate::ProviderId,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<(), crate::AuthError>> {
+        Box::pin(async move {
+            let mut lease = self
+                .inner
+                .credentials
+                .acquire_lease(provider_id, cancellation.clone())
+                .await?;
+            cancellation
+                .check()
+                .map_err(|_| crate::AuthError::Cancelled)?;
+            lease.replace(None);
+            lease.commit().await.map_err(crate::AuthError::from)
+        })
     }
 
     /// Loads one local provider's last complete effective catalog snapshot.
@@ -1234,9 +1499,13 @@ impl LocalModels {
 
         let auth = match await_catalog_or_cancelled(
             provider.auth.resolve(
-                crate::ResolveAuthRequest {
+                crate::LocalResolveAuthRequest {
                     provider: provider.descriptor.clone(),
                     model: None,
+                    purpose: AuthResolutionPurpose::CatalogRefresh,
+                    credential_store: Rc::clone(&self.inner.credentials),
+                    auth_context: Rc::clone(&self.inner.auth_context),
+                    overrides: AuthResolutionOverrides::default(),
                 },
                 cancellation.clone(),
             ),
@@ -1250,7 +1519,7 @@ impl LocalModels {
                     model_count: retained(),
                 };
             }
-            Ok(Err(error)) => return failed(CatalogError::authentication(error.message)),
+            Ok(Err(error)) => return failed(CatalogError::authentication(error.to_string())),
             Err(error) => return failed(error),
         };
 
@@ -1301,6 +1570,18 @@ impl LocalModels {
         request: ModelRequest,
         cancellation: CancellationToken,
     ) -> LocalBoxFuture<'_, Result<LocalAssistantStream, RequestStartError>> {
+        self.stream_simple_with_auth(request, AuthResolutionOverrides::default(), cancellation)
+    }
+
+    /// Executes the local request pipeline with explicit auth overrides.
+    /// This mirrors [`Models::stream_simple_with_auth`] without placing
+    /// secrets in the serializable [`crate::SimpleGenerationOptions`] schema.
+    pub fn stream_simple_with_auth(
+        &self,
+        request: ModelRequest,
+        auth_overrides: AuthResolutionOverrides,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<LocalAssistantStream, RequestStartError>> {
         Box::pin(async move {
             cancellation.check().map_err(|_| {
                 RequestStartError::new(RequestStartErrorKind::Cancelled, "request cancelled")
@@ -1342,9 +1623,13 @@ impl LocalModels {
 
             let auth = await_or_cancelled(
                 provider.auth.resolve(
-                    crate::ResolveAuthRequest {
+                    crate::LocalResolveAuthRequest {
                         provider: provider.descriptor.clone(),
                         model: Some(model.clone()),
+                        purpose: AuthResolutionPurpose::Request,
+                        credential_store: Rc::clone(&self.inner.credentials),
+                        auth_context: Rc::clone(&self.inner.auth_context),
+                        overrides: auth_overrides,
                     },
                     cancellation.clone(),
                 ),
@@ -1352,7 +1637,7 @@ impl LocalModels {
             )
             .await?
             .map_err(|error| {
-                RequestStartError::new(RequestStartErrorKind::RuntimeUnavailable, error.message)
+                RequestStartError::new(RequestStartErrorKind::RuntimeUnavailable, error.to_string())
                     .with_model(request.model.clone())
             })?
             .ok_or_else(|| {
@@ -1447,6 +1732,8 @@ impl LocalModelRuntime for LocalModels {
 /// Immutable local Models configuration builder.
 pub struct LocalModelsBuilder {
     providers: Vec<LocalProviderRegistration>,
+    credentials: Rc<dyn LocalCredentialStore>,
+    auth_context: Rc<dyn LocalAuthContext>,
     models_store: Rc<dyn LocalModelsStore>,
     override_store: Rc<dyn LocalModelOverrideStore>,
     header_transforms: Vec<Rc<dyn LocalHeaderTransform>>,
@@ -1459,6 +1746,8 @@ impl Default for LocalModelsBuilder {
     fn default() -> Self {
         Self {
             providers: Vec::new(),
+            credentials: Rc::new(LocalInMemoryCredentialStore::default()),
+            auth_context: Rc::new(EmptyAuthContext),
             models_store: Rc::new(LocalInMemoryModelsStore::default()),
             override_store: Rc::new(LocalInMemoryModelOverrideStore::default()),
             header_transforms: Vec::new(),
@@ -1470,6 +1759,18 @@ impl Default for LocalModelsBuilder {
 }
 
 impl LocalModelsBuilder {
+    /// Sets the credential store shared with local provider auth resolvers.
+    pub fn credential_store(mut self, store: Rc<dyn LocalCredentialStore>) -> Self {
+        self.credentials = store;
+        self
+    }
+
+    /// Sets the ambient authentication context used by local providers.
+    pub fn auth_context(mut self, context: Rc<dyn LocalAuthContext>) -> Self {
+        self.auth_context = context;
+        self
+    }
+
     /// Sets the local durable provider-originated catalog store.
     pub fn models_store(mut self, store: Rc<dyn LocalModelsStore>) -> Self {
         self.models_store = store;
@@ -1570,6 +1871,8 @@ impl LocalModelsBuilder {
         Ok(LocalModels {
             inner: Rc::new(LocalModelsInner {
                 providers: RefCell::new(providers),
+                credentials: self.credentials,
+                auth_context: self.auth_context,
                 models_store: self.models_store,
                 override_store: self.override_store,
                 header_transforms: Rc::from(self.header_transforms),
@@ -1593,6 +1896,18 @@ async fn await_or_cancelled<T, E>(
             RequestStartErrorKind::Cancelled,
             "request cancelled",
         )),
+    }
+}
+
+async fn await_auth_or_cancelled<T>(
+    future: impl Future<Output = Result<T, crate::AuthError>>,
+    cancellation: &CancellationToken,
+) -> Result<T, crate::AuthError> {
+    let future = Box::pin(future);
+    let cancelled = Box::pin(cancellation.cancelled());
+    match select(future, cancelled).await {
+        Either::Left((result, _)) => result,
+        Either::Right(((), _)) => Err(crate::AuthError::Cancelled),
     }
 }
 

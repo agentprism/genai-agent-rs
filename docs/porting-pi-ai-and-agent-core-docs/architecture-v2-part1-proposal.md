@@ -704,6 +704,8 @@ pub trait AuthResolver: Send + Sync {
 }
 ```
 
+> Correction: Pinned Pi's `Models.logout` deletes the provider credential from the credential store and does not invoke provider-owned logout cleanup (`packages/ai/src/models.ts:617–627`). The resolver method remains part of the adopted Rust trait shape, but the `Models` control-plane operation follows Pi's delete-only behavior.
+
 ```rust
 pub struct ResolvedAuth {
     pub api_key: Option<SecretString>,

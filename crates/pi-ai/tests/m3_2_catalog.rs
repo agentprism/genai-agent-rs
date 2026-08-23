@@ -504,6 +504,11 @@ impl AuthResolver for ProbeAuth {
         _cancellation: CancellationToken,
     ) -> SendBoxFuture<'_, Result<Option<ResolvedAuth>, AuthError>> {
         assert!(request.model.is_none(), "catalog auth is provider-scoped");
+        assert_eq!(
+            request.purpose,
+            AuthResolutionPurpose::CatalogRefresh,
+            "catalog refresh must not use ordinary request-auth policy"
+        );
         let probe = Arc::clone(&self.probe);
         Box::pin(async move {
             probe();
@@ -515,6 +520,124 @@ impl AuthResolver for ProbeAuth {
             }))
         })
     }
+}
+
+#[derive(Clone, Copy)]
+struct FixedCatalogAuthClock(Timestamp);
+
+impl AuthClock for FixedCatalogAuthClock {
+    fn now(&self) -> Timestamp {
+        self.0
+    }
+}
+
+impl LocalAuthClock for FixedCatalogAuthClock {
+    fn now(&self) -> Timestamp {
+        self.0
+    }
+}
+
+struct CatalogOAuth {
+    refreshes: Arc<AtomicUsize>,
+}
+
+impl OAuthAuth for CatalogOAuth {
+    fn name(&self) -> &str {
+        "catalog OAuth"
+    }
+
+    fn login(
+        &self,
+        _interaction: Arc<dyn AuthInteraction>,
+        _cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<OAuthCredential, AuthError>> {
+        Box::pin(async {
+            Err(AuthError::UnsupportedLogin {
+                message: "not used by catalog conformance".into(),
+            })
+        })
+    }
+
+    fn refresh(
+        &self,
+        mut credential: OAuthCredential,
+        _cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<OAuthCredential, AuthError>> {
+        self.refreshes.fetch_add(1, Ordering::SeqCst);
+        credential.access = SecretString::new("unexpected-refresh");
+        Box::pin(async move { Ok(credential) })
+    }
+
+    fn to_auth(
+        &self,
+        credential: &OAuthCredential,
+    ) -> SendBoxFuture<'_, Result<ResolvedAuth, AuthError>> {
+        let access = credential.access.clone();
+        Box::pin(async move {
+            Ok(ResolvedAuth {
+                api_key: Some(access),
+                headers: HeaderMap::new(),
+                base_url: None,
+                source: AuthSource::new("OAuth"),
+            })
+        })
+    }
+}
+
+struct LocalCatalogOAuth {
+    refreshes: Rc<Cell<usize>>,
+}
+
+impl LocalOAuthAuth for LocalCatalogOAuth {
+    fn name(&self) -> &str {
+        "local catalog OAuth"
+    }
+
+    fn login(
+        &self,
+        _interaction: Rc<dyn LocalAuthInteraction>,
+        _cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<OAuthCredential, AuthError>> {
+        Box::pin(async {
+            Err(AuthError::UnsupportedLogin {
+                message: "not used by local catalog conformance".into(),
+            })
+        })
+    }
+
+    fn refresh(
+        &self,
+        mut credential: OAuthCredential,
+        _cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<OAuthCredential, AuthError>> {
+        self.refreshes.set(self.refreshes.get() + 1);
+        credential.access = SecretString::new("unexpected-local-refresh");
+        Box::pin(async move { Ok(credential) })
+    }
+
+    fn to_auth(
+        &self,
+        credential: &OAuthCredential,
+    ) -> LocalBoxFuture<'_, Result<ResolvedAuth, AuthError>> {
+        let access = credential.access.clone();
+        Box::pin(async move {
+            Ok(ResolvedAuth {
+                api_key: Some(access),
+                headers: HeaderMap::new(),
+                base_url: None,
+                source: AuthSource::new("OAuth"),
+            })
+        })
+    }
+}
+
+fn catalog_oauth_credential(access: &str, expires_at: i64) -> Credential {
+    Credential::OAuth(OAuthCredential {
+        access: SecretString::new(access),
+        refresh: SecretString::new("catalog-refresh-secret"),
+        expires_at: Timestamp::from_unix_millis(expires_at),
+        extra: ProviderOAuthExtra::None,
+    })
 }
 
 fn dynamic_provider(
@@ -708,7 +831,7 @@ fn catalog_static_refresh_is_noop() {
 
 #[test]
 fn catalog_restore_precedes_auth_resolution() {
-    let _basis = "architecture v2 part 2 §5.5, §10.7; packages/ai/src/models.ts:357-384";
+    let _basis = "architecture v2 part 2 §5.5, §10.7; packages/ai/src/models.ts:357-466";
     let store = Arc::new(InMemoryModelsStore::default());
     block_on(ModelsStore::write(
         store.as_ref(),
@@ -744,6 +867,109 @@ fn catalog_restore_precedes_auth_resolution() {
         .unwrap();
     *lock(&slot) = Some(models.clone());
     block_on(models.refresh(selected(PROVIDER), CancellationToken::new()));
+
+    // Pinned Pi's catalog path uses actual expiry, unlike request auth's
+    // five-minute minimum-validity window. A token with one minute remaining
+    // must reach catalog fetch unchanged in both Send and local families.
+    let credentials = Arc::new(InMemoryCredentialStore::new());
+    block_on(async {
+        let mut lease = credentials
+            .acquire_lease(ProviderId::new(PROVIDER), CancellationToken::new())
+            .await
+            .unwrap();
+        lease.replace(Some(catalog_oauth_credential("still-valid", 61_000)));
+        lease.commit().await.unwrap();
+    });
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    let source = Arc::new(
+        QueueSource::new(
+            Vec::new(),
+            vec![Ok(candidate(
+                vec![test_model(PROVIDER, "send-fresh", "send-fresh")],
+                "send-fresh",
+            ))],
+        )
+        .inspect(Arc::new(|context| {
+            assert_eq!(
+                context
+                    .auth
+                    .api_key
+                    .as_ref()
+                    .expect("catalog OAuth access token")
+                    .expose_secret(),
+                "still-valid"
+            );
+        })),
+    );
+    let resolver = ProviderAuthResolver::new(
+        None,
+        Some(Arc::new(CatalogOAuth {
+            refreshes: Arc::clone(&refreshes),
+        })),
+    )
+    .with_clock(Arc::new(FixedCatalogAuthClock(
+        Timestamp::from_unix_millis(1_000),
+    )));
+    let send_models = Models::builder()
+        .credential_store(credentials)
+        .provider(dynamic_provider(PROVIDER, source, Arc::new(resolver)))
+        .build()
+        .unwrap();
+    block_on(send_models.refresh(selected(PROVIDER), CancellationToken::new()));
+    assert_eq!(refreshes.load(Ordering::SeqCst), 0);
+    assert!(
+        send_models
+            .model(&ModelRef::new(PROVIDER, "send-fresh"))
+            .is_some()
+    );
+
+    let local_credentials = Rc::new(LocalInMemoryCredentialStore::new());
+    block_on(async {
+        let mut lease = LocalCredentialStore::acquire_lease(
+            local_credentials.as_ref(),
+            ProviderId::new(PROVIDER),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        lease.replace(Some(catalog_oauth_credential("still-valid-local", 61_000)));
+        lease.commit().await.unwrap();
+    });
+    let local_refreshes = Rc::new(Cell::new(0));
+    let local_resolver = LocalProviderAuthResolver::new(
+        None,
+        Some(Rc::new(LocalCatalogOAuth {
+            refreshes: Rc::clone(&local_refreshes),
+        })),
+    )
+    .with_clock(Rc::new(FixedCatalogAuthClock(Timestamp::from_unix_millis(
+        1_000,
+    ))));
+    let local_models = LocalModels::builder()
+        .credential_store(Rc::clone(&local_credentials) as Rc<dyn LocalCredentialStore>)
+        .provider(
+            LocalProviderRegistration::builder(PROVIDER)
+                .auth(Rc::new(local_resolver))
+                .catalog_source(Rc::new(LocalQueueSource::new(
+                    Vec::new(),
+                    vec![Ok(candidate(
+                        vec![test_model(PROVIDER, "local-fresh", "local-fresh")],
+                        "local-fresh",
+                    ))],
+                )))
+                .api(ApiId::new(API), Rc::new(LocalNoopApi))
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+    block_on(local_models.refresh(selected(PROVIDER), CancellationToken::new()));
+    assert_eq!(local_refreshes.get(), 0);
+    assert!(
+        local_models
+            .model(&ModelRef::new(PROVIDER, "local-fresh"))
+            .is_some()
+    );
 }
 
 #[test]

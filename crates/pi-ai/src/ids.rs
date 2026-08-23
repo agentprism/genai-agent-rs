@@ -95,6 +95,10 @@ string_id!(
     RunId,
     "A stable agent-run identifier shared across crate boundaries (Architecture v2 part 1 §4.4)."
 );
+string_id!(
+    AuthChallengeId,
+    "A stable host-visible authentication challenge identifier (Architecture v2 part 2 §6.2)."
+);
 
 /// A provider/model lookup key (Architecture v2 part 1 §3.1).
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]

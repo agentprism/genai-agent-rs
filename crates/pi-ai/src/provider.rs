@@ -7,18 +7,18 @@
 )]
 
 use crate::{
-    ApiId, AssistantStream, AttemptFailure, AttemptMiddleware, CancellationToken, Context,
-    DefaultRetryClassifier, ErasedApiOptionsPatch, ErasedPayloadContext, ErasedPayloadTransform,
-    HeaderMapSpec, HttpRequest, HttpResponse, HttpTransport, LocalAssistantStream,
-    LocalAttemptMiddleware, LocalBoxFuture, LocalDefaultRetryClassifier, LocalDefaultRetrySleeper,
-    LocalErasedPayloadTransform, LocalHttpResponse, LocalHttpTransport, LocalManagedModelCatalog,
-    LocalModelCatalogSource, LocalProviderCatalogState, LocalResponseObserver,
-    LocalRetryClassifier, LocalRetrySleeper, ManagedModelCatalog, ModelCatalogSource,
-    ModelDescriptor, ModelRef, PayloadTransformDisposition, ProviderCatalogState, ProviderId,
-    ProviderPayload, ProviderResponseMetadata, RequestStartError, RequestStartErrorKind,
-    ResponseObservationContext, ResponseObserver, RetryClassifier, RetryDecision, RetryPolicy,
-    RetrySleeper, SecretString, SendBoxFuture, SimpleGenerationOptions, apply_header_spec,
-    establish_with_retry_and_local_sleeper, establish_with_retry_and_sleeper,
+    ApiId, AssistantStream, AttemptFailure, AttemptMiddleware, AuthError, CancellationToken,
+    Context, DefaultRetryClassifier, ErasedApiOptionsPatch, ErasedPayloadContext,
+    ErasedPayloadTransform, HeaderMapSpec, HttpRequest, HttpResponse, HttpTransport,
+    LocalAssistantStream, LocalAttemptMiddleware, LocalBoxFuture, LocalDefaultRetryClassifier,
+    LocalDefaultRetrySleeper, LocalErasedPayloadTransform, LocalHttpResponse, LocalHttpTransport,
+    LocalManagedModelCatalog, LocalModelCatalogSource, LocalProviderCatalogState,
+    LocalResponseObserver, LocalRetryClassifier, LocalRetrySleeper, ManagedModelCatalog,
+    ModelCatalogSource, ModelDescriptor, ModelRef, PayloadTransformDisposition,
+    ProviderCatalogState, ProviderId, ProviderPayload, ProviderResponseMetadata, RequestStartError,
+    RequestStartErrorKind, ResponseObservationContext, ResponseObserver, RetryClassifier,
+    RetryDecision, RetryPolicy, RetrySleeper, SecretString, SendBoxFuture, SimpleGenerationOptions,
+    apply_header_spec, establish_with_retry_and_local_sleeper, establish_with_retry_and_sleeper,
     request_id_from_headers,
 };
 use futures_util::future::{Either, select};
@@ -110,48 +110,115 @@ impl fmt::Debug for ResolvedAuth {
     }
 }
 
+/// Control-plane operation requesting provider authentication.
+///
+/// Pinned Pi deliberately uses different OAuth refresh policies for ordinary
+/// requests and catalog refreshes: request auth refreshes within its minimum
+/// validity window and applies a refresh timeout, while catalog auth refreshes
+/// only an actually expired token and has no request-auth timeout.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthResolutionPurpose {
+    /// An ordinary model request or explicit request-auth lookup.
+    Request,
+    /// Credential resolution for a dynamic catalog network refresh.
+    CatalogRefresh,
+}
+
 /// Owned context passed to provider authentication resolution.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ResolveAuthRequest {
     /// Registered provider metadata.
     pub provider: ProviderDescriptor,
-    /// Current catalog model for request execution, or `None` for a
-    /// provider-scoped catalog refresh.
+    /// Current catalog model for request execution. Provider-scoped lookups
+    /// and catalog refreshes use `None`; [`Self::purpose`] distinguishes them.
     pub model: Option<ModelDescriptor>,
+    /// Operation-specific OAuth refresh policy.
+    pub purpose: AuthResolutionPurpose,
+    /// Models-owned credential transaction capability.
+    pub credential_store: Arc<dyn crate::CredentialStore>,
+    /// Host-owned ambient environment/filesystem capability.
+    pub auth_context: Arc<dyn crate::AuthContext>,
+    /// Explicit per-request values and OAuth validity requirement.
+    pub overrides: crate::AuthResolutionOverrides,
 }
 
-/// Sanitized provider authentication failure.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AuthError {
-    /// Stable authentication error code.
-    pub code: String,
-    /// Secret-free diagnostic text.
-    pub message: String,
-}
-
-impl AuthError {
-    /// Creates an authentication failure.
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+impl ResolveAuthRequest {
+    /// Creates a request with an empty in-memory store and ambient context.
+    /// Models replaces both capabilities with its configured instances.
+    pub fn isolated(provider: ProviderDescriptor, model: Option<ModelDescriptor>) -> Self {
         Self {
-            code: code.into(),
-            message: message.into(),
+            provider,
+            model,
+            purpose: AuthResolutionPurpose::Request,
+            credential_store: Arc::new(crate::InMemoryCredentialStore::default()),
+            auth_context: Arc::new(crate::EmptyAuthContext),
+            overrides: crate::AuthResolutionOverrides::default(),
         }
     }
 }
 
-impl fmt::Display for AuthError {
+impl fmt::Debug for ResolveAuthRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.message)
+        formatter
+            .debug_struct("ResolveAuthRequest")
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("purpose", &self.purpose)
+            .field("credential_store", &"<credential store>")
+            .field("auth_context", &"<auth context>")
+            .field("overrides", &self.overrides)
+            .finish()
     }
 }
 
-impl std::error::Error for AuthError {}
+/// Local-executor context passed to provider authentication resolution.
+#[derive(Clone)]
+pub struct LocalResolveAuthRequest {
+    /// Registered provider metadata.
+    pub provider: ProviderDescriptor,
+    /// Current catalog model for request execution. Provider-scoped lookups
+    /// and catalog refreshes use `None`; [`Self::purpose`] distinguishes them.
+    pub model: Option<ModelDescriptor>,
+    /// Operation-specific OAuth refresh policy.
+    pub purpose: AuthResolutionPurpose,
+    /// Models-owned local credential transaction capability.
+    pub credential_store: Rc<dyn crate::LocalCredentialStore>,
+    /// Host-owned local ambient environment/filesystem capability.
+    pub auth_context: Rc<dyn crate::LocalAuthContext>,
+    /// Explicit per-request values and OAuth validity requirement.
+    pub overrides: crate::AuthResolutionOverrides,
+}
 
-/// Provider-owned authentication resolution used by request execution.
-///
-/// Login, logout, credential leasing, and host interaction are added by the
-/// dedicated authentication package; this M3.1 capability is intentionally the
-/// narrow request-time seam.
+impl LocalResolveAuthRequest {
+    /// Creates an isolated local request with empty capabilities.
+    pub fn isolated(provider: ProviderDescriptor, model: Option<ModelDescriptor>) -> Self {
+        Self {
+            provider,
+            model,
+            purpose: AuthResolutionPurpose::Request,
+            credential_store: Rc::new(crate::LocalInMemoryCredentialStore::default()),
+            auth_context: Rc::new(crate::EmptyAuthContext),
+            overrides: crate::AuthResolutionOverrides::default(),
+        }
+    }
+}
+
+impl fmt::Debug for LocalResolveAuthRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LocalResolveAuthRequest")
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("purpose", &self.purpose)
+            .field("credential_store", &"<local credential store>")
+            .field("auth_context", &"<local auth context>")
+            .field("overrides", &self.overrides)
+            .finish()
+    }
+}
+
+/// Provider-owned authentication resolution, login, and optional cleanup.
+/// Credential persistence remains a Models control-plane responsibility.
 pub trait AuthResolver: Send + Sync + 'static {
     /// Resolves current credentials and provider-owned request defaults.
     fn resolve(
@@ -159,6 +226,28 @@ pub trait AuthResolver: Send + Sync + 'static {
         request: ResolveAuthRequest,
         cancellation: CancellationToken,
     ) -> SendBoxFuture<'_, Result<Option<ResolvedAuth>, AuthError>>;
+
+    /// Runs provider-owned interactive login. Models persists the returned
+    /// credential under a store lease.
+    fn login(
+        &self,
+        interaction: Arc<dyn crate::AuthInteraction>,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<crate::Credential, AuthError>> {
+        let _ = interaction;
+        let _ = cancellation;
+        Box::pin(async {
+            Err(AuthError::UnsupportedLogin {
+                message: "provider does not support interactive login".into(),
+            })
+        })
+    }
+
+    /// Performs provider-owned logout cleanup before Models deletes the
+    /// credential. Most providers use the no-op default.
+    fn logout(&self, _cancellation: CancellationToken) -> SendBoxFuture<'_, Result<(), AuthError>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// Single-threaded provider-owned request authentication resolution.
@@ -166,9 +255,32 @@ pub trait LocalAuthResolver: 'static {
     /// Resolves current credentials and provider-owned request defaults.
     fn resolve(
         &self,
-        request: ResolveAuthRequest,
+        request: LocalResolveAuthRequest,
         cancellation: CancellationToken,
     ) -> LocalBoxFuture<'_, Result<Option<ResolvedAuth>, AuthError>>;
+
+    /// Runs local provider-owned interactive login.
+    fn login(
+        &self,
+        interaction: Rc<dyn crate::LocalAuthInteraction>,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<crate::Credential, AuthError>> {
+        let _ = interaction;
+        let _ = cancellation;
+        Box::pin(async {
+            Err(AuthError::UnsupportedLogin {
+                message: "provider does not support interactive login".into(),
+            })
+        })
+    }
+
+    /// Performs local provider-owned logout cleanup.
+    fn logout(
+        &self,
+        _cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<(), AuthError>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// Keyless provider authentication that always resolves successfully.
@@ -195,7 +307,7 @@ impl AuthResolver for AnonymousAuthResolver {
 impl LocalAuthResolver for AnonymousAuthResolver {
     fn resolve(
         &self,
-        _request: ResolveAuthRequest,
+        _request: LocalResolveAuthRequest,
         _cancellation: CancellationToken,
     ) -> LocalBoxFuture<'_, Result<Option<ResolvedAuth>, AuthError>> {
         Box::pin(async {
