@@ -16,6 +16,8 @@ mod auth;
 mod cancellation;
 mod catalog;
 mod estimate;
+#[cfg(not(target_arch = "wasm32"))]
+mod file_credentials;
 mod handoff;
 mod ids;
 mod json_compat;
@@ -41,6 +43,8 @@ pub use auth::*;
 pub use cancellation::*;
 pub use catalog::*;
 pub use estimate::*;
+#[cfg(not(target_arch = "wasm32"))]
+pub use file_credentials::*;
 pub use handoff::*;
 pub use ids::*;
 pub use json_compat::*;

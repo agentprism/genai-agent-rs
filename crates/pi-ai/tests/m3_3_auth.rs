@@ -651,7 +651,7 @@ fn auth_environment_used_only_without_stored_credential() {
 }
 
 #[test]
-fn auth_failed_oauth_refresh_never_falls_back_to_env() {
+fn auth_failed_oauth_refresh_never_falls_back_to_env_in_memory() {
     let _basis = AUTH_BASIS;
     let store = Arc::new(InMemoryCredentialStore::new());
     put(
@@ -688,7 +688,7 @@ fn auth_failed_oauth_refresh_never_falls_back_to_env() {
 }
 
 #[test]
-fn auth_oauth_refresh_is_serialized() {
+fn auth_oauth_refresh_is_serialized_in_memory() {
     let _basis = AUTH_BASIS;
     let store = Arc::new(InMemoryCredentialStore::new());
     put(
@@ -819,7 +819,7 @@ fn auth_local_oauth_rotation_persists_before_explicit_minimum_rejection() {
 }
 
 #[test]
-fn auth_login_persists_under_modify() {
+fn auth_login_persists_under_modify_in_memory() {
     let _basis = AUTH_BASIS;
     let store = Arc::new(InMemoryCredentialStore::new());
     let models = models_with_auth(

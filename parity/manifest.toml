@@ -138,17 +138,27 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/auth/types.ts"
-rust = ["auth_list_never_resolves_secrets", "auth_manual_code_can_be_cancelled_by_callback", "auth_provider_extra_fields_round_trip", "auth_secret_prompt", "auth_select_returns_option_id", "auth_text_prompt"]
+rust = ["auth_file_store_round_trips_provider_extras", "auth_list_never_resolves_secrets", "auth_manual_code_can_be_cancelled_by_callback", "auth_provider_extra_fields_round_trip", "auth_secret_prompt", "auth_select_returns_option_id", "auth_text_prompt"]
 status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/auth/credential-store.ts"
-rust = ["auth_login_persists_under_modify", "auth_oauth_refresh_is_serialized"]
+rust = ["auth_login_persists_under_modify", "auth_login_persists_under_modify_in_memory", "auth_oauth_refresh_is_serialized", "auth_oauth_refresh_is_serialized_in_memory"]
 status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/auth/resolve.ts"
-rust = ["auth_environment_used_only_without_stored_credential", "auth_explicit_request_value_wins", "auth_failed_oauth_refresh_never_falls_back_to_env", "auth_local_oauth_rotation_persists_before_explicit_minimum_rejection", "auth_oauth_refresh_is_serialized", "auth_oauth_rotation_persists_before_explicit_minimum_rejection", "auth_stored_credential_owns_provider"]
+rust = ["auth_environment_used_only_without_stored_credential", "auth_explicit_request_value_wins", "auth_failed_oauth_refresh_never_falls_back_to_env", "auth_failed_oauth_refresh_never_falls_back_to_env_in_memory", "auth_local_oauth_rotation_persists_before_explicit_minimum_rejection", "auth_oauth_refresh_is_serialized", "auth_oauth_refresh_is_serialized_in_memory", "auth_oauth_rotation_persists_before_explicit_minimum_rejection", "auth_stored_credential_owns_provider"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part1-proposal.md#3.8"
+rust = ["auth_file_store_rejects_unknown_schema"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#9.2"
+rust = ["auth_file_store_local_adapter_round_trip"]
 status = "semantic-parity"
 
 [[mapping]]
@@ -821,7 +831,7 @@ milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/models-runtime.test.ts"
-rust = ["auth_environment_used_only_without_stored_credential", "auth_explicit_request_value_wins", "auth_failed_oauth_refresh_never_falls_back_to_env", "auth_list_never_resolves_secrets", "auth_local_oauth_rotation_persists_before_explicit_minimum_rejection", "auth_login_persists_under_modify", "auth_oauth_refresh_is_serialized", "auth_oauth_rotation_persists_before_explicit_minimum_rejection", "auth_stored_credential_owns_provider", "catalog_failed_persist_keeps_old_snapshot", "catalog_host_override_applies_after_dynamic_snapshot", "catalog_network_refresh_is_best_effort_per_provider", "catalog_persist_precedes_publish", "catalog_raw_snapshot_does_not_contain_flattened_override", "catalog_reader_never_sees_partial_candidate", "catalog_reads_last_published_snapshot_synchronously", "catalog_removed_override_reveals_provider_value", "catalog_restore_precedes_auth_resolution", "catalog_restore_precedes_network", "catalog_runtime_override_has_highest_precedence", "catalog_static_refresh_is_noop", "catalog_superseded_refresh_cannot_publish", "catalog_typed_compat_mismatch_is_rejected", "catalog_unknown_extensions_round_trip", "headers_auth_before_model", "headers_explicit_before_transform", "headers_merge_case_insensitively", "headers_model_before_explicit", "headers_transform_can_delete_default", "headers_transform_not_forwarded_to_provider_options", "headers_transform_runs_once", "models_provider_registration_is_atomic", "models_registry_lock_is_released_before_auth_await"]
+rust = ["auth_environment_used_only_without_stored_credential", "auth_explicit_request_value_wins", "auth_failed_oauth_refresh_never_falls_back_to_env", "auth_failed_oauth_refresh_never_falls_back_to_env_in_memory", "auth_list_never_resolves_secrets", "auth_local_oauth_rotation_persists_before_explicit_minimum_rejection", "auth_login_persists_under_modify", "auth_login_persists_under_modify_in_memory", "auth_oauth_refresh_is_serialized", "auth_oauth_refresh_is_serialized_in_memory", "auth_oauth_rotation_persists_before_explicit_minimum_rejection", "auth_stored_credential_owns_provider", "catalog_failed_persist_keeps_old_snapshot", "catalog_host_override_applies_after_dynamic_snapshot", "catalog_network_refresh_is_best_effort_per_provider", "catalog_persist_precedes_publish", "catalog_raw_snapshot_does_not_contain_flattened_override", "catalog_reader_never_sees_partial_candidate", "catalog_reads_last_published_snapshot_synchronously", "catalog_removed_override_reveals_provider_value", "catalog_restore_precedes_auth_resolution", "catalog_restore_precedes_network", "catalog_runtime_override_has_highest_precedence", "catalog_static_refresh_is_noop", "catalog_superseded_refresh_cannot_publish", "catalog_typed_compat_mismatch_is_rejected", "catalog_unknown_extensions_round_trip", "headers_auth_before_model", "headers_explicit_before_transform", "headers_merge_case_insensitively", "headers_model_before_explicit", "headers_transform_can_delete_default", "headers_transform_not_forwarded_to_provider_options", "headers_transform_runs_once", "models_provider_registration_is_atomic", "models_registry_lock_is_released_before_auth_await"]
 status = "semantic-parity"
 
 [[mapping]]
