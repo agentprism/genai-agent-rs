@@ -472,3 +472,129 @@ M3 added nine corrections:
   the pass-wide old-to-new mapping apply under pinned Pi's exact cross-model,
   changed-ID, failed-turn, and later-result conditions before failed-turn
   omission.
+
+## 2026-08-23 — M4: API/provider separation
+
+M4 established the ordered, JavaScript-compatible wire writer and captured Pi
+fixture corpus, then implemented OpenAI-compatible Chat Completions and
+Anthropic Messages as independent API-family handlers with lowering, exact wire
+encoding, stream decoding, replay assembly, and provider registrations. DeepSeek
+and OpenRouter share the OpenAI-compatible family implementation; Anthropic uses
+the Anthropic Messages family implementation.
+
+### Approved packages
+
+- M4.1 — ordered JSON wire writer and Pi fixture capture corpus —
+  `e692c4cb6dd757339469e6e84a9614c432248111`
+- M4.2 — OpenAI-compatible Chat Completions lowering, encoder, decoder, replay
+  items, and the DeepSeek/OpenRouter provider registrations sharing that family —
+  `ece3d55ef385e51587e548ae06355f1833d89d65`
+- M4.3 — Anthropic Messages lowering, encoder, decoder, signature replay items,
+  and the Anthropic provider registration —
+  `b2ffa6ff6d47bc71e9dc32c295fefb3176b6d245`
+
+### Architecture v2 Part 2 §10 conformance now passing
+
+27 new exact §10 conformance test names pass, bringing the cumulative exact
+§10 total to 261. Ten additional M4 tests re-exercise exact §10 names already
+recorded by M1 or M3, so the M4 packages directly exercise 37 exact §10 names.
+
+§10.2 opaque replay conformance (11 new):
+
+```text
+anthropic_turn_two_replays_exact_signature
+anthropic_redacted_thinking_replays_exact_data
+anthropic_unsigned_thinking_falls_back_to_text
+anthropic_empty_signature_respects_compat
+anthropic_signature_never_crosses_model_boundary
+openai_chat_reasoning_field_name_is_preserved
+openai_chat_reasoning_details_replay_exact_json
+openai_chat_block_signature_precedes_legacy_tool_signature
+openai_chat_legacy_tool_signature_imports_as_replay_item
+openai_chat_thinking_as_text_compat
+openai_chat_reasoning_content_required_compat
+```
+
+§10.5 simple-lowering conformance (11 new):
+
+```text
+anthropic_adaptive_uses_effort
+anthropic_budget_model_uses_budget_tokens
+anthropic_temperature_omitted_while_thinking
+anthropic_temperature_omitted_when_model_disallows_it
+anthropic_disabled_thinking_respects_compat
+openai_compat_is_detected_from_effective_base_url
+openai_model_compat_overrides_url_detection
+openai_max_tokens_field_matches_compat
+openai_reasoning_format_matches_compat
+openai_thinking_budget_field_matches_compat
+openai_sampling_params_merge_after_named_fields
+```
+
+§10.8 golden provider request bodies (5 new):
+
+```text
+wire_openai_completions_pi_exact
+wire_anthropic_messages_pi_exact
+openai_chat_reasoning_details_turn_two_pi_exact
+anthropic_signed_thinking_turn_two_pi_exact
+anthropic_redacted_thinking_turn_two_pi_exact
+```
+
+The ten exact names re-exercised by M4, and therefore excluded from the new
+counts above, are:
+
+```text
+stream_failure_is_terminal_message
+stream_cancellation_is_terminal_message
+stream_response_id_is_preserved
+stream_response_model_is_preserved
+anthropic_signature_fragments_append_in_order
+anthropic_signature_survives_message_round_trip
+anthropic_failed_partial_signature_is_not_replayed
+headers_model_before_explicit
+headers_explicit_before_transform
+headers_transform_can_delete_default
+```
+
+### Parity manifest coverage
+
+- Pinned upstream test files mapped: 159/159 — 21 `semantic-parity`, 0
+  `deliberate-divergence`, and 138 `planned`.
+- Status-bearing mappings: 203 total — 55 `semantic-parity`, 10
+  `deliberate-divergence`, and 138 `planned`.
+- Future named conformance tests: 14 `planned_test` entries, each assigned to a
+  milestone.
+- Rust test inventory discovered by the parity checker: 417 unique tests.
+
+### Architecture correction notes
+
+M4 added ten corrections, all to Architecture v2 Part 2:
+
+- M4.2 corrected §1.3: OpenAI Completions preserves the raw provider stop
+  reason even when finish-reason mapping produces a failed assistant.
+- M4.3 corrected §1.4: Anthropic redacted replay uses its redacted payload
+  independently of ordinary signatures, and whitespace-only ordinary
+  signatures are empty for compatibility decisions.
+- M4.2 corrected §2.4: request-scoped canonical context remains available to
+  OpenAI Completions decoding so custom grammar-tool deltas close with the
+  configured input-property name.
+- M4.3 corrected §3.5: full Anthropic options distinguish omitted thinking from
+  explicit disablement, retain native tool choice, and carry the interleaved
+  thinking transport preference.
+- M4.2 corrected §3.6: full OpenAI Completions tool choice uses the complete
+  optional native domain while the provider-neutral simple choice remains
+  `auto` or `none`.
+- M4.2 corrected §3.6: OpenAI reasoning lowering is a format mode plus an
+  independent token budget, including Baseten, Ant Ling, and ordered named
+  temperature/sampling overlay behavior.
+- M4.2 corrected §3.6: OpenAI compatibility detection also depends on provider
+  identity and, for OpenRouter, model-id prefixes; built-in descriptors
+  materialize values not inferable from the effective URL.
+- M4.3 corrected §5.1: `AnthropicEffort` includes `Minimal` because Pi accepts
+  string-valued thinking-level mappings and the captured minimal fixture emits
+  `"minimal"`.
+- M4.2 corrected §5.2: pricing and cost fixed-point integers are signed so Pi's
+  published negative OpenRouter rates survive and calculate exactly.
+- M4.3 corrected §5.2: usage retains Anthropic's one-hour cache-write subset and
+  prices only that subset at twice the input rate.
