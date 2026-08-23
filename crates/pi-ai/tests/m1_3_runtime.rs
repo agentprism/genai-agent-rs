@@ -820,7 +820,7 @@ fn responses_output_items_preserve_global_order() {
                 id: thinking_block,
                 text: "Inspecting the request...".into(),
                 redacted: false,
-                replay_item: None,
+                replay_item: Some(ReplayItemId::new("replay-0")),
             },
             ContentBlock::Text {
                 id: text_block,

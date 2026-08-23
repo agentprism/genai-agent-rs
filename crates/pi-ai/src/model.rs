@@ -802,8 +802,113 @@ impl<T> Default for ThinkingLevelMap<T> {
 pub enum LevelSupport<T> {
     /// Catalog explicitly marks the level unsupported.
     Unsupported,
+    /// Catalog explicitly disables reasoning at this level.
+    Disabled,
     /// Catalog maps the level to a provider/model-specific value.
     Value(T),
+}
+
+/// Resolution of one requested reasoning level against a typed model map.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReasoningLevelResolution<T> {
+    /// Level supplied by the caller.
+    pub requested: crate::ReasoningLevel,
+    /// Effective level after Pi's upward-first, then downward clamp search.
+    pub effective: crate::ReasoningLevel,
+    /// Explicit model support; `None` means use the API-family default map.
+    pub support: Option<LevelSupport<T>>,
+    /// Whether unsupported input was clamped to another supported level.
+    pub clamped: bool,
+}
+
+impl<T: Clone> ThinkingLevelMap<T> {
+    /// Returns the explicit catalog entry for one provider-neutral level.
+    pub fn get(&self, level: crate::ReasoningLevel) -> Option<&LevelSupport<T>> {
+        match level {
+            crate::ReasoningLevel::Off => self.off.as_ref(),
+            crate::ReasoningLevel::Minimal => self.minimal.as_ref(),
+            crate::ReasoningLevel::Low => self.low.as_ref(),
+            crate::ReasoningLevel::Medium => self.medium.as_ref(),
+            crate::ReasoningLevel::High => self.high.as_ref(),
+            crate::ReasoningLevel::Xhigh => self.xhigh.as_ref(),
+            crate::ReasoningLevel::Max => self.max.as_ref(),
+        }
+    }
+
+    /// Resolves explicit unsupported entries under strict or Pi-clamp policy.
+    /// A missing entry remains missing so the API family can apply its default.
+    pub fn resolve(
+        &self,
+        requested: crate::ReasoningLevel,
+        fallback: crate::ReasoningFallback,
+    ) -> Result<ReasoningLevelResolution<T>, crate::LoweringError> {
+        if !matches!(self.get(requested), Some(LevelSupport::Unsupported)) {
+            return Ok(ReasoningLevelResolution {
+                requested,
+                effective: requested,
+                support: self.get(requested).cloned(),
+                clamped: false,
+            });
+        }
+
+        if matches!(fallback, crate::ReasoningFallback::Strict) {
+            return Err(crate::LoweringError::UnsupportedReasoningLevel { requested });
+        }
+
+        const LEVELS: [crate::ReasoningLevel; 7] = [
+            crate::ReasoningLevel::Off,
+            crate::ReasoningLevel::Minimal,
+            crate::ReasoningLevel::Low,
+            crate::ReasoningLevel::Medium,
+            crate::ReasoningLevel::High,
+            crate::ReasoningLevel::Xhigh,
+            crate::ReasoningLevel::Max,
+        ];
+        let requested_index = LEVELS
+            .iter()
+            .position(|level| *level == requested)
+            .expect("all ReasoningLevel variants are listed");
+        let candidates = LEVELS[requested_index + 1..]
+            .iter()
+            .copied()
+            .chain(LEVELS[..requested_index].iter().rev().copied());
+        for effective in candidates {
+            let support = self.get(effective);
+            let api_default_is_supported = support.is_none()
+                && matches!(
+                    effective,
+                    crate::ReasoningLevel::Off
+                        | crate::ReasoningLevel::Minimal
+                        | crate::ReasoningLevel::Low
+                        | crate::ReasoningLevel::Medium
+                        | crate::ReasoningLevel::High
+                );
+            if api_default_is_supported
+                || matches!(
+                    support,
+                    Some(LevelSupport::Disabled | LevelSupport::Value(_))
+                )
+            {
+                return Ok(ReasoningLevelResolution {
+                    requested,
+                    effective,
+                    support: support.cloned(),
+                    clamped: true,
+                });
+            }
+        }
+
+        // Pinned Pi's clamp helper falls back to `off` when its supported
+        // level list is empty. Represent that terminal clamp as an explicit
+        // disabled plan even when the catalog itself marked `off`
+        // unsupported; strict mode has already rejected above.
+        Ok(ReasoningLevelResolution {
+            requested,
+            effective: crate::ReasoningLevel::Off,
+            support: Some(LevelSupport::Disabled),
+            clamped: true,
+        })
+    }
 }
 
 /// Versioned unknown extension value (Architecture v2 part 2 §5.1).

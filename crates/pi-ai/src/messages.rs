@@ -9,6 +9,14 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::{Value, value::RawValue};
 use std::collections::BTreeMap;
 
+fn deserialize_null_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<Vec<T>>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
 /// Current persisted conversation schema (Architecture v2 part 1 §3.1).
 pub const CONVERSATION_SCHEMA_VERSION: u32 = 1;
 
@@ -109,6 +117,7 @@ pub struct UserMessage {
     /// Stable message identifier.
     pub id: MessageId,
     /// Ordered user content. Provider projection validates allowed block kinds.
+    #[serde(default, deserialize_with = "deserialize_null_vec")]
     pub content: Vec<ContentBlock>,
     /// Creation time in Unix milliseconds.
     pub timestamp: Timestamp,
@@ -130,6 +139,7 @@ pub struct AssistantMessage {
     /// Provider response identifier when reported.
     pub response_id: Option<String>,
     /// Ordered displayable and executable canonical content.
+    #[serde(default, deserialize_with = "deserialize_null_vec")]
     pub content: Vec<ContentBlock>,
     /// Ordered opaque replay artifacts.
     pub replay: ReplayEnvelope,
@@ -151,6 +161,7 @@ pub struct ToolResultMessage {
     /// Tool name retained for APIs that require it.
     pub tool_name: String,
     /// Ordered text and image result blocks.
+    #[serde(default, deserialize_with = "deserialize_null_vec")]
     pub content: Vec<ToolResultContent>,
     /// Versioned tool-owned details not sent to providers by default.
     pub details: Option<VersionedExtension>,

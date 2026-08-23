@@ -971,23 +971,33 @@ macro_rules! agent_run_stream {
                     }
                 };
 
-                if let Some(model) = prepared.model_override.clone() {
+                let PreparedContext {
+                    context: prepared_context,
+                    model_override,
+                    options_override,
+                    report,
+                } = prepared;
+                if let Some(model) = model_override {
                     current_model = model;
                 }
+                $guard.agent.bump_event_sequence();
+                yield AgentEvent::ContextPrepared {
+                    turn,
+                    target: current_model.clone(),
+                    report,
+                };
                 let mut default_options = $guard.agent.options.clone();
                 default_options.reasoning = match current_reasoning {
                     pi_ai::ReasoningLevel::Off => None,
                     reasoning => Some(reasoning),
                 };
-                let request_options = prepared
-                    .options_override
-                    .unwrap_or(default_options);
+                let request_options = options_override.unwrap_or(default_options);
 
                 $guard.agent.phase = Some(AgentPhase::RequestAssistant);
                 let stream_result = $guard.agent.runtime.stream(
                     ModelRequest {
                         model: current_model.clone(),
-                        context: prepared.context,
+                        context: prepared_context,
                         options: request_options,
                     },
                     $guard.cancellation.clone(),
@@ -1513,16 +1523,22 @@ impl crate::Agent {
             )
             .await?;
         let messages = self.message_projector.project(&prepared.records).await?;
+        let context = Context {
+            schema_version: pi_ai::CONTEXT_SCHEMA_VERSION,
+            system_prompt: (!context.system_prompt.is_empty())
+                .then(|| context.system_prompt.clone()),
+            messages,
+            tools: tool_specs,
+        };
+        let report_target = prepared.model_override.as_ref().unwrap_or(model);
+        let report = prepared
+            .report
+            .unwrap_or_else(|| provider_neutral_handoff_report(report_target, &context.messages));
         Ok(PreparedContext {
-            context: Context {
-                schema_version: pi_ai::CONTEXT_SCHEMA_VERSION,
-                system_prompt: (!context.system_prompt.is_empty())
-                    .then(|| context.system_prompt.clone()),
-                messages,
-                tools: tool_specs,
-            },
+            context,
             model_override: prepared.model_override,
             options_override: prepared.options_override,
+            report,
         })
     }
 
@@ -1566,22 +1582,52 @@ impl LocalAgent {
             )
             .await?;
         let messages = self.message_projector.project(&prepared.records).await?;
+        let context = Context {
+            schema_version: pi_ai::CONTEXT_SCHEMA_VERSION,
+            system_prompt: (!context.system_prompt.is_empty())
+                .then(|| context.system_prompt.clone()),
+            messages,
+            tools: tool_specs,
+        };
+        let report_target = prepared.model_override.as_ref().unwrap_or(model);
+        let report = prepared
+            .report
+            .unwrap_or_else(|| provider_neutral_handoff_report(report_target, &context.messages));
         Ok(PreparedContext {
-            context: Context {
-                schema_version: pi_ai::CONTEXT_SCHEMA_VERSION,
-                system_prompt: (!context.system_prompt.is_empty())
-                    .then(|| context.system_prompt.clone()),
-                messages,
-                tools: tool_specs,
-            },
+            context,
             model_override: prepared.model_override,
             options_override: prepared.options_override,
+            report,
         })
     }
 
     fn bump_event_sequence(&mut self) {
         self.next_sequence = self.next_sequence.saturating_add(1);
     }
+}
+
+fn provider_neutral_handoff_report(
+    model: &pi_ai::ModelRef,
+    messages: &[pi_ai::Message],
+) -> pi_ai::HandoffReport {
+    let mut report = pi_ai::HandoffReport::unchanged(pi_ai::ModelFingerprint::new(
+        model.provider.clone(),
+        pi_ai::ApiId::new("provider-neutral"),
+        model.model.clone(),
+    ));
+    for message in messages {
+        if let pi_ai::Message::Assistant(assistant) = message {
+            report.source_models.insert(pi_ai::ModelFingerprint::new(
+                assistant.provider.clone(),
+                assistant.api.clone(),
+                assistant
+                    .response_model
+                    .clone()
+                    .unwrap_or_else(|| assistant.requested_model.clone()),
+            ));
+        }
+    }
+    report
 }
 
 impl Drop for crate::Agent {

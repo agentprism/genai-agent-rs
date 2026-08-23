@@ -1900,6 +1900,10 @@ fn plan_common(
 }
 ```
 
+> Correction: Pinned Pi bypasses context estimation and clamping when the catalog context window is nonpositive. For a positive window it clamps the caller's requested/default output only to the remaining context (with a minimum of one), not separately to the catalog maximum; an explicit request may therefore exceed `model.maxTokens` when context permits. Rust preserves those predicates (`packages/ai/src/api/simple-options.ts:11–18,34`).
+
+> Correction: Pinned Pi keeps model/request `samplingParams` separate from named simple fields, merges request keys over model keys, and applies that object after named OpenAI-family request fields. Thus model `samplingParams.temperature = 1` overrides named request `temperature = 0` unless request `samplingParams` supplies a later value. Rust preserves this ordered overlay (`packages/ai/src/api/simple-options.ts:21–34`; `packages/ai/src/api/openai-completions.ts:942–945`; `packages/ai/test/sampling-options.test.ts`).
+
 For Pi wire parity, the initial implementation should use Pi-equivalent token estimation rather than introducing a tokenizer-specific estimator that would change output caps.
 
 ## 3.5 Anthropic lowering
@@ -2151,6 +2155,8 @@ API/model without native xhigh:
 
 Pi often clamps `xhigh` or `max` to `high`; the Rust API should make strict-versus-clamp policy explicit. Pi-parity mode selects `Clamp`.
 
+> Correction: Pinned Pi's model-aware clamp searches supported levels at and above the requested position first, then searches lower levels, and falls back to `off` when no supported mapping exists; it does not always choose the highest supported lower level. Rust Pi-parity mode preserves that order and fallback, including clamping an unsupported `xhigh` hole to a supported `max` (`packages/ai/src/models.ts:902–931`; `packages/ai/test/max-thinking.test.ts`).
+
 ---
 
 # 4. Cross-provider handoff policy
@@ -2284,6 +2290,10 @@ pub enum HandoffChange {
 ## 4.3 Transformation order
 
 Order matters because tool-result ID rewriting depends on the assistant rewrite, and orphan detection must happen after failed messages have been removed.
+
+> Correction: Pinned Pi closes pending calls from a preceding successful assistant before it skips a later failed or aborted assistant. Rust therefore performs that boundary closure before failed-turn omission; it still never synthesizes results for calls contained in the omitted failed assistant itself (`packages/ai/src/api/transform-messages.ts:185–196`).
+
+> Correction: Pinned Pi's first pass applies the target tool-call ID normalizer only to cross-model assistants and adds an old-ID-to-new-ID entry only when the normalized ID differs. Failed and aborted assistants still participate when they are cross-model, while same-model and no-op occurrences leave an earlier pass-wide mapping unchanged. A matching tool result is rewritten even after an intervening user or assistant message. The second pass then omits a failed assistant without treating its calls as pending or synthesizing results for them. Rust preserves those conditions and the pass-wide mapping before failed-turn omission (`packages/ai/src/api/transform-messages.ts:76–156,185–196`).
 
 ### Phase 1: structural normalization
 

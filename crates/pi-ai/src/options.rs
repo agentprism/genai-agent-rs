@@ -2,7 +2,8 @@
 //! part 1 §3.4 as revised by part 2 §3.3–§3.7.
 
 use crate::{
-    ApiId, CommonModelDescriptor, Context, ExtensionMap, HeaderMapSpec, OrderedJsonObject,
+    ApiId, ApiModelConfig, CommonModelDescriptor, Context, ExtensionMap, HeaderMapSpec,
+    ModelDescriptor, OrderedJsonObject, TokenEstimator,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::value::RawValue;
@@ -55,7 +56,16 @@ impl ReasoningLevel {
             ReasoningFallback::Strict => {
                 Err(LoweringError::UnsupportedReasoningLevel { requested: self })
             }
-            ReasoningFallback::Clamp => Ok(Self::High),
+            ReasoningFallback::Clamp => match self {
+                // Pinned Pi searches upward from the requested position before
+                // searching downward, so an xhigh hole clamps to native max.
+                Self::Xhigh if native_max => Ok(Self::Max),
+                Self::Max if native_xhigh => Ok(Self::Xhigh),
+                Self::Xhigh | Self::Max => Ok(Self::High),
+                Self::Off | Self::Minimal | Self::Low | Self::Medium | Self::High => {
+                    unreachable!("ordinary reasoning levels are always supported")
+                }
+            },
         }
     }
 }
@@ -67,7 +77,7 @@ impl ReasoningLevel {
 pub enum ReasoningFallback {
     /// Reject an explicitly unsupported level.
     Strict,
-    /// Clamp to the highest supported lower level, matching Pi parity mode.
+    /// Search supported levels upward first and then downward, matching Pi.
     #[default]
     Clamp,
 }
@@ -101,15 +111,24 @@ impl ThinkingBudgets {
     /// Returns the configured or Pi-default budget for a reasoning level.
     /// Extended levels use the high token budget on budget-based APIs.
     pub fn budget_for(&self, level: ReasoningLevel) -> Option<u32> {
+        let defaults = Self::default();
         match level {
             ReasoningLevel::Off => None,
-            ReasoningLevel::Minimal => self.minimal,
-            ReasoningLevel::Low => self.low,
-            ReasoningLevel::Medium => self.medium,
-            ReasoningLevel::High | ReasoningLevel::Xhigh | ReasoningLevel::Max => self.high,
+            ReasoningLevel::Minimal => self.minimal.or(defaults.minimal),
+            ReasoningLevel::Low => self.low.or(defaults.low),
+            ReasoningLevel::Medium => self.medium.or(defaults.medium),
+            ReasoningLevel::High | ReasoningLevel::Xhigh | ReasoningLevel::Max => {
+                self.high.or(defaults.high)
+            }
         }
     }
 }
+
+/// Tokens reserved for provider context growth before output planning.
+pub const CONTEXT_SAFETY_TOKENS: u64 = 4_096;
+
+/// Tokens always retained for an answer when thinking shares its ceiling.
+pub const MIN_ANSWER_TOKENS: u32 = 1_024;
 
 /// Prompt-cache retention preference shared by simple calls.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -138,14 +157,133 @@ pub enum ToolChoice {
 /// Fully merged common sampling plan passed into API-family lowering.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SamplingPlan {
-    /// Requested temperature.
+    /// Named simple-request temperature, before the later sampling overlay.
     pub temperature: Option<f32>,
-    /// Requested nucleus-sampling probability.
+    /// Named simple-request nucleus probability, before the later overlay.
     pub top_p: Option<f32>,
-    /// Requested deterministic seed.
+    /// Named simple-request deterministic seed, before the later overlay.
     pub seed: Option<u64>,
-    /// Insertion-ordered additional API-family sampling parameters.
+    /// Insertion-ordered model/request `samplingParams` overlay. OpenAI-family
+    /// encoders apply this object after named fields, so keys here win.
     pub additional: OrderedJsonObject,
+}
+
+/// API-independent result of simple-generation planning
+/// (Architecture v2 part 2 §3.4).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CommonSimplePlan {
+    /// Context- and model-clamped maximum output tokens.
+    pub max_output_tokens: u32,
+    /// Model defaults overlaid by request sampling values.
+    pub sampling: SamplingPlan,
+    /// Prompt-cache retention selection.
+    pub cache_retention: CacheRetention,
+    /// Optional session-affinity value.
+    pub session_id: Option<String>,
+    /// Provider-neutral tool selection.
+    pub tool_choice: ToolChoice,
+    /// Requested reasoning level before API-family mapping.
+    pub reasoning: Option<ReasoningLevel>,
+}
+
+/// Plans the common portion of a simple request before API-family lowering.
+pub fn plan_common(
+    model: &ModelDescriptor,
+    context: &Context,
+    simple: &SimpleGenerationOptions,
+    estimator: &dyn TokenEstimator,
+) -> Result<CommonSimplePlan, LoweringError> {
+    let requested = simple
+        .max_output_tokens
+        .unwrap_or(model.common.limits.max_output_tokens);
+    let max_output_tokens = if model.common.limits.context_window == 0 {
+        requested.max(1)
+    } else {
+        let estimated = estimator.estimate(context)?;
+        let available = model
+            .common
+            .limits
+            .context_window
+            .saturating_sub(estimated)
+            .saturating_sub(CONTEXT_SAFETY_TOKENS);
+        requested.min(u32::try_from(available.max(1)).unwrap_or(u32::MAX))
+    };
+
+    Ok(CommonSimplePlan {
+        max_output_tokens,
+        sampling: merge_sampling(model_sampling_defaults(model), simple),
+        cache_retention: simple.cache_retention.unwrap_or_default(),
+        session_id: simple.session_id.clone(),
+        tool_choice: simple.tool_choice.unwrap_or_default(),
+        reasoning: simple.reasoning,
+    })
+}
+
+/// Pi's reasoning-budget expansion and answer-room reservation.
+pub fn plan_thinking_budget(
+    explicit_answer_cap: Option<u32>,
+    model_max_output_tokens: u32,
+    reasoning_level: ReasoningLevel,
+    budgets: &ThinkingBudgets,
+) -> Result<ThinkingBudgetPlan, LoweringError> {
+    let mut thinking_budget =
+        budgets
+            .budget_for(reasoning_level)
+            .ok_or_else(|| LoweringError::InvalidConfiguration {
+                message: "reasoning is disabled and has no thinking budget".to_owned(),
+            })?;
+    let max_output_tokens = explicit_answer_cap.map_or(model_max_output_tokens, |answer| {
+        answer
+            .saturating_add(thinking_budget)
+            .min(model_max_output_tokens)
+    });
+
+    thinking_budget = thinking_budget.min(max_output_tokens.saturating_sub(MIN_ANSWER_TOKENS));
+
+    Ok(ThinkingBudgetPlan {
+        max_output_tokens,
+        thinking_budget,
+    })
+}
+
+/// Output ceiling and nested thinking allocation from [`plan_thinking_budget`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ThinkingBudgetPlan {
+    /// Expanded response ceiling, never above the catalog model limit.
+    pub max_output_tokens: u32,
+    /// Thinking allocation after preserving answer room.
+    pub thinking_budget: u32,
+}
+
+fn model_sampling_defaults(model: &ModelDescriptor) -> &OrderedJsonObject {
+    match &model.api {
+        ApiModelConfig::OpenAiCompletions(config) => &config.sampling_defaults,
+        ApiModelConfig::OpenAiResponses(config) => &config.sampling_defaults,
+        ApiModelConfig::AnthropicMessages(_)
+        | ApiModelConfig::GoogleGenerativeAi(_)
+        | ApiModelConfig::GoogleVertex(_)
+        | ApiModelConfig::BedrockConverse(_)
+        | ApiModelConfig::MistralConversations(_)
+        | ApiModelConfig::Custom(_) => {
+            static EMPTY: std::sync::LazyLock<OrderedJsonObject> =
+                std::sync::LazyLock::new(OrderedJsonObject::new);
+            &EMPTY
+        }
+    }
+}
+
+fn merge_sampling(defaults: &OrderedJsonObject, simple: &SimpleGenerationOptions) -> SamplingPlan {
+    let mut additional = defaults.clone();
+    for (name, value) in &simple.sampling {
+        additional.insert(name.clone(), value.clone());
+    }
+
+    SamplingPlan {
+        temperature: simple.temperature,
+        top_p: simple.top_p,
+        seed: simple.seed,
+        additional,
+    }
 }
 
 /// One erased API-family options patch used by dynamic/FFI callers.
@@ -324,6 +462,10 @@ pub struct SimpleGenerationOptions {
     pub thinking_budgets: ThinkingBudgets,
     /// Optional deterministic seed.
     pub seed: Option<u64>,
+    /// Insertion-ordered request sampling parameters. These overlay catalog
+    /// sampling defaults and are applied after named request fields by API
+    /// families that support Pi's `samplingParams` contract.
+    pub sampling: OrderedJsonObject,
     /// Optional provider session-affinity identifier.
     pub session_id: Option<String>,
     /// Logical request headers, including explicit deletion markers.
@@ -351,6 +493,7 @@ impl fmt::Debug for SimpleGenerationOptions {
             .field("reasoning_fallback", &self.reasoning_fallback)
             .field("thinking_budgets", &self.thinking_budgets)
             .field("seed", &self.seed)
+            .field("sampling", &self.sampling)
             .field(
                 "session_id",
                 &self.session_id.as_ref().map(|_| "<redacted session id>"),

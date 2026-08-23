@@ -99,6 +99,7 @@ impl ContextPolicy for TransformingPolicy {
                 records: vec![user("transformed", "transformed")],
                 model_override: None,
                 options_override: None,
+                report: None,
             })
         })
     }
@@ -151,7 +152,8 @@ fn agent_transform_context_runs_before_projector() {
         }))
         .unwrap();
 
-    collect(agent.prompt_records([user("prompt", "original")], CancellationToken::new()));
+    let events =
+        collect(agent.prompt_records([user("prompt", "original")], CancellationToken::new()));
 
     assert_eq!(
         lock(&order).as_slice(),
@@ -168,6 +170,13 @@ fn agent_transform_context_runs_before_projector() {
             .collect::<Vec<_>>(),
         ["transformed"]
     );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ContextPrepared { target, report, .. }
+            if target == &ModelRef::new("scripted", "model-a")
+                && report.target
+                    == ModelFingerprint::new("scripted", "provider-neutral", "model-a")
+    )));
 }
 
 struct EnqueueOnceTurnPolicy {
@@ -1136,6 +1145,30 @@ impl ContextPolicy for OverrideContextPolicy {
                 records: state.records.to_vec(),
                 model_override: Some(ModelRef::new("override", "model-c")),
                 options_override: Some(options),
+                report: Some(HandoffReport::unchanged(ModelFingerprint::new(
+                    "override", "test-api", "model-c",
+                ))),
+            })
+        })
+    }
+}
+
+impl LocalContextPolicy for OverrideContextPolicy {
+    fn prepare_agent_records<'a>(
+        &'a self,
+        state: AgentStateView<'a>,
+        _cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'a, Result<PreparedAgentRecords, ContextError>> {
+        Box::pin(async move {
+            Ok(PreparedAgentRecords {
+                records: state.records.to_vec(),
+                model_override: Some(ModelRef::new("local-override", "model-d")),
+                options_override: None,
+                report: Some(HandoffReport::unchanged(ModelFingerprint::new(
+                    "local-override",
+                    "test-api",
+                    "model-d",
+                ))),
             })
         })
     }
@@ -1156,13 +1189,39 @@ fn agent_context_policy_can_override_model_and_options() {
         .set_context_policy(Arc::new(OverrideContextPolicy))
         .unwrap();
 
-    collect(agent.prompt_records([user("prompt", "start")], CancellationToken::new()));
+    let events = collect(agent.prompt_records([user("prompt", "start")], CancellationToken::new()));
 
     let requests = lock(&requests);
     assert_eq!(requests[0].model, ModelRef::new("override", "model-c"));
     assert_eq!(requests[0].options.max_output_tokens, Some(321));
     assert_eq!(requests[0].options.temperature, Some(0.25));
     assert_eq!(requests[0].options.reasoning, Some(ReasoningLevel::Xhigh));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ContextPrepared { target, report, .. }
+            if target == &ModelRef::new("override", "model-c")
+                && report.target == ModelFingerprint::new("override", "test-api", "model-c")
+    )));
+
+    let mut local_agent = LocalAgent::new(
+        Rc::new(ScriptedRuntime::new([text_response("local done")])),
+        state(),
+        LocalToolRegistry::new(),
+    )
+    .unwrap();
+    local_agent
+        .set_context_policy(Rc::new(OverrideContextPolicy))
+        .unwrap();
+    let local_events = collect_local(
+        local_agent.prompt_records([user("local-prompt", "start")], CancellationToken::new()),
+    );
+    assert!(local_events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ContextPrepared { target, report, .. }
+            if target == &ModelRef::new("local-override", "model-d")
+                && report.target
+                    == ModelFingerprint::new("local-override", "test-api", "model-d")
+    )));
 }
 
 #[test]

@@ -131,7 +131,30 @@ reason = "An explicitly injected runtime replaces mutable process-global request
 
 [[mapping]]
 source = "packages/ai/src/api/transform-messages.ts"
-rust = []
+rust = [
+  "handoff_aborted_assistant_omitted",
+  "handoff_adjacent_image_placeholders_collapsed",
+  "handoff_existing_tool_result_not_duplicated",
+  "handoff_failed_assistant_omitted",
+  "handoff_loss_report_contains_every_drop",
+  "handoff_matching_tool_result_id_rewritten",
+  "handoff_message_local_ids_may_repeat_across_assistants",
+  "handoff_missing_tool_result_synthesized",
+  "handoff_multiple_missing_results_preserve_source_order",
+  "handoff_nonvision_tool_image_replaced",
+  "handoff_nonvision_user_image_replaced",
+  "handoff_null_content_normalized",
+  "handoff_redacted_thinking_dropped_cross_model",
+  "handoff_redacted_thinking_retained_exact_model",
+  "handoff_signed_empty_thinking_retained_exact_model",
+  "handoff_strict_mode_rejects_lossy_projection",
+  "handoff_text_signature_dropped_cross_model",
+  "handoff_tool_id_collision_gets_stable_hash",
+  "handoff_tool_id_normalized",
+  "handoff_tool_signature_dropped_cross_model",
+  "handoff_visible_thinking_becomes_plain_text_in_pi_mode",
+  "handoff_visible_thinking_becomes_tagged_text_when_configured",
+]
 status = "deliberate-divergence"
 allowlist_row = "silent-lossy-context-transformations"
 replacement = "HandoffReport and optional strict rejection."
@@ -330,7 +353,27 @@ reason = "Separate Local and Send trait families plus the portable parent/child 
 
 [[mapping]]
 source = "packages/ai/src/api/simple-options.ts"
-rust = ["reasoning_xhigh_clamps_in_pi_mode", "thinking_budget_defaults_match_pi"]
+rust = [
+  "reasoning_explicit_unsupported_is_not_treated_as_missing",
+  "reasoning_xhigh_clamps_in_pi_mode",
+  "simple_api_patch_overrides_common_simple_field",
+  "simple_context_clamp_never_returns_zero",
+  "simple_context_reserves_4096_tokens",
+  "simple_max_output_respects_model_limit",
+  "simple_model_sampling_defaults_apply",
+  "simple_request_sampling_overrides_model_defaults",
+  "simple_typed_and_erased_patch_conflict",
+  "simple_unknown_api_patch_rejected",
+  "thinking_budget_defaults_match_pi",
+  "thinking_budget_expands_explicit_answer_cap",
+  "thinking_budget_reserves_1024_answer_tokens",
+  "thinking_budget_respects_model_max_output",
+]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/ai/src/utils/estimate.ts"
+rust = ["simple_context_reserves_4096_tokens"]
 status = "semantic-parity"
 
 [[mapping]]
@@ -345,7 +388,11 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#3.7"
-rust = ["reasoning_xhigh_rejects_in_strict_mode"]
+rust = [
+  "reasoning_explicit_unsupported_is_not_treated_as_missing",
+  "reasoning_xhigh_clamps_in_pi_mode",
+  "reasoning_xhigh_rejects_in_strict_mode",
+]
 status = "semantic-parity"
 
 [[mapping]]
@@ -553,9 +600,8 @@ milestone = "M6"
 
 [[mapping]]
 source = "packages/ai/test/context-estimate.test.ts"
-rust = []
-status = "planned"
-milestone = "M3.4"
+rust = ["simple_context_reserves_4096_tokens"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/context-overflow.test.ts"
@@ -739,9 +785,9 @@ milestone = "M6"
 
 [[mapping]]
 source = "packages/ai/test/max-thinking.test.ts"
-rust = []
+rust = ["reasoning_xhigh_clamps_in_pi_mode"]
 status = "planned"
-milestone = "M3.4"
+milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/mistral-http-transport.test.ts"
@@ -1036,9 +1082,12 @@ milestone = "M6"
 
 [[mapping]]
 source = "packages/ai/test/sampling-options.test.ts"
-rust = []
+rust = [
+  "simple_model_sampling_defaults_apply",
+  "simple_request_sampling_overrides_model_defaults",
+]
 status = "planned"
-milestone = "M3.4"
+milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/stream.test.ts"
@@ -1096,9 +1145,16 @@ milestone = "M6"
 
 [[mapping]]
 source = "packages/ai/test/transform-messages-copilot-openai-to-anthropic.test.ts"
-rust = []
-status = "planned"
-milestone = "M4"
+rust = [
+  "handoff_existing_tool_result_not_duplicated",
+  "handoff_matching_tool_result_id_rewritten",
+  "handoff_missing_tool_result_synthesized",
+  "handoff_multiple_missing_results_preserve_source_order",
+  "handoff_tool_id_normalized",
+  "handoff_tool_signature_dropped_cross_model",
+  "handoff_visible_thinking_becomes_plain_text_in_pi_mode",
+]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/unicode-surrogate.test.ts"

@@ -600,6 +600,29 @@ pub trait ErasedApiHandler: Send + Sync + 'static {
     ) -> AssistantStream;
 }
 
+fn validate_erased_api_patch(
+    request_api: &ApiId,
+    handler_api: &ApiId,
+    patch: Option<&ErasedApiOptionsPatch>,
+    model: &ModelRef,
+) -> Result<(), AiError> {
+    let Some(patch) = patch else {
+        return Ok(());
+    };
+    if patch.api == *request_api && patch.api == *handler_api {
+        return Ok(());
+    }
+
+    Err(AiError::new(
+        AiErrorKind::InvalidRequest,
+        format!(
+            "API options for {} cannot be applied to request API {} handled by {}",
+            patch.api, request_api, handler_api
+        ),
+    )
+    .with_model(model.clone()))
+}
+
 /// Provider/API dispatch unit. Concrete HTTP APIs can use [`HttpChatApi`]; SDK
 /// and non-HTTP APIs implement this trait directly.
 pub trait ChatApi: Send + Sync + 'static {
@@ -663,6 +686,12 @@ impl HttpChatApi {
             cancellation: &cancellation,
             api_key: request.api_key.as_ref(),
         };
+        validate_erased_api_patch(
+            &request.api,
+            self.handler.api_id(),
+            request.options.api_options.as_ref(),
+            &request.model.common.model_ref,
+        )?;
         let mut payload = self.handler.lower_and_encode(
             &request.model,
             &request.context,
@@ -941,6 +970,12 @@ impl LocalHttpChatApi {
             cancellation: &cancellation,
             api_key: request.api_key.as_ref(),
         };
+        validate_erased_api_patch(
+            &request.api,
+            self.handler.api_id(),
+            request.options.api_options.as_ref(),
+            &request.model.common.model_ref,
+        )?;
         let mut payload = self.handler.lower_and_encode(
             &request.model,
             &request.context,

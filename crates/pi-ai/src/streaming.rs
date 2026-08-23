@@ -586,6 +586,7 @@ enum BlockBuilder {
     Thinking {
         content_index: u32,
         text: String,
+        replay_item: Option<ReplayItemId>,
         finished: bool,
     },
     ToolCall {
@@ -599,7 +600,7 @@ enum BlockBuilder {
 }
 
 impl BlockBuilder {
-    fn new(content_index: u32, kind: ContentBlockKind) -> Self {
+    fn new(content_index: u32, kind: ContentBlockKind, replay_item: Option<ReplayItemId>) -> Self {
         match kind {
             ContentBlockKind::Text => Self::Text {
                 content_index,
@@ -609,6 +610,7 @@ impl BlockBuilder {
             ContentBlockKind::Thinking => Self::Thinking {
                 content_index,
                 text: String::new(),
+                replay_item,
                 finished: false,
             },
             ContentBlockKind::ToolCall => Self::ToolCall {
@@ -1097,8 +1099,36 @@ impl AssistantAssembler {
                 actual: content_index,
             });
         }
-        self.blocks
-            .insert(block_id, BlockBuilder::new(content_index, kind));
+        // OpenAI Responses replay items retain provider-global ordering with a
+        // ProviderOutputItem target. Its normalized event sequence brackets
+        // the corresponding canonical block start inside the replay item's
+        // lifetime (part 2 §1.6). Preserve that otherwise-unrepresentable
+        // association as the thinking block's persisted reverse link.
+        let replay_item = if kind == ContentBlockKind::Thinking {
+            self.replay
+                .values()
+                .rev()
+                .find(|candidate| {
+                    !candidate.finished
+                        && matches!(candidate.target, ReplayTarget::ProviderOutputItem { .. })
+                        && !self.blocks.values().any(|block| {
+                            matches!(
+                                block,
+                                BlockBuilder::Thinking {
+                                    replay_item: Some(existing),
+                                    ..
+                                } if existing == &candidate.id
+                            )
+                        })
+                })
+                .map(|candidate| candidate.id.clone())
+        } else {
+            None
+        };
+        self.blocks.insert(
+            block_id,
+            BlockBuilder::new(content_index, kind, replay_item),
+        );
         Ok(())
     }
 
@@ -1144,12 +1174,21 @@ impl AssistantAssembler {
                 id: block_id.clone(),
                 text: text.clone(),
             }),
-            BlockBuilder::Thinking { text, .. } => {
+            BlockBuilder::Thinking {
+                text,
+                replay_item: associated_replay_item,
+                ..
+            } => {
                 let replay_item = self
                     .replay
                     .values()
                     .filter(|item| item.target == ReplayTarget::ContentBlock(block_id.clone()))
-                    .min_by_key(|item| item.ordinal);
+                    .min_by_key(|item| item.ordinal)
+                    .or_else(|| {
+                        associated_replay_item
+                            .as_ref()
+                            .and_then(|item_id| self.replay.get(item_id))
+                    });
                 let redacted = replay_item.is_some_and(|item| {
                     matches!(
                         item.kind.as_str(),

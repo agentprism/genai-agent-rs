@@ -5,7 +5,7 @@ use crate::{
     AgentError, AgentRecord, AgentState, LocalToolRegistry, ToolOutput, ToolRegistry, TurnOutcome,
 };
 use pi_ai::{
-    AssistantMessage, CancellationToken, Context, LocalBoxFuture, Message, ModelRef,
+    AssistantMessage, CancellationToken, Context, HandoffReport, LocalBoxFuture, Message, ModelRef,
     ReasoningLevel, SendBoxFuture, SimpleGenerationOptions, ToolCall, ToolResultContent,
     ToolResultMessage, ToolSpec, Usage,
 };
@@ -63,6 +63,10 @@ pub struct PreparedAgentRecords {
     pub model_override: Option<ModelRef>,
     /// Optional complete common generation-option replacement.
     pub options_override: Option<SimpleGenerationOptions>,
+    /// Target-aware handoff report produced by a context policy that performs
+    /// canonical projection itself. It is propagated to [`PreparedContext`]
+    /// after message projection and surfaced by the run loop.
+    pub report: Option<HandoffReport>,
 }
 
 /// Complete provider-neutral request context prepared for one model turn.
@@ -74,6 +78,10 @@ pub struct PreparedContext {
     pub model_override: Option<ModelRef>,
     /// Optional common generation-option replacement.
     pub options_override: Option<SimpleGenerationOptions>,
+    /// Handoff report surfaced for this prepared request. A target-aware policy
+    /// supplies the resolved API fingerprint; the built-in projection supplies
+    /// an unchanged report with the explicit `provider-neutral` API identity.
+    pub report: HandoffReport,
 }
 
 /// Failure while preparing the provider-visible context.
@@ -142,6 +150,7 @@ impl ContextPolicy for DefaultContextPolicy {
                 records: state.records.to_vec(),
                 model_override: None,
                 options_override: None,
+                report: None,
             })
         })
     }
@@ -161,6 +170,7 @@ impl LocalContextPolicy for DefaultContextPolicy {
                 records: state.records.to_vec(),
                 model_override: None,
                 options_override: None,
+                report: None,
             })
         })
     }

@@ -21,6 +21,7 @@ httpdate = "1.0.3"
 indexmap = { version = "2.11.4", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = { version = "1.0.145", features = ["arbitrary_precision", "preserve_order", "raw_value"] }
+ryu-js = { version = "1.0.3", features = ["small"] }
 sha2 = "0.10.9"
 url = { version = "2.5.7", features = ["serde"] }
 
