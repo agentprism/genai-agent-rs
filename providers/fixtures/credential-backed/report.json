@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "piCommit": "c49906ec77788625aacbdc53ebca6fbe65bd20f5",
+  "captureMode": "credential-backed-local-proxy",
+  "results": [
+    {
+      "family": "openai-completions",
+      "case": "text-only",
+      "status": "captured"
+    },
+    {
+      "family": "openai-completions",
+      "case": "signed-thinking-replay",
+      "status": "captured"
+    },
+    {
+      "family": "openai-completions",
+      "case": "one-tool-call",
+      "status": "captured"
+    },
+    {
+      "family": "openai-completions",
+      "case": "tool-results",
+      "status": "captured"
+    },
+    {
+      "family": "anthropic-messages",
+      "case": "text-only",
+      "status": "captured"
+    },
+    {
+      "family": "anthropic-messages",
+      "case": "signed-thinking-replay",
+      "status": "captured"
+    },
+    {
+      "family": "anthropic-messages",
+      "case": "one-tool-call",
+      "status": "captured"
+    },
+    {
+      "family": "anthropic-messages",
+      "case": "tool-results",
+      "status": "captured"
+    }
+  ]
+}

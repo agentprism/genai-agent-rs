@@ -1,0 +1,1 @@
+{"model":"fixture-openai-model","messages":[{"role":"developer","content":"Fixture system instruction."},{"role":"user","content":"Return a concise fixture response."}],"stream":true,"stream_options":{"include_usage":true},"reasoning_effort":"none"}

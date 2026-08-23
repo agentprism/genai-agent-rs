@@ -1,0 +1,104 @@
+{
+  "schemaVersion": 1,
+  "family": "anthropic-messages",
+  "case": "one-tool-call",
+  "description": "One streamed function/tool call followed by its result on turn two.",
+  "piCommit": "c49906ec77788625aacbdc53ebca6fbe65bd20f5",
+  "model": {
+    "id": "anthropic/claude-haiku-4.5",
+    "name": "Credential-backed OpenRouter Anthropic fixture model",
+    "api": "anthropic-messages",
+    "provider": "openrouter",
+    "baseUrl": "http://127.0.0.1:<injected-port>",
+    "reasoning": true,
+    "input": [
+      "text",
+      "image"
+    ],
+    "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0
+    },
+    "contextWindow": 128000,
+    "maxTokens": 4096,
+    "thinkingLevelMap": {
+      "off": "off",
+      "minimal": "minimal",
+      "low": "low",
+      "medium": "medium",
+      "high": "high",
+      "xhigh": "xhigh",
+      "max": "max"
+    },
+    "compat": {
+      "supportsLongCacheRetention": false,
+      "supportsCacheControlOnTools": false,
+      "supportsTemperature": true,
+      "supportsStrictTools": false,
+      "supportsEagerToolInputStreaming": false,
+      "supportsToolReferences": false
+    }
+  },
+  "context": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "Read Cargo.toml.",
+        "timestamp": 1700000000000
+      }
+    ],
+    "tools": [
+      {
+        "name": "read_file",
+        "description": "Read one UTF-8 file.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Workspace-relative path."
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      }
+    ]
+  },
+  "options": {
+    "toolChoice": {
+      "type": "tool",
+      "name": "read_file"
+    },
+    "headers": {
+      "authorization": "[REDACTED]"
+    },
+    "maxRetries": 0,
+    "timeoutMs": 60000
+  },
+  "entrypoint": "stream",
+  "turnTwoAppend": [
+    {
+      "role": "toolResult",
+      "toolCallId": "toolu_bdrk_013ZCwTPAqFJe8oa4pkpqF3z",
+      "toolName": "read_file",
+      "content": [
+        {
+          "type": "text",
+          "text": "fixture file contents"
+        }
+      ],
+      "isError": false,
+      "timestamp": 1700000000000
+    }
+  ],
+  "deterministicInjections": {
+    "timestamp": 1700000000000,
+    "sessionId": "session-m4-00000000"
+  },
+  "providerGeneratedValuesCapturedVerbatim": true
+}

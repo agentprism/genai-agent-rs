@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "family": "anthropic-messages",
+  "case": "text-only",
+  "description": "One user text message and a text response.",
+  "piCommit": "c49906ec77788625aacbdc53ebca6fbe65bd20f5",
+  "model": {
+    "id": "anthropic/claude-haiku-4.5",
+    "name": "Credential-backed OpenRouter Anthropic fixture model",
+    "api": "anthropic-messages",
+    "provider": "openrouter",
+    "baseUrl": "http://127.0.0.1:<injected-port>",
+    "reasoning": true,
+    "input": [
+      "text",
+      "image"
+    ],
+    "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0
+    },
+    "contextWindow": 128000,
+    "maxTokens": 4096,
+    "thinkingLevelMap": {
+      "off": "off",
+      "minimal": "minimal",
+      "low": "low",
+      "medium": "medium",
+      "high": "high",
+      "xhigh": "xhigh",
+      "max": "max"
+    },
+    "compat": {
+      "supportsLongCacheRetention": false,
+      "supportsCacheControlOnTools": false,
+      "supportsTemperature": true,
+      "supportsStrictTools": false,
+      "supportsEagerToolInputStreaming": false,
+      "supportsToolReferences": false
+    }
+  },
+  "context": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "Return a concise fixture response.",
+        "timestamp": 1700000000000
+      }
+    ]
+  },
+  "options": {
+    "headers": {
+      "authorization": "[REDACTED]"
+    },
+    "maxRetries": 0,
+    "timeoutMs": 60000
+  },
+  "entrypoint": "stream",
+  "turnTwoAppend": [
+    {
+      "role": "user",
+      "content": "Deterministic turn-two follow-up.",
+      "timestamp": 1700000000000
+    }
+  ],
+  "deterministicInjections": {
+    "timestamp": 1700000000000,
+    "sessionId": "session-m4-00000000"
+  },
+  "providerGeneratedValuesCapturedVerbatim": true
+}

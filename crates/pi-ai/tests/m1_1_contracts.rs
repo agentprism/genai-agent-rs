@@ -766,7 +766,9 @@ fn model_descriptor_and_typed_compat_fields_round_trip() {
                 xhigh: None,
                 max: None,
             },
-            sampling_defaults: [("seed".into(), Value::from(7))].into_iter().collect(),
+            sampling_defaults: [(String::from("seed"), OrderedJsonValue::from(7))]
+                .into_iter()
+                .collect(),
         }),
         extensions: ExtensionMap::new(),
     };

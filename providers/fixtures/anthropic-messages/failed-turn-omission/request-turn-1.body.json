@@ -1,0 +1,1 @@
+{"model":"fixture-anthropic-model","messages":[{"role":"user","content":"First attempt."},{"role":"user","content":[{"type":"text","text":"Retry cleanly.","cache_control":{"type":"ephemeral"}}]}],"max_tokens":8192,"stream":true}

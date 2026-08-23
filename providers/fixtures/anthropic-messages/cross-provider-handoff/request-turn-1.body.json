@@ -1,0 +1,1 @@
+{"model":"fixture-anthropic-model","messages":[{"role":"user","content":"Think about the fixture."},{"role":"assistant","content":[{"type":"text","text":"Foreign visible reasoning."},{"type":"text","text":"Foreign answer."}]},{"role":"user","content":[{"type":"text","text":"Continue on the target model.","cache_control":{"type":"ephemeral"}}]}],"max_tokens":8192,"stream":true}

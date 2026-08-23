@@ -530,11 +530,20 @@ fn simple_model_sampling_defaults_apply() {
     assert_eq!(plan.sampling.seed, None);
     assert_eq!(
         plan.sampling.additional.get("temperature"),
-        Some(&json!(0.25))
+        Some(&OrderedJsonValue::from(json!(0.25)))
     );
-    assert_eq!(plan.sampling.additional.get("top_p"), Some(&json!(0.8)));
-    assert_eq!(plan.sampling.additional.get("seed"), Some(&json!(7)));
-    assert_eq!(plan.sampling.additional.get("top_k"), Some(&json!(40)));
+    assert_eq!(
+        plan.sampling.additional.get("top_p"),
+        Some(&OrderedJsonValue::from(json!(0.8)))
+    );
+    assert_eq!(
+        plan.sampling.additional.get("seed"),
+        Some(&OrderedJsonValue::from(json!(7)))
+    );
+    assert_eq!(
+        plan.sampling.additional.get("top_k"),
+        Some(&OrderedJsonValue::from(json!(40)))
+    );
 }
 
 #[test]
@@ -572,11 +581,20 @@ fn simple_request_sampling_overrides_model_defaults() {
     assert_eq!(plan.sampling.seed, Some(99));
     assert_eq!(
         plan.sampling.additional.get("temperature"),
-        Some(&json!(0.75))
+        Some(&OrderedJsonValue::from(json!(0.75)))
     );
-    assert_eq!(plan.sampling.additional.get("top_p"), Some(&json!(0.6)));
-    assert_eq!(plan.sampling.additional.get("top_k"), Some(&json!(20)));
-    assert_eq!(plan.sampling.additional.get("min_p"), Some(&json!(0.05)));
+    assert_eq!(
+        plan.sampling.additional.get("top_p"),
+        Some(&OrderedJsonValue::from(json!(0.6)))
+    );
+    assert_eq!(
+        plan.sampling.additional.get("top_k"),
+        Some(&OrderedJsonValue::from(json!(20)))
+    );
+    assert_eq!(
+        plan.sampling.additional.get("min_p"),
+        Some(&OrderedJsonValue::from(json!(0.05)))
+    );
 }
 
 struct PatchApi;

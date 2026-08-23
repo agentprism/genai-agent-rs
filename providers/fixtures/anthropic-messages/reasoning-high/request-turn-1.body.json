@@ -1,0 +1,1 @@
+{"model":"fixture-anthropic-model","messages":[{"role":"user","content":[{"type":"text","text":"Return a concise fixture response.","cache_control":{"type":"ephemeral"}}]}],"max_tokens":4096,"stream":true,"thinking":{"type":"adaptive","display":"summarized"},"output_config":{"effort":"high"}}

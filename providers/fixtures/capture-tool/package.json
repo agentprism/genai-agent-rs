@@ -1,0 +1,14 @@
+{
+  "name": "pi-m4-fixture-capture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "capture": "bun run capture.ts",
+    "capture:credential": "PI_FIXTURE_CAPTURE_MODE=credential-backed bun run capture.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "0.91.1",
+    "openai": "6.40.0",
+    "partial-json": "0.1.7"
+  }
+}

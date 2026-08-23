@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "captureMode": "credential-backed-local-proxy",
+  "credentialsUsed": true,
+  "credentialSource": "OPENROUTER_API_KEY (Anthropic Messages compatibility endpoint)",
+  "secretsRedacted": true,
+  "requestTurnOneSha256": "e149c66f2766af7fba2a05e099424db4f2707991c49353de933b15c40ac618d2",
+  "responseTurnOneSha256": "c597f70777fe82d600a80c6e4148bc5209fa26f64525d9e88d923bad95b79ad4",
+  "requestTurnTwoSha256": "3ed351aaf3b3a9e912d08057f6444b69262c09c025f626afb809774a8f5a0dc0"
+}

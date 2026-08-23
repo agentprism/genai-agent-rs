@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "method": "POST",
+  "path": "/v1/v1/messages",
+  "headers": {
+    "accept": "application/json",
+    "anthropic-beta": "interleaved-thinking-2025-05-14",
+    "anthropic-dangerous-direct-browser-access": "true",
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+    "x-api-key": "[REDACTED]"
+  },
+  "omittedRuntimeHeaders": [
+    "accept-encoding",
+    "connection",
+    "content-length",
+    "host",
+    "user-agent",
+    "x-stainless-arch",
+    "x-stainless-lang",
+    "x-stainless-os",
+    "x-stainless-package-version",
+    "x-stainless-retry-count",
+    "x-stainless-runtime",
+    "x-stainless-runtime-version",
+    "x-stainless-timeout"
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "method": "POST",
+  "path": "/v1/chat/completions",
+  "headers": {
+    "accept": "application/json",
+    "authorization": "[REDACTED]",
+    "content-type": "application/json"
+  },
+  "omittedRuntimeHeaders": [
+    "accept-encoding",
+    "connection",
+    "content-length",
+    "host",
+    "user-agent",
+    "x-stainless-arch",
+    "x-stainless-lang",
+    "x-stainless-os",
+    "x-stainless-package-version",
+    "x-stainless-retry-count",
+    "x-stainless-runtime",
+    "x-stainless-runtime-version",
+    "x-stainless-timeout"
+  ]
+}

@@ -1,16 +1,12 @@
 //! Typed model descriptors from Architecture v2 part 2 §5.1–§5.2.
 
-use crate::{ApiId, ExtensionId, ModelId, ModelPricing, ModelRef, ProviderId};
+use crate::{ApiId, ExtensionId, ModelId, ModelPricing, ModelRef, OrderedJsonObject, ProviderId};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use serde_json::{Number, Value, value::RawValue};
+use serde_json::{Number, value::RawValue};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use url::Url;
-
-/// An insertion-ordered JSON object used for model sampling defaults
-/// (Architecture v2 part 2 §5.1).
-pub type OrderedJsonObject = IndexMap<String, Value>;
 
 /// Insertion-ordered chat-template values used by OpenAI-compatible model
 /// compatibility data (Architecture v2 part 2 §5.1; pinned Pi `types.ts`).
