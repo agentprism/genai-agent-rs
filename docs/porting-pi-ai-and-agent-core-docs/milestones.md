@@ -598,3 +598,68 @@ M4 added ten corrections, all to Architecture v2 Part 2:
   published negative OpenRouter rates survive and calculate exactly.
 - M4.3 corrected §5.2: usage retains Anthropic's one-hour cache-write subset and
   prices only that subset at twice the input rate.
+
+## 2026-08-23 — M5: persistent credentials and FFI
+
+M5 established durable file-backed credential leases with serialized OAuth
+refresh and a versioned persisted credential format, then added the `pi-ffi`
+binding facade with opaque handles, versioned lossless event envelopes,
+cancellation, an explicit authentication-session state machine, a C ABI, and a
+generated Swift binding target.
+
+### Approved packages
+
+- M5.1 — file-backed credential leases, OAuth refresh locking, and the persisted
+  credential format — `dec709e51a72cc360dc4dfa6522666cd7edf6ade`
+- M5.2 — `pi-ffi` opaque handles, versioned event envelopes, cancellation, auth
+  session state machine, C ABI, and generated Swift bindings —
+  `3d393c249a210e17cd06ed2a84b6a63ac04bc777`
+
+### Architecture v2 Part 2 §10 conformance now passing
+
+M5 adds no previously absent exact §10 conformance name, so the cumulative exact
+§10 total remains 261. The M5 packages directly re-exercise nine exact §10 names
+against the new persistent store and FFI boundaries.
+
+§10.7 authentication conformance (5 re-exercised):
+
+```text
+auth_oauth_refresh_is_serialized
+auth_failed_oauth_refresh_never_falls_back_to_env
+auth_login_persists_under_modify
+auth_callback_and_manual_first_valid_wins
+auth_late_losing_response_is_superseded
+```
+
+§10.9 lifecycle conformance (3 re-exercised):
+
+```text
+agent_prompt_text_event_sequence
+agent_run_finished_is_final_event
+agent_handle_event_sinks_are_barriers
+```
+
+§10.9 failure and cancellation conformance (1 re-exercised):
+
+```text
+agent_cancelled_assistant_is_committed
+```
+
+M5 also adds boundary-specific coverage for persisted provider extras, persisted
+schema rejection, the Local credential-store adapter, lossless C event envelopes,
+device-code and shared callback/manual auth sessions, exact FFI challenge schema,
+and invalid C-ABI argument handling.
+
+### Parity manifest coverage
+
+- Pinned upstream test files mapped: 159/159 — 21 `semantic-parity`, 0
+  `deliberate-divergence`, and 138 `planned`.
+- Status-bearing mappings: 208 total — 60 `semantic-parity`, 10
+  `deliberate-divergence`, and 138 `planned`.
+- Future named conformance tests: 14 `planned_test` entries, each assigned to a
+  milestone.
+
+### Architecture correction notes
+
+None. M5.1 and M5.2 added no `> Correction:` notes to either architecture
+document.
