@@ -1,0 +1,1 @@
+{"contents":[{"parts":[{"text":"Describe this fixture image."},{"inlineData":{"data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=","mimeType":"image/png"}}],"role":"user"},{"parts":[{"text":"fixture response turn 1"}],"role":"model"},{"parts":[{"text":"Deterministic turn-two follow-up."}],"role":"user"}],"generationConfig":{}}

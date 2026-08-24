@@ -34,7 +34,9 @@ type Family =
 	| "openai-completions"
 	| "anthropic-messages"
 	| "openai-responses"
-	| "openai-codex-responses";
+	| "openai-codex-responses"
+	| "google-generative-ai"
+	| "google-vertex";
 type ResponseKind = "text" | "tool" | "multiple-tools" | "signed-reasoning" | "redacted-reasoning";
 type CaptureMode = "hermetic" | "credential-backed";
 
@@ -85,7 +87,11 @@ interface CredentialCaptureResult {
 }
 
 function isOpenAiFamily(family: Family): boolean {
-	return family !== "anthropic-messages";
+	return family === "openai-completions" || family === "openai-responses" || family === "openai-codex-responses";
+}
+
+function isGoogleFamily(family: Family): boolean {
+	return family === "google-generative-ai" || family === "google-vertex";
 }
 
 function isResponsesFamily(family: Family): boolean {
@@ -339,6 +345,8 @@ function commonCases(api: Family, provider: string, model: string): FixtureCase[
 			context: { messages: [user("Read Cargo.toml.")], tools: [strictTool] },
 			modelPatch: isOpenAiFamily(api)
 				? { compat: { supportsStrictMode: true } }
+				: isGoogleFamily(api)
+					? {}
 				: { compat: { supportsStrictTools: true } },
 		},
 		{
@@ -369,7 +377,9 @@ function commonCases(api: Family, provider: string, model: string): FixtureCase[
 				? { compat: { requiresAssistantAfterToolResult: true, requiresToolResultName: true } }
 				: api === "anthropic-messages"
 					? { compat: { allowEmptySignature: true, supportsEagerToolInputStreaming: false } }
-					: { compat: { supportsStrictMode: false } },
+					: isGoogleFamily(api)
+						? {}
+						: { compat: { supportsStrictMode: false } },
 		},
 		{
 			name: "cross-provider-handoff",
@@ -414,15 +424,32 @@ function modelFor(family: Family, baseUrl: string, patch: Record<string, unknown
 	const openAi = isOpenAiFamily(family);
 	const responses = isResponsesFamily(family);
 	const codex = family === "openai-codex-responses";
+	const google = isGoogleFamily(family);
 	const base: Record<string, unknown> = {
 		id: codex
 			? "fixture-codex-model"
+			: google
+				? "gemini-3-fixture"
 			: openAi
 				? "fixture-openai-model"
 				: "fixture-anthropic-model",
-		name: codex ? "Fixture Codex Model" : openAi ? "Fixture OpenAI Model" : "Fixture Anthropic Model",
+		name: codex
+			? "Fixture Codex Model"
+			: google
+				? "Fixture Google Model"
+				: openAi
+					? "Fixture OpenAI Model"
+					: "Fixture Anthropic Model",
 		api: family,
-		provider: codex ? "openai-codex" : openAi ? "fixture-openai" : "fixture-anthropic",
+		provider: codex
+			? "openai-codex"
+			: family === "google-generative-ai"
+				? "fixture-google"
+				: family === "google-vertex"
+					? "fixture-google-vertex"
+					: openAi
+						? "fixture-openai"
+						: "fixture-anthropic",
 		baseUrl,
 		reasoning: true,
 		input: ["text", "image"],
@@ -435,8 +462,8 @@ function modelFor(family: Family, baseUrl: string, patch: Record<string, unknown
 			low: "low",
 			medium: "medium",
 			high: "high",
-			xhigh: "xhigh",
-			max: "max",
+			xhigh: google ? "high" : "xhigh",
+			max: google ? "high" : "max",
 		},
 		compat: responses
 			? {
@@ -457,7 +484,9 @@ function modelFor(family: Family, baseUrl: string, patch: Record<string, unknown
 					supportsStrictMode: true,
 					supportsLongCacheRetention: true,
 				}
-			: {
+				: google
+					? undefined
+					: {
 					supportsLongCacheRetention: true,
 					supportsCacheControlOnTools: true,
 					supportsTemperature: true,
@@ -931,9 +960,48 @@ function responsesFrames(
 	return events.map((value) => `data: ${JSON.stringify(value)}\n\n`).join("");
 }
 
+function googleFrames(kind: ResponseKind, model: string, turn: number): string {
+	const signature = "AAAAAAAAAAAAAAAAAAAAAA==";
+	const parts: Record<string, unknown>[] = [];
+	if (kind === "text") {
+		parts.push({ text: `fixture response turn ${turn}` });
+	} else {
+		if (kind === "signed-reasoning") {
+			parts.push({ thought: true, text: "Inspect the requested fixture." });
+		}
+		if (kind === "redacted-reasoning") {
+			parts.push({ thought: true, text: "", thoughtSignature: signature });
+		}
+		const paths = kind === "multiple-tools" ? ["Cargo.toml", "README.md"] : ["Cargo.toml"];
+		for (const [offset, path] of paths.entries()) {
+			parts.push({
+				functionCall: {
+					id: offset === 0 ? TOOL_CALL_1 : TOOL_CALL_2,
+					name: "read_file",
+					args: { path },
+				},
+				...(kind === "signed-reasoning" && offset === 0 ? { thoughtSignature: signature } : {}),
+			});
+		}
+	}
+	const response = {
+		responseId: `google-fixture-${turn}`,
+		candidates: [{ content: { role: "model", parts }, finishReason: "STOP" }],
+		usageMetadata: {
+			promptTokenCount: 12,
+			candidatesTokenCount: 5,
+			thoughtsTokenCount: kind.includes("reasoning") ? 3 : 0,
+			totalTokenCount: 20,
+			cachedContentTokenCount: 0,
+		},
+	};
+	return `data: ${JSON.stringify(response)}\n\n`;
+}
+
 function responseFrames(family: Family, kind: ResponseKind, model: string, turn: number): string {
 	if (family === "openai-completions") return openAiFrames(kind, model, turn);
 	if (family === "anthropic-messages") return anthropicFrames(kind, model, turn);
+	if (isGoogleFamily(family)) return googleFrames(kind, model, turn);
 	return responsesFrames(family, kind, model, turn);
 }
 
@@ -1145,6 +1213,8 @@ function assertRetainedTurnTwoLowering(
 
 	const maxTokenField = family === "anthropic-messages"
 		? "max_tokens"
+		: isGoogleFamily(family)
+			? "generationConfig"
 		: family === "openai-responses"
 			? "max_output_tokens"
 			: Object.hasOwn(turnOne, "max_tokens")
@@ -1152,6 +1222,23 @@ function assertRetainedTurnTwoLowering(
 				: family === "openai-completions"
 					? "max_completion_tokens"
 					: undefined;
+	if (isGoogleFamily(family)) {
+		const one = turnOne.generationConfig as Record<string, unknown> | undefined;
+		const two = turnTwo.generationConfig as Record<string, unknown> | undefined;
+		if (fixture.name === "max-output-clamp") {
+			const requested = fixture.options?.maxTokens;
+			if (
+				typeof requested !== "number" ||
+				typeof one?.maxOutputTokens !== "number" ||
+				typeof two?.maxOutputTokens !== "number" ||
+				one.maxOutputTokens >= requested ||
+				two.maxOutputTokens >= requested
+			) {
+				throw new Error(`${family}/${fixture.name} bypassed streamSimple max-output clamping on turn two`);
+			}
+		}
+		return;
+	}
 	if (maxTokenField === undefined) {
 		for (const field of ["temperature", "service_tier", "reasoning", "text"]) {
 			if (Object.hasOwn(turnOne, field)) assertSameJsonField(family, fixture, turnOne, turnTwo, field);
@@ -1261,7 +1348,11 @@ async function captureCase(
 	const server = startCaptureServer(state);
 	try {
 		const localBasePath = credentialTarget?.upstream.localBasePath ??
-			(family === "openai-codex-responses" ? "" : "/v1");
+			(family === "openai-codex-responses"
+				? ""
+				: family === "google-generative-ai"
+					? "/v1beta"
+					: "/v1");
 		const baseUrl = `http://127.0.0.1:${server.port}${localBasePath}`;
 		const model = modelFor(
 			family,
@@ -1440,6 +1531,12 @@ async function main(): Promise<void> {
 	const openAiCodexResponsesModule = await import(
 		`${pathToFileURL(join(workRoot, "src", "api", "openai-codex-responses.ts")).href}?pin=${PINNED_COMMIT}`
 	);
+	const googleGenerativeAiModule = await import(
+		`${pathToFileURL(join(workRoot, "src", "api", "google-generative-ai.ts")).href}?pin=${PINNED_COMMIT}`
+	);
+	const googleVertexModule = await import(
+		`${pathToFileURL(join(workRoot, "src", "api", "google-vertex.ts")).href}?pin=${PINNED_COMMIT}`
+	);
 	const families: Array<{
 		family: Family;
 		provider: string;
@@ -1469,6 +1566,18 @@ async function main(): Promise<void> {
 			provider: "openai-codex",
 			model: "fixture-codex-model",
 			module: openAiCodexResponsesModule,
+		},
+		{
+			family: "google-generative-ai",
+			provider: "fixture-google",
+			model: "gemini-3-fixture",
+			module: googleGenerativeAiModule,
+		},
+		{
+			family: "google-vertex",
+			provider: "fixture-google-vertex",
+			model: "gemini-3-fixture",
+			module: googleVertexModule,
 		},
 	];
 

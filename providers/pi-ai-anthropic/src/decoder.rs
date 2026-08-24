@@ -561,6 +561,7 @@ impl DecodeState {
                 .get("cache_creation")
                 .and_then(Value::as_object)
                 .and_then(|creation| optional_usage_u64(creation, "ephemeral_1h_input_tokens")),
+            total_tokens: None,
             source: UsageSource::ProviderReported,
         };
         self.emit(AssistantEvent::UsageUpdated {

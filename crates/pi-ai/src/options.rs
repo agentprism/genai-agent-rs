@@ -584,7 +584,12 @@ pub struct SimpleGenerationOptions {
     /// Strict-versus-clamp behavior for unsupported reasoning levels.
     pub reasoning_fallback: ReasoningFallback,
     /// Optional per-level token-budget overrides.
-    pub thinking_budgets: ThinkingBudgets,
+    ///
+    /// The outer option is semantically significant: Google applies its own
+    /// model-specific budget table when this object is omitted, but honors a
+    /// caller-supplied object even when every value equals Pi's shared
+    /// defaults.
+    pub thinking_budgets: Option<ThinkingBudgets>,
     /// Optional deterministic seed.
     pub seed: Option<u64>,
     /// Insertion-ordered request sampling parameters. These overlay catalog

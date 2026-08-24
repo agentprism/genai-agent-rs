@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "method": "POST",
+  "path": "/v1/publishers/google/models/gemini-3-fixture:streamGenerateContent",
+  "headers": {
+    "accept": "*/*",
+    "content-type": "application/json",
+    "x-fixture-model": "model-value",
+    "x-fixture-request": "request-value"
+  },
+  "omittedRuntimeHeaders": [
+    "accept-encoding",
+    "connection",
+    "content-length",
+    "host",
+    "user-agent",
+    "x-goog-api-client",
+    "x-goog-api-key"
+  ]
+}

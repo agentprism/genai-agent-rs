@@ -14,6 +14,11 @@ rust = ["agent_cancelled_assistant_is_committed", "agent_handle_event_sinks_are_
 status = "semantic-parity"
 
 [[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part1-proposal.md#3.9-usage-and-cost"
+rust = ["agent_run_usage_aggregates_mixed_authoritative_totals_in_both_orders", "google_zero_total_tokens_fall_back_to_components_for_context_planning_pi_exact"]
+status = "semantic-parity"
+
+[[mapping]]
 source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#6.5-ffi-auth-session"
 rust = ["auth_callback_and_manual_first_valid_wins", "auth_late_losing_response_is_superseded", "ffi_auth_open_url_challenge_exact_schema_and_capability", "ffi_auth_session_completes_scripted_device_code_flow", "ffi_auth_session_next_invalid_arguments_return_invalid_argument"]
 status = "semantic-parity"
@@ -61,6 +66,16 @@ status = "semantic-parity"
 [[mapping]]
 source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#10.8-openai-codex-responses"
 rust = ["codex_cached_continuation_ignores_terminal_only_output_send_and_local", "codex_cached_continuation_is_connection_scoped_after_eviction_send_and_local", "codex_local_transport_auto_fallback_emits_diagnostic_and_sticks_to_sse", "codex_local_transport_cached_websocket_uses_canonical_tool_call_continuation", "codex_responses_base_url_resolution_matches_pi", "codex_transport_cached_websocket_reconstructs_turn_two_delta", "codex_transport_cached_websocket_uses_canonical_tool_call_continuation", "codex_transport_connection_limit_retries_once_then_falls_back", "codex_transport_explicit_websocket_is_selectable", "codex_transport_idle_fallback_is_limited_to_pre_stream", "codex_transport_one_shot_websocket_gets_request_identity_headers", "codex_transport_retries_missing_continuation_after_rate_limits_send_and_local", "codex_transport_retries_missing_continuation_before_stream_start", "fixture_corpus_openai_codex_responses_cases_are_complete_and_canonical", "openai_codex_explicit_access_token_auth_send_and_local", "openai_codex_retry_classification_pi_exact_local", "openai_codex_retry_classification_pi_exact_send", "openai_codex_sse_transport_reasserts_protocol_headers", "openai_codex_terminal_429_body_prevents_transport_retry", "responses_codex_created_end_turn_is_ignored_without_terminal_end_turn_pi_exact", "responses_codex_end_turn_metadata_survives_round_trip", "responses_codex_error_mapping_matches_pi", "responses_codex_full_reasoning_uses_model_map_pi_exact", "responses_codex_service_tier_cost_pi_exact", "responses_codex_session_affinity_headers_match_pi", "responses_codex_session_affinity_reasserted_send_and_local", "responses_fallback_diagnostic_survives_round_trip", "responses_reasoning_level_map_applies_once_pi_exact", "stream_cancellation_is_terminal_message", "stream_failure_is_terminal_message", "stream_missing_provider_terminal_fails", "wire_openai_codex_responses_pi_exact"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#10.8-google-generative-ai"
+rust = ["google_empty_signed_part_turn_two_pi_exact", "google_provider_total_tokens_drive_turn_two_context_planning_pi_exact", "google_qualified_gemini3_disabled_thinking_pi_exact_send_and_local", "google_tool_thought_signature_turn_two_pi_exact", "google_zero_total_tokens_fall_back_to_components_for_context_planning_pi_exact", "wire_google_generative_ai_pi_exact"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#10.8-google-vertex"
+rust = ["google_zero_total_tokens_fall_back_to_components_for_context_planning_pi_exact", "wire_google_vertex_pi_exact"]
 status = "semantic-parity"
 
 [[mapping]]
@@ -210,7 +225,27 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/api/google-shared.ts"
-rust = ["google_assembled_signatures_survive_message_round_trip", "google_empty_signed_text_part_is_retained", "google_empty_signed_thinking_part_is_retained", "google_signature_never_moves_between_parts", "google_stream_omission_does_not_clear_prior_signature", "google_text_part_signature_stays_on_text_part", "google_thinking_part_signature_stays_on_thinking_part", "google_thought_flag_not_signature_defines_thinking", "google_tool_call_replay_target_round_trip", "google_tool_call_signature_stays_on_function_call"]
+rust = ["google_assembled_signatures_survive_message_round_trip", "google_convert_tools_schema_modes_pi_exact", "google_empty_signed_text_part_is_retained", "google_empty_signed_thinking_part_is_retained", "google_image_tool_result_routing_by_model_generation_pi_exact", "google_invalid_base64_signature_is_dropped", "google_raw_stop_reason_and_tool_precedence_pi_exact", "google_replay_ordinals_include_unsigned_provider_parts_pi_exact", "google_retry_status_classification_pi_exact", "google_signature_never_moves_between_parts", "google_signature_requires_same_provider_and_model", "google_stream_omission_does_not_clear_prior_signature", "google_text_part_signature_stays_on_text_part", "google_thinking_part_signature_stays_on_thinking_part", "google_thought_flag_not_signature_defines_thinking", "google_tool_call_replay_target_round_trip", "google_tool_call_signature_stays_on_function_call", "google_unsigned_tool_calls_never_gain_synthetic_signature_pi_exact"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/ai/src/api/google-generative-ai.ts"
+rust = ["google_full_thinking_enabled_without_selector_pi_exact", "google_function_call_null_args_defaults_to_empty_object_pi_exact", "google_generative_ai_authorization_only_is_authentication_send_and_local", "google_generative_ai_erased_tool_choice_patch_uses_pi_lowercase", "google_generative_ai_qualified_model_urls_pi_exact_send_and_local", "google_image_tool_result_routing_by_model_generation_pi_exact", "google_invalid_sdk_model_syntax_rejected_pi_exact_send_and_local", "google_provider_total_tokens_drive_turn_two_context_planning_pi_exact", "google_qualified_gemini3_disabled_thinking_pi_exact_send_and_local", "google_raw_stop_reason_and_tool_precedence_pi_exact", "google_replay_ordinals_include_unsigned_provider_parts_pi_exact", "google_terminal_cost_is_calculated_pi_exact", "google_thinking_disable_wire_modes_pi_exact", "google_thinking_level_map_pi_exact", "google_zero_total_tokens_fall_back_to_components_for_context_planning_pi_exact", "handler::tests::google_local_tool_call_fallback_ids_are_unique_across_equal_timestamp_decoders", "handler::tests::google_send_tool_call_fallback_ids_are_unique_across_equal_timestamp_decoders", "wire_google_generative_ai_pi_exact"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/ai/src/api/google-vertex.ts"
+rust = ["google_full_thinking_enabled_without_selector_pi_exact", "google_function_call_null_args_defaults_to_empty_object_pi_exact", "google_image_tool_result_routing_by_model_generation_pi_exact", "handler::tests::google_local_tool_call_fallback_ids_are_unique_across_equal_timestamp_decoders", "google_provider_total_tokens_drive_turn_two_context_planning_pi_exact", "google_raw_stop_reason_and_tool_precedence_pi_exact", "google_replay_ordinals_include_unsigned_provider_parts_pi_exact", "handler::tests::google_send_tool_call_fallback_ids_are_unique_across_equal_timestamp_decoders", "google_terminal_cost_is_calculated_pi_exact", "google_thinking_disable_wire_modes_pi_exact", "google_thinking_level_map_pi_exact", "google_vertex_adc_invalid_type_with_access_token_is_rejected_send_and_local", "google_vertex_adc_missing_scope_skips_token_exchange_send_and_local", "google_vertex_api_key_resolution_send_and_local", "google_vertex_authorized_user_ignores_token_uri_send_and_local", "google_vertex_authorized_user_quota_project_header_send_and_local", "google_vertex_custom_standard_host_preserves_collection_scope_send_and_local", "google_vertex_erased_tool_choice_patch_uses_pi_lowercase", "google_vertex_full_options_project_location_precedence_pi_exact_send_and_local", "google_vertex_non_user_adc_delegates_to_host_adapter_send_and_local", "google_vertex_service_account_quota_project_override_send_and_local", "google_zero_total_tokens_fall_back_to_components_for_context_planning_pi_exact", "wire_google_vertex_pi_exact"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/ai/src/providers/google.ts"
+rust = ["google_provider_catalogs_and_registrations_match_pinned_families"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/ai/src/providers/google-vertex.ts"
+rust = ["google_provider_catalogs_and_registrations_match_pinned_families", "google_vertex_adc_invalid_type_with_access_token_is_rejected_send_and_local", "google_vertex_adc_missing_scope_skips_token_exchange_send_and_local", "google_vertex_api_key_resolution_send_and_local", "google_vertex_authorized_user_ignores_token_uri_send_and_local", "google_vertex_authorized_user_quota_project_header_send_and_local", "google_vertex_non_user_adc_delegates_to_host_adapter_send_and_local", "google_vertex_service_account_quota_project_override_send_and_local", "google_vertex_service_account_resolution_send_and_local"]
 status = "semantic-parity"
 
 [[mapping]]
@@ -381,27 +416,7 @@ source = "packages/ai/src/api/bedrock-converse-stream.ts"
 milestone = "M4"
 
 [[planned_test]]
-rust = "google_invalid_base64_signature_is_dropped"
-source = "packages/ai/src/api/google-shared.ts"
-milestone = "M4"
-
-[[planned_test]]
-rust = "google_signature_requires_same_provider_and_model"
-source = "packages/ai/src/api/google-shared.ts"
-milestone = "M4"
-
-[[planned_test]]
 rust = "bedrock_redacted_reasoning_turn_two_pi_exact"
-source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#10.8"
-milestone = "M4"
-
-[[planned_test]]
-rust = "google_tool_thought_signature_turn_two_pi_exact"
-source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#10.8"
-milestone = "M4"
-
-[[planned_test]]
-rust = "google_empty_signed_part_turn_two_pi_exact"
 source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#10.8"
 milestone = "M4"
 
@@ -444,12 +459,12 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/utils/estimate.ts"
-rust = ["simple_context_reserves_4096_tokens"]
+rust = ["google_zero_total_tokens_fall_back_to_components_for_context_planning_pi_exact", "simple_context_reserves_4096_tokens"]
 status = "semantic-parity"
 
 [[mapping]]
 source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#3.3"
-rust = ["simple_api_patch_validation_uses_family_constant", "simple_options_and_erased_patch_round_trip", "simple_typed_and_erased_patch_conflict", "simple_unknown_api_patch_rejected"]
+rust = ["google_generative_ai_erased_tool_choice_patch_uses_pi_lowercase", "google_vertex_erased_tool_choice_patch_uses_pi_lowercase", "simple_api_patch_validation_uses_family_constant", "simple_options_and_erased_patch_round_trip", "simple_typed_and_erased_patch_conflict", "simple_unknown_api_patch_rejected"]
 status = "semantic-parity"
 
 [[mapping]]
@@ -737,63 +752,53 @@ milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/google-raw-stop-reason.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["google_provider_catalogs_and_registrations_match_pinned_families", "google_raw_stop_reason_and_tool_precedence_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/google-shared-convert-tools.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["google_convert_tools_schema_modes_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/google-shared-gemini3-unsigned-tool-call.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["google_unsigned_tool_calls_never_gain_synthetic_signature_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/google-shared-image-tool-result-routing.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["google_image_tool_result_routing_by_model_generation_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/google-shared-retry.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["google_retry_status_classification_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/google-shared-signed-empty-blocks.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["google_empty_signed_part_turn_two_pi_exact", "google_empty_signed_text_part_is_retained", "google_empty_signed_thinking_part_is_retained", "google_signature_requires_same_provider_and_model"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/google-thinking-disable.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["google_qualified_gemini3_disabled_thinking_pi_exact_send_and_local", "google_thinking_disable_wire_modes_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/google-thinking-level-map.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["google_thinking_level_map_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/google-thinking-signature.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["google_signature_never_moves_between_parts", "google_stream_omission_does_not_clear_prior_signature", "google_text_part_signature_stays_on_text_part", "google_thinking_part_signature_stays_on_thinking_part", "google_thought_flag_not_signature_defines_thinking", "google_tool_call_signature_stays_on_function_call"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/google-vertex-api-key-resolution.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["google_vertex_adc_invalid_type_with_access_token_is_rejected_send_and_local", "google_vertex_adc_missing_scope_skips_token_exchange_send_and_local", "google_vertex_api_key_resolution_send_and_local", "google_vertex_authorized_user_ignores_token_uri_send_and_local", "google_vertex_custom_standard_host_preserves_collection_scope_send_and_local", "google_vertex_full_options_project_location_precedence_pi_exact_send_and_local", "google_vertex_non_user_adc_delegates_to_host_adapter_send_and_local"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/image-model-data.test.ts"

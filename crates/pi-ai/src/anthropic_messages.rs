@@ -358,7 +358,10 @@ pub fn lower_anthropic_simple(
                     simple.max_output_tokens,
                     context.model.common.limits.max_output_tokens,
                     resolution.effective,
-                    &simple.thinking_budgets,
+                    simple
+                        .thinking_budgets
+                        .as_ref()
+                        .unwrap_or(&crate::ThinkingBudgets::default()),
                 )?;
                 let max_tokens = clamp_output_to_context(context, plan.max_output_tokens);
                 (

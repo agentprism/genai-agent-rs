@@ -11,6 +11,7 @@ members = [
     "bindings/pi-ffi",
     "providers/pi-ai-openai",
     "providers/pi-ai-anthropic",
+    "providers/pi-ai-google",
 ]
 
 # genai-agent-rs — the Rust port of pi's agent stack, built to the architecture in

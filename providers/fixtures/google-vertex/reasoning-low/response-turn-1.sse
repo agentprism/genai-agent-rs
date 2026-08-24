@@ -1,0 +1,2 @@
+data: {"responseId":"google-fixture-1","candidates":[{"content":{"role":"model","parts":[{"text":"fixture response turn 1"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":5,"thoughtsTokenCount":0,"totalTokenCount":20,"cachedContentTokenCount":0}}
+

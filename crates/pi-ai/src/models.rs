@@ -765,6 +765,13 @@ impl Models {
                 .with_model(request.model.clone()));
             }
 
+            let mut auth_overrides = auth_overrides;
+            if let Some(options) = full_options.as_ref() {
+                implementation
+                    .apply_full_options_auth_overrides(&model, options, &mut auth_overrides)
+                    .map_err(AiError::into_request_start)?;
+            }
+
             let resolved_auth = await_or_cancelled(
                 provider.auth.resolve(
                     crate::ResolveAuthRequest {
@@ -1863,6 +1870,13 @@ impl LocalModels {
                     ),
                 )
                 .with_model(request.model.clone()));
+            }
+
+            let mut auth_overrides = auth_overrides;
+            if let Some(options) = full_options.as_ref() {
+                implementation
+                    .apply_full_options_auth_overrides(&model, options, &mut auth_overrides)
+                    .map_err(AiError::into_request_start)?;
             }
 
             let resolved_auth = await_or_cancelled(

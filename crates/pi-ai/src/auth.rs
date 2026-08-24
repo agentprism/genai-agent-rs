@@ -677,6 +677,23 @@ pub trait AuthContext: Send + Sync + 'static {
         path: String,
         cancellation: CancellationToken,
     ) -> SendBoxFuture<'_, Result<bool, AuthError>>;
+
+    /// Reads an ambient UTF-8 credential file without exposing its contents
+    /// through ordinary model or provider configuration or debug output.
+    ///
+    /// The default preserves compatibility for hosts that only support
+    /// existence checks. Providers that must authenticate from file contents
+    /// report an explicit auth error when this capability is unavailable.
+    fn read_file(
+        &self,
+        _path: String,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<Option<SecretString>, AuthError>> {
+        Box::pin(async move {
+            cancellation.check().map_err(|_| AuthError::Cancelled)?;
+            Ok(None)
+        })
+    }
 }
 
 /// Local-executor counterpart to [`AuthContext`].
@@ -694,6 +711,18 @@ pub trait LocalAuthContext: 'static {
         path: String,
         cancellation: CancellationToken,
     ) -> LocalBoxFuture<'_, Result<bool, AuthError>>;
+
+    /// Local-executor counterpart to [`AuthContext::read_file`].
+    fn read_file(
+        &self,
+        _path: String,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<Option<SecretString>, AuthError>> {
+        Box::pin(async move {
+            cancellation.check().map_err(|_| AuthError::Cancelled)?;
+            Ok(None)
+        })
+    }
 }
 
 /// Empty, portable default auth context. Native applications inject process
@@ -754,6 +783,7 @@ impl LocalAuthContext for EmptyAuthContext {
 pub struct MapAuthContext {
     environment: Arc<BTreeMap<String, String>>,
     files: Arc<BTreeSet<String>>,
+    file_contents: Arc<BTreeMap<String, SecretString>>,
 }
 
 impl fmt::Debug for MapAuthContext {
@@ -775,7 +805,17 @@ impl MapAuthContext {
         Self {
             environment: Arc::new(environment),
             files: Arc::new(files.into_iter().collect()),
+            file_contents: Arc::new(BTreeMap::new()),
         }
+    }
+
+    /// Adds deterministic, redacted credential-file contents for hermetic auth
+    /// flows.
+    pub fn with_file(mut self, path: impl Into<String>, contents: SecretString) -> Self {
+        let path = path.into();
+        Arc::make_mut(&mut self.files).insert(path.clone());
+        Arc::make_mut(&mut self.file_contents).insert(path, contents);
+        self
     }
 }
 
@@ -806,6 +846,18 @@ impl AuthContext for MapAuthContext {
             Ok(files.contains(&path))
         })
     }
+
+    fn read_file(
+        &self,
+        path: String,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<Option<SecretString>, AuthError>> {
+        let files = Arc::clone(&self.file_contents);
+        Box::pin(async move {
+            cancellation.check().map_err(|_| AuthError::Cancelled)?;
+            Ok(files.get(&path).cloned())
+        })
+    }
 }
 
 impl LocalAuthContext for MapAuthContext {
@@ -833,6 +885,18 @@ impl LocalAuthContext for MapAuthContext {
         Box::pin(async move {
             cancellation.check().map_err(|_| AuthError::Cancelled)?;
             Ok(files.contains(&path))
+        })
+    }
+
+    fn read_file(
+        &self,
+        path: String,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<Option<SecretString>, AuthError>> {
+        let files = Arc::clone(&self.file_contents);
+        Box::pin(async move {
+            cancellation.check().map_err(|_| AuthError::Cancelled)?;
+            Ok(files.get(&path).cloned())
         })
     }
 }

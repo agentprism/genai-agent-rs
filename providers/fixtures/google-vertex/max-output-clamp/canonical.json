@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "family": "google-vertex",
+  "case": "max-output-clamp",
+  "description": "Simple max-output planning under the 4096-token context reserve.",
+  "piCommit": "c49906ec77788625aacbdc53ebca6fbe65bd20f5",
+  "model": {
+    "id": "gemini-3-fixture",
+    "name": "Fixture Google Model",
+    "api": "google-vertex",
+    "provider": "fixture-google-vertex",
+    "baseUrl": "http://127.0.0.1:<injected-port>/v1",
+    "reasoning": true,
+    "input": [
+      "text",
+      "image"
+    ],
+    "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0
+    },
+    "contextWindow": 4200,
+    "maxTokens": 2048,
+    "thinkingLevelMap": {
+      "off": "off",
+      "minimal": "minimal",
+      "low": "low",
+      "medium": "medium",
+      "high": "high",
+      "xhigh": "high",
+      "max": "high"
+    }
+  },
+  "context": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "Return a concise fixture response.",
+        "timestamp": 1700000000000
+      }
+    ]
+  },
+  "options": {
+    "maxTokens": 9000,
+    "maxRetries": 0,
+    "timeoutMs": 10000
+  },
+  "entrypoint": "streamSimple",
+  "turnTwoAppend": [
+    {
+      "role": "user",
+      "content": "Deterministic turn-two follow-up.",
+      "timestamp": 1700000000000
+    }
+  ],
+  "deterministicInjections": {
+    "timestamp": 1700000000000,
+    "sessionId": "session-m4-00000000",
+    "requestId": "request-fixture-0001",
+    "toolCallIds": [
+      "call_fixture_0001",
+      "call_fixture_0002"
+    ]
+  }
+}

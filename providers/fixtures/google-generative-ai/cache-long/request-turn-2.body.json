@@ -1,0 +1,1 @@
+{"contents":[{"parts":[{"text":"Return a concise fixture response."}],"role":"user"},{"parts":[{"text":"fixture response turn 1"}],"role":"model"},{"parts":[{"text":"Deterministic turn-two follow-up."}],"role":"user"}],"systemInstruction":{"parts":[{"text":"Cache fixture."}],"role":"user"},"generationConfig":{}}

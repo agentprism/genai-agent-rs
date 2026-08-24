@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "family": "google-vertex",
+  "case": "sampling-defaults-and-overrides",
+  "description": "Catalog sampling defaults overlaid by request sampling values.",
+  "piCommit": "c49906ec77788625aacbdc53ebca6fbe65bd20f5",
+  "model": {
+    "id": "gemini-3-fixture",
+    "name": "Fixture Google Model",
+    "api": "google-vertex",
+    "provider": "fixture-google-vertex",
+    "baseUrl": "http://127.0.0.1:<injected-port>/v1",
+    "reasoning": true,
+    "input": [
+      "text",
+      "image"
+    ],
+    "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0
+    },
+    "contextWindow": 128000,
+    "maxTokens": 8192,
+    "thinkingLevelMap": {
+      "off": "off",
+      "minimal": "minimal",
+      "low": "low",
+      "medium": "medium",
+      "high": "high",
+      "xhigh": "high",
+      "max": "high"
+    },
+    "samplingParams": {
+      "temperature": 1,
+      "top_k": 40
+    }
+  },
+  "context": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "Return a concise fixture response.",
+        "timestamp": 1700000000000
+      }
+    ]
+  },
+  "options": {
+    "temperature": 0,
+    "samplingParams": {
+      "temperature": 0.75,
+      "top_p": 0.6,
+      "seed": 7
+    },
+    "maxRetries": 0,
+    "timeoutMs": 10000
+  },
+  "entrypoint": "streamSimple",
+  "turnTwoAppend": [
+    {
+      "role": "user",
+      "content": "Deterministic turn-two follow-up.",
+      "timestamp": 1700000000000
+    }
+  ],
+  "deterministicInjections": {
+    "timestamp": 1700000000000,
+    "sessionId": "session-m4-00000000",
+    "requestId": "request-fixture-0001",
+    "toolCallIds": [
+      "call_fixture_0001",
+      "call_fixture_0002"
+    ]
+  }
+}

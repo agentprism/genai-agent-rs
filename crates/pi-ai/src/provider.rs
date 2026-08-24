@@ -8,10 +8,10 @@
 
 use crate::{
     ApiId, ApiRequestOptions, AssistantStream, AttemptFailure, AttemptMiddleware, AuthError,
-    CancellationToken, Context, DefaultRetryClassifier, ErasedApiFullOptions,
-    ErasedApiOptionsPatch, ErasedPayloadContext, ErasedPayloadTransform, HeaderMapSpec,
-    HttpRequest, HttpResponse, HttpTransport, LocalAssistantStream, LocalAttemptMiddleware,
-    LocalBoxFuture, LocalDefaultRetryClassifier, LocalDefaultRetrySleeper,
+    AuthResolutionOverrides, CancellationToken, Context, DefaultRetryClassifier,
+    ErasedApiFullOptions, ErasedApiOptionsPatch, ErasedPayloadContext, ErasedPayloadTransform,
+    HeaderMapSpec, HttpRequest, HttpResponse, HttpTransport, LocalAssistantStream,
+    LocalAttemptMiddleware, LocalBoxFuture, LocalDefaultRetryClassifier, LocalDefaultRetrySleeper,
     LocalErasedPayloadTransform, LocalHttpResponse, LocalHttpTransport, LocalManagedModelCatalog,
     LocalModelCatalogSource, LocalProviderCatalogState, LocalResponseObserver,
     LocalRetryClassifier, LocalRetrySleeper, ManagedModelCatalog, ModelCatalogSource,
@@ -652,6 +652,18 @@ pub trait ErasedApiHandler: Send + Sync + 'static {
         .with_model(model.common.model_ref.clone()))
     }
 
+    /// Projects request-scoped full options needed while resolving provider
+    /// authentication. This runs before auth and does not lower or encode the
+    /// API request.
+    fn apply_full_options_auth_overrides(
+        &self,
+        _model: &ModelDescriptor,
+        _options: &ErasedApiFullOptions,
+        _overrides: &mut AuthResolutionOverrides,
+    ) -> Result<(), AiError> {
+        Ok(())
+    }
+
     /// Adds API-family defaults derived from fully typed options before model
     /// and explicit request headers are applied.
     fn apply_full_options_headers(
@@ -729,6 +741,16 @@ fn validate_erased_full_options(
 /// Provider/API dispatch unit. Concrete HTTP APIs can use [`HttpChatApi`]; SDK
 /// and non-HTTP APIs implement this trait directly.
 pub trait ChatApi: Send + Sync + 'static {
+    /// Projects request-scoped full options needed before provider auth.
+    fn apply_full_options_auth_overrides(
+        &self,
+        _model: &ModelDescriptor,
+        _options: &ErasedApiFullOptions,
+        _overrides: &mut AuthResolutionOverrides,
+    ) -> Result<(), AiError> {
+        Ok(())
+    }
+
     /// Adds full-options-dependent API headers before Models applies the model
     /// and explicit request overlays.
     fn apply_full_options_headers(
@@ -998,6 +1020,16 @@ impl HttpChatApi {
 }
 
 impl ChatApi for HttpChatApi {
+    fn apply_full_options_auth_overrides(
+        &self,
+        model: &ModelDescriptor,
+        options: &ErasedApiFullOptions,
+        overrides: &mut AuthResolutionOverrides,
+    ) -> Result<(), AiError> {
+        self.handler
+            .apply_full_options_auth_overrides(model, options, overrides)
+    }
+
     fn apply_full_options_headers(
         &self,
         model: &ModelDescriptor,
@@ -1127,6 +1159,17 @@ pub trait LocalErasedApiHandler: 'static {
         .with_model(model.common.model_ref.clone()))
     }
 
+    /// Local counterpart to
+    /// [`ErasedApiHandler::apply_full_options_auth_overrides`].
+    fn apply_full_options_auth_overrides(
+        &self,
+        _model: &ModelDescriptor,
+        _options: &ErasedApiFullOptions,
+        _overrides: &mut AuthResolutionOverrides,
+    ) -> Result<(), AiError> {
+        Ok(())
+    }
+
     /// Adds API-family defaults derived from fully typed options.
     fn apply_full_options_headers(
         &self,
@@ -1159,6 +1202,16 @@ pub trait LocalErasedApiHandler: 'static {
 
 /// Single-threaded provider/API dispatch unit.
 pub trait LocalChatApi: 'static {
+    /// Projects request-scoped full options needed before local provider auth.
+    fn apply_full_options_auth_overrides(
+        &self,
+        _model: &ModelDescriptor,
+        _options: &ErasedApiFullOptions,
+        _overrides: &mut AuthResolutionOverrides,
+    ) -> Result<(), AiError> {
+        Ok(())
+    }
+
     /// Adds full-options-dependent local API headers before later overlays.
     fn apply_full_options_headers(
         &self,
@@ -1435,6 +1488,16 @@ impl LocalHttpChatApi {
 }
 
 impl LocalChatApi for LocalHttpChatApi {
+    fn apply_full_options_auth_overrides(
+        &self,
+        model: &ModelDescriptor,
+        options: &ErasedApiFullOptions,
+        overrides: &mut AuthResolutionOverrides,
+    ) -> Result<(), AiError> {
+        self.handler
+            .apply_full_options_auth_overrides(model, options, overrides)
+    }
+
     fn apply_full_options_headers(
         &self,
         model: &ModelDescriptor,

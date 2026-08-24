@@ -1032,6 +1032,7 @@ impl DecodeState {
                 cache_read_tokens: Some(cache_read),
                 cache_write_tokens: Some(cache_write),
                 cache_write_one_hour_tokens: None,
+                total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
                 source: UsageSource::ProviderReported,
             };
             self.emit(AssistantEvent::UsageUpdated {

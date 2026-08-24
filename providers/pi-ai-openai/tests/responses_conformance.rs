@@ -2353,6 +2353,7 @@ fn captured_usage(value: &Value) -> Usage {
         cache_read_tokens: value.get("cacheRead").and_then(Value::as_u64),
         cache_write_tokens: value.get("cacheWrite").and_then(Value::as_u64),
         cache_write_one_hour_tokens: value.get("cacheWrite1h").and_then(Value::as_u64),
+        total_tokens: value.get("totalTokens").and_then(Value::as_u64),
         source: UsageSource::Unknown,
     }
 }

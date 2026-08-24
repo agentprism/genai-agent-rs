@@ -436,10 +436,10 @@ fn openai_thinking_budget_field_matches_compat() {
     let simple = SimpleGenerationOptions {
         max_output_tokens: Some(16_384),
         reasoning: Some(pi_ai::ReasoningLevel::Medium),
-        thinking_budgets: ThinkingBudgets {
+        thinking_budgets: Some(ThinkingBudgets {
             medium: Some(4_096),
             ..Default::default()
-        },
+        }),
         ..Default::default()
     };
     let options = lower_simple_options(&model, &one_user_context(), &simple);
@@ -493,10 +493,10 @@ fn openai_thinking_budget_field_matches_compat() {
             &SimpleGenerationOptions {
                 max_output_tokens: Some(16_384),
                 reasoning: Some(level),
-                thinking_budgets: ThinkingBudgets {
+                thinking_budgets: Some(ThinkingBudgets {
                     high: Some(8_192),
                     ..Default::default()
-                },
+                }),
                 ..Default::default()
             },
         );
@@ -528,10 +528,10 @@ fn openai_thinking_budget_field_matches_compat() {
         &SimpleGenerationOptions {
             max_output_tokens: Some(4_096),
             reasoning: Some(pi_ai::ReasoningLevel::High),
-            thinking_budgets: ThinkingBudgets {
+            thinking_budgets: Some(ThinkingBudgets {
                 high: Some(8_192),
                 ..Default::default()
-            },
+            }),
             ..Default::default()
         },
     );
@@ -625,10 +625,10 @@ fn openai_chat_template_budget_variable_uses_clamped_simple_budget() {
     let simple = SimpleGenerationOptions {
         max_output_tokens: Some(2_000),
         reasoning: Some(pi_ai::ReasoningLevel::High),
-        thinking_budgets: ThinkingBudgets {
+        thinking_budgets: Some(ThinkingBudgets {
             high: Some(9_000),
             ..Default::default()
-        },
+        }),
         ..Default::default()
     };
     let options = lower_simple_options(&model, &one_user_context(), &simple);
@@ -1041,6 +1041,7 @@ data: [DONE]
             cache_read_tokens: Some(5),
             cache_write_tokens: Some(3),
             cache_write_one_hour_tokens: None,
+            total_tokens: None,
             source: UsageSource::ProviderReported,
         }
     );
@@ -1068,6 +1069,7 @@ data: [DONE]
             cache_read_tokens: Some(0),
             cache_write_tokens: Some(0),
             cache_write_one_hour_tokens: None,
+            total_tokens: None,
             source: UsageSource::ProviderReported,
         }
     );
@@ -1399,6 +1401,7 @@ fn openai_provider_catalogs_match_pinned_counts_and_profiles() {
                 cache_read_tokens: None,
                 cache_write_tokens: None,
                 cache_write_one_hour_tokens: None,
+                total_tokens: None,
                 source: UsageSource::ProviderReported,
             },
             Currency::usd(),
@@ -3367,6 +3370,7 @@ fn fixture_usage(value: &Value) -> Usage {
         cache_read_tokens: value.get("cacheRead").and_then(Value::as_u64),
         cache_write_tokens: value.get("cacheWrite").and_then(Value::as_u64),
         cache_write_one_hour_tokens: value.get("cacheWrite1h").and_then(Value::as_u64),
+        total_tokens: value.get("totalTokens").and_then(Value::as_u64),
         source: UsageSource::Unknown,
     }
 }

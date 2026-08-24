@@ -782,6 +782,8 @@ pub struct Usage {
 }
 ```
 
+> Correction: pinned Pi's `calculateContextTokens` prefers the provider's nonzero/truthy `usage.totalTokens`, and otherwise falls back to the normalized input/output/cache component sum. Google can report a nonzero total that differs from those components, or zero alongside nonzero components. `Usage` therefore also retains `total_tokens: Option<u64>`, and context planning gives only a nonzero value precedence; omitting the field or treating zero as authoritative changes turn-two max-output request bytes.
+
 ```rust
 pub struct Cost {
     pub currency: Currency,

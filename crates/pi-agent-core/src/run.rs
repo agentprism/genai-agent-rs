@@ -1989,6 +1989,12 @@ fn add_cost(
 }
 
 fn add_usage(mut total: Usage, next: &Usage) -> Usage {
+    let effective_total = if total.total_tokens.is_some() || next.total_tokens.is_some() {
+        let combined = total.total_tokens().saturating_add(next.total_tokens());
+        Some(u64::try_from(combined).unwrap_or(u64::MAX))
+    } else {
+        None
+    };
     total.input_tokens = total.input_tokens.saturating_add(next.input_tokens);
     total.output_tokens = total.output_tokens.saturating_add(next.output_tokens);
     total.reasoning_tokens = add_optional(total.reasoning_tokens, next.reasoning_tokens);
@@ -1998,6 +2004,7 @@ fn add_usage(mut total: Usage, next: &Usage) -> Usage {
         total.cache_write_one_hour_tokens,
         next.cache_write_one_hour_tokens,
     );
+    total.total_tokens = effective_total;
     if total.source != next.source {
         total.source = UsageSource::Mixed;
     }

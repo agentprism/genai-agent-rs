@@ -37,6 +37,11 @@ pub struct Usage {
     /// One-hour-retention subset of cache-write tokens, when reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_one_hour_tokens: Option<u64>,
+    /// Provider-reported total when it is not derivable from normalized
+    /// component fields. Pi uses this authoritative value for subsequent
+    /// context-window planning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
     /// Provenance of these cumulative values.
     pub source: UsageSource,
 }
@@ -51,6 +56,7 @@ impl Usage {
             cache_read_tokens: None,
             cache_write_tokens: None,
             cache_write_one_hour_tokens: None,
+            total_tokens: None,
             source,
         }
     }
@@ -65,8 +71,14 @@ impl Usage {
     }
 
     /// Returns the cumulative token total without double-counting reasoning.
+    ///
+    /// Pinned Pi uses JavaScript truthiness for `usage.totalTokens`, so a
+    /// provider-reported zero falls back to the normalized component sum.
     pub fn total_tokens(&self) -> u128 {
-        self.request_input_tokens() + u128::from(self.output_tokens)
+        self.total_tokens
+            .filter(|total| *total != 0)
+            .map(u128::from)
+            .unwrap_or_else(|| self.request_input_tokens() + u128::from(self.output_tokens))
     }
 }
 

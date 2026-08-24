@@ -48,6 +48,7 @@ fn usage(input: u64, output: u64) -> Usage {
         cache_read_tokens: Some(2),
         cache_write_tokens: Some(3),
         cache_write_one_hour_tokens: None,
+        total_tokens: None,
         source: UsageSource::ProviderReported,
     }
 }
@@ -377,6 +378,67 @@ fn agent_prompt_with_one_tool() {
             "run_finished",
         ]
     );
+}
+
+#[test]
+fn agent_run_usage_aggregates_mixed_authoritative_totals_in_both_orders() {
+    // Architecture v2 part 1 §3.9 and part 2 §8.1. A run may span
+    // responses where one provider reports a nonzero authoritative total and
+    // another reports zero. Pi treats the zero as absent, so each response
+    // contributes its effective total independently in either order.
+    let authoritative = Usage {
+        input_tokens: 2,
+        output_tokens: 3,
+        reasoning_tokens: None,
+        cache_read_tokens: None,
+        cache_write_tokens: None,
+        cache_write_one_hour_tokens: None,
+        total_tokens: Some(20),
+        source: UsageSource::ProviderReported,
+    };
+    let component_only = Usage {
+        input_tokens: 6,
+        output_tokens: 4,
+        reasoning_tokens: None,
+        cache_read_tokens: None,
+        cache_write_tokens: None,
+        cache_write_one_hour_tokens: None,
+        total_tokens: Some(0),
+        source: UsageSource::Estimated,
+    };
+
+    for (case, first, second) in [
+        (
+            "authoritative_then_component",
+            authoritative.clone(),
+            component_only.clone(),
+        ),
+        (
+            "component_then_authoritative",
+            component_only.clone(),
+            authoritative.clone(),
+        ),
+    ] {
+        let (mut agent, _) = tool_agent([
+            tool_call_response("echo", json!({})).with_usage(first),
+            text_response("done").with_usage(second),
+        ]);
+        let events =
+            collect(agent.prompt_records([user("user-usage", "go")], CancellationToken::new()));
+        let run_usage = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::RunFinished {
+                    outcome: RunOutcome::Completed { usage, .. },
+                } => Some(usage),
+                _ => None,
+            })
+            .expect("completed run outcome");
+
+        assert_eq!(run_usage.total_tokens, Some(30), "{case}");
+        assert_eq!(run_usage.total_tokens(), 30, "{case}");
+        assert_eq!(run_usage.source, UsageSource::Mixed, "{case}");
+    }
 }
 
 fn multiple_tool_response() -> ScriptedResponse {

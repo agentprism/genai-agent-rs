@@ -493,7 +493,13 @@ fn lower_reasoning(
         OpenAiThinkingValue::Disabled | OpenAiThinkingValue::Effort(_) => None,
     };
     let thinking_budget = mapped_budget
-        .or_else(|| simple.thinking_budgets.budget_for(resolution.effective))
+        .or_else(|| {
+            simple
+                .thinking_budgets
+                .as_ref()
+                .unwrap_or(&crate::ThinkingBudgets::default())
+                .budget_for(resolution.effective)
+        })
         .map(|budget| budget.min(max_tokens.saturating_sub(MIN_ANSWER_TOKENS)))
         .filter(|budget| *budget > 0);
 

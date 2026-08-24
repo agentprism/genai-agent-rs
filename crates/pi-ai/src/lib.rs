@@ -18,6 +18,7 @@ mod catalog;
 mod estimate;
 #[cfg(not(target_arch = "wasm32"))]
 mod file_credentials;
+mod google;
 mod handoff;
 mod ids;
 mod json_compat;
@@ -46,6 +47,7 @@ pub use catalog::*;
 pub use estimate::*;
 #[cfg(not(target_arch = "wasm32"))]
 pub use file_credentials::*;
+pub use google::*;
 pub use handoff::*;
 pub use ids::*;
 pub use json_compat::*;

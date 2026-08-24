@@ -12,6 +12,7 @@ fn usage(input_tokens: u64, output_tokens: u64) -> Usage {
         cache_read_tokens: Some(3),
         cache_write_tokens: Some(1),
         cache_write_one_hour_tokens: None,
+        total_tokens: None,
         source: UsageSource::ProviderReported,
     }
 }
