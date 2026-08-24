@@ -457,9 +457,12 @@ fn parse_assistant(
         requested_model: ModelId::new(model),
         response_model: None,
         response_id: None,
+        end_turn: None,
+        diagnostics: Vec::new(),
         content,
         replay,
         usage: Usage::zero(UsageSource::Unknown),
+        cost: None,
         finish: AssistantFinish {
             reason,
             raw_provider_reason: None,

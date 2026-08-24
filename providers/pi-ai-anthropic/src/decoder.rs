@@ -329,6 +329,7 @@ impl DecodeState {
             self.emit(AssistantEvent::ResponseMetadata {
                 response_id,
                 response_model,
+                end_turn: None,
             })?;
         }
         self.replace_usage(usage)

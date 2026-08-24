@@ -295,6 +295,7 @@ impl DecodeState {
             self.emit(AssistantEvent::ResponseMetadata {
                 response_id: new_response_id,
                 response_model: new_response_model,
+                end_turn: None,
             })?;
         }
 

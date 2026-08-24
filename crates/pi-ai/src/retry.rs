@@ -222,7 +222,15 @@ impl fmt::Display for AttemptFailure {
             Self::Middleware { source, .. } => fmt::Display::fmt(source, formatter),
             Self::Http {
                 status, message, ..
-            } => write!(formatter, "provider HTTP {status}: {message}"),
+            } => write!(
+                formatter,
+                "provider HTTP {status}: {}",
+                if message.trim().is_empty() {
+                    "provider rejected request before streaming"
+                } else {
+                    message
+                }
+            ),
             Self::Cancelled => formatter.write_str("request cancelled"),
             Self::RetryDelayTooLong {
                 requested,
@@ -260,12 +268,23 @@ pub enum RetryDecision {
 pub trait RetryClassifier: Send + Sync + 'static {
     /// Returns whether and when the operation may be attempted again.
     fn classify(&self, failure: &AttemptFailure, policy: &RetryPolicy) -> RetryDecision;
+
+    /// Normalizes the final surfaced failure after retry classification has
+    /// consumed any raw provider response text it needs.
+    fn normalize_terminal(&self, failure: AttemptFailure) -> AttemptFailure {
+        without_provider_body(failure)
+    }
 }
 
 /// Single-threaded pre-stream retry classifier.
 pub trait LocalRetryClassifier: 'static {
     /// Returns whether and when the operation may be attempted again.
     fn classify(&self, failure: &AttemptFailure, policy: &RetryPolicy) -> RetryDecision;
+
+    /// Local counterpart to [`RetryClassifier::normalize_terminal`].
+    fn normalize_terminal(&self, failure: AttemptFailure) -> AttemptFailure {
+        without_provider_body(failure)
+    }
 }
 
 /// Source of a downward jitter multiplier.
@@ -622,17 +641,17 @@ where
             .check()
             .map_err(|_| AttemptFailure::Cancelled)?;
         if retry_index >= policy.max_retries {
-            return Err(error);
+            return Err(classifier.normalize_terminal(error));
         }
 
         let delay = match classifier.classify(&error, policy) {
-            RetryDecision::DoNotRetry => return Err(error),
+            RetryDecision::DoNotRetry => return Err(classifier.normalize_terminal(error)),
             RetryDecision::RetryAfter(delay) => delay,
             RetryDecision::RejectServerDelay { requested, maximum } => {
                 return Err(AttemptFailure::RetryDelayTooLong {
                     requested,
                     maximum,
-                    source: Box::new(error),
+                    source: Box::new(classifier.normalize_terminal(error)),
                 });
             }
         };
@@ -693,23 +712,51 @@ where
             .check()
             .map_err(|_| AttemptFailure::Cancelled)?;
         if retry_index >= policy.max_retries {
-            return Err(error);
+            return Err(classifier.normalize_terminal(error));
         }
 
         let delay = match classifier.classify(&error, policy) {
-            RetryDecision::DoNotRetry => return Err(error),
+            RetryDecision::DoNotRetry => return Err(classifier.normalize_terminal(error)),
             RetryDecision::RetryAfter(delay) => delay,
             RetryDecision::RejectServerDelay { requested, maximum } => {
                 return Err(AttemptFailure::RetryDelayTooLong {
                     requested,
                     maximum,
-                    source: Box::new(error),
+                    source: Box::new(classifier.normalize_terminal(error)),
                 });
             }
         };
 
         cancellable(sleeper.sleep(delay, cancellation.clone()), cancellation).await?;
         retry_index += 1;
+    }
+}
+
+fn without_provider_body(failure: AttemptFailure) -> AttemptFailure {
+    match failure {
+        AttemptFailure::Http {
+            attempt,
+            status,
+            headers,
+            observed_at,
+            ..
+        } => AttemptFailure::http_at(
+            attempt,
+            status,
+            headers,
+            observed_at,
+            "provider rejected request before streaming",
+        ),
+        AttemptFailure::RetryDelayTooLong {
+            requested,
+            maximum,
+            source,
+        } => AttemptFailure::RetryDelayTooLong {
+            requested,
+            maximum,
+            source: Box::new(without_provider_body(*source)),
+        },
+        other => other,
     }
 }
 

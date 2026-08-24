@@ -2,11 +2,11 @@
 //! Architecture v2 part 1 §3.3 and part 2 §1.3–§1.9, §2.1, and §9.2–§9.3.
 
 use crate::{
-    ApiId, AssistantFinish, AssistantFinishReason, AssistantMessage, ContentBlock, ContentBlockId,
-    LocalBoxStream, MessageId, ModelId, OpaquePayload, ProviderId, PublicError,
-    REPLAY_ENVELOPE_SCHEMA_VERSION, ReplayApplicability, ReplayCompleteness, ReplayEnvelope,
-    ReplayItem, ReplayItemId, ReplayKind, ReplayScope, ReplayTarget, SendBoxStream, Timestamp,
-    ToolCall, ToolCallId, Usage, UsageSource,
+    ApiId, AssistantFinish, AssistantFinishReason, AssistantMessage, AssistantMessageDiagnostic,
+    ContentBlock, ContentBlockId, Cost, LocalBoxStream, MessageId, ModelId, OpaquePayload,
+    ProviderId, PublicError, REPLAY_ENVELOPE_SCHEMA_VERSION, ReplayApplicability,
+    ReplayCompleteness, ReplayEnvelope, ReplayItem, ReplayItemId, ReplayKind, ReplayScope,
+    ReplayTarget, SendBoxStream, Timestamp, ToolCall, ToolCallId, Usage, UsageSource,
 };
 use futures_core::{Stream, stream::FusedStream};
 use indexmap::IndexMap;
@@ -367,6 +367,8 @@ pub enum AssistantEvent {
         response_id: Option<String>,
         /// Concrete response model, when reported.
         response_model: Option<ModelId>,
+        /// Provider indication that the model explicitly ended its turn.
+        end_turn: Option<bool>,
     },
 
     /// Starts a canonical content block.
@@ -387,12 +389,36 @@ pub enum AssistantEvent {
         delta: String,
     },
 
+    /// Replaces visible text with a provider-authoritative completed value.
+    TextReplaced {
+        /// Stable target block.
+        block_id: ContentBlockId,
+        /// Complete authoritative visible text.
+        text: String,
+    },
+
     /// Appends visible reasoning to a thinking block.
     ThinkingDelta {
         /// Stable target block.
         block_id: ContentBlockId,
         /// UTF-8 fragment in provider order.
         delta: String,
+    },
+
+    /// Replaces visible reasoning with a provider-authoritative completed
+    /// value.
+    ThinkingReplaced {
+        /// Stable target block.
+        block_id: ContentBlockId,
+        /// Complete authoritative visible reasoning.
+        thinking: String,
+    },
+
+    /// Appends one redacted provider/runtime diagnostic to the partial
+    /// assistant record.
+    DiagnosticAdded {
+        /// Diagnostic to retain through terminal assembly and persistence.
+        diagnostic: AssistantMessageDiagnostic,
     },
 
     /// Establishes or completes tool-call identity and name metadata.
@@ -411,6 +437,17 @@ pub enum AssistantEvent {
         block_id: ContentBlockId,
         /// JSON fragment in provider order.
         delta: String,
+    },
+
+    /// Replaces the accumulated raw tool-argument JSON with the provider's
+    /// authoritative final value. OpenAI Responses may supply non-prefix
+    /// arguments on `response.output_item.done`; an append-only event cannot
+    /// losslessly represent that mutable Pi behavior.
+    ToolArgumentsReplaced {
+        /// Stable tool-call block.
+        block_id: ContentBlockId,
+        /// Complete authoritative raw JSON arguments.
+        arguments: String,
     },
 
     /// Starts one ordered provider replay artifact.
@@ -543,7 +580,10 @@ struct AssistantMessageBuilder {
     requested_model: ModelId,
     response_model: Option<ModelId>,
     response_id: Option<String>,
+    end_turn: Option<bool>,
+    diagnostics: Vec<AssistantMessageDiagnostic>,
     usage: Usage,
+    cost: Option<Cost>,
     timestamp: Timestamp,
 }
 
@@ -557,7 +597,10 @@ impl AssistantMessageBuilder {
             requested_model: ModelId::default(),
             response_model: None,
             response_id: None,
+            end_turn: None,
+            diagnostics: Vec::new(),
             usage: Usage::zero(UsageSource::Unknown),
+            cost: None,
             timestamp,
         }
     }
@@ -783,6 +826,7 @@ impl AssistantAssembler {
             AssistantEvent::ResponseMetadata {
                 response_id,
                 response_model,
+                end_turn,
             } => {
                 self.require_started()?;
                 if let Some(response_id) = response_id {
@@ -797,6 +841,13 @@ impl AssistantAssembler {
                         None => self.message.response_model = Some(response_model.clone()),
                         Some(existing) if existing == response_model => {}
                         Some(_) => return Err(AssemblyError::ResponseModelChanged),
+                    }
+                }
+                if let Some(end_turn) = end_turn {
+                    match self.message.end_turn {
+                        None => self.message.end_turn = Some(*end_turn),
+                        Some(existing) if existing == *end_turn => {}
+                        Some(_) => return Err(AssemblyError::EndTurnChanged),
                     }
                 }
             }
@@ -826,6 +877,26 @@ impl AssistantAssembler {
                     }
                 }
             }
+            AssistantEvent::TextReplaced { block_id, text } => {
+                self.require_started()?;
+                match self.block_mut(block_id)? {
+                    BlockBuilder::Text {
+                        text: current,
+                        finished,
+                        ..
+                    } if !*finished => current.clone_from(text),
+                    block if block.is_finished() => {
+                        return Err(AssemblyError::ContentBlockAlreadyFinished(block_id.clone()));
+                    }
+                    block => {
+                        return Err(AssemblyError::WrongContentBlockKind {
+                            block_id: block_id.clone(),
+                            expected: ContentBlockKind::Text,
+                            actual: block.kind(),
+                        });
+                    }
+                }
+            }
             AssistantEvent::ThinkingDelta { block_id, delta } => {
                 self.require_started()?;
                 match self.block_mut(block_id)? {
@@ -843,6 +914,28 @@ impl AssistantAssembler {
                         });
                     }
                 }
+            }
+            AssistantEvent::ThinkingReplaced { block_id, thinking } => {
+                self.require_started()?;
+                match self.block_mut(block_id)? {
+                    BlockBuilder::Thinking { text, finished, .. } if !*finished => {
+                        text.clone_from(thinking)
+                    }
+                    block if block.is_finished() => {
+                        return Err(AssemblyError::ContentBlockAlreadyFinished(block_id.clone()));
+                    }
+                    block => {
+                        return Err(AssemblyError::WrongContentBlockKind {
+                            block_id: block_id.clone(),
+                            expected: ContentBlockKind::Thinking,
+                            actual: block.kind(),
+                        });
+                    }
+                }
+            }
+            AssistantEvent::DiagnosticAdded { diagnostic } => {
+                self.require_started()?;
+                self.message.diagnostics.push(diagnostic.clone());
             }
             AssistantEvent::ToolCallMetadata {
                 block_id,
@@ -908,6 +1001,33 @@ impl AssistantAssembler {
                         ..
                     } if !*finished => {
                         arguments_scratch.push_str(delta);
+                        *finalized_arguments = None;
+                    }
+                    block if block.is_finished() => {
+                        return Err(AssemblyError::ContentBlockAlreadyFinished(block_id.clone()));
+                    }
+                    block => {
+                        return Err(AssemblyError::WrongContentBlockKind {
+                            block_id: block_id.clone(),
+                            expected: ContentBlockKind::ToolCall,
+                            actual: block.kind(),
+                        });
+                    }
+                }
+            }
+            AssistantEvent::ToolArgumentsReplaced {
+                block_id,
+                arguments,
+            } => {
+                self.require_started()?;
+                match self.block_mut(block_id)? {
+                    BlockBuilder::ToolCall {
+                        arguments_scratch,
+                        finalized_arguments,
+                        finished,
+                        ..
+                    } if !*finished => {
+                        arguments_scratch.clone_from(arguments);
                         *finalized_arguments = None;
                     }
                     block if block.is_finished() => {
@@ -1025,9 +1145,12 @@ impl AssistantAssembler {
             requested_model: self.message.requested_model.clone(),
             response_model: self.message.response_model.clone(),
             response_id: self.message.response_id.clone(),
+            end_turn: self.message.end_turn,
+            diagnostics: self.message.diagnostics.clone(),
             content: self.content_snapshot(true),
             replay: self.replay_snapshot(),
             usage: self.message.usage.clone(),
+            cost: self.message.cost.clone(),
             timestamp: self.message.timestamp,
             terminal_message: self.terminal_message.clone(),
         }
@@ -1319,9 +1442,12 @@ impl AssistantAssembler {
             requested_model: self.message.requested_model.clone(),
             response_model: self.message.response_model.clone(),
             response_id: self.message.response_id.clone(),
+            end_turn: self.message.end_turn,
+            diagnostics: self.message.diagnostics.clone(),
             content: self.content_snapshot(allow_partial),
             replay: self.replay_snapshot(),
             usage: self.message.usage.clone(),
+            cost: self.message.cost.clone(),
             finish,
             timestamp: self.message.timestamp,
         })
@@ -1339,9 +1465,12 @@ impl AssistantAssembler {
             requested_model: self.message.requested_model.clone(),
             response_model: self.message.response_model.clone(),
             response_id: self.message.response_id.clone(),
+            end_turn: self.message.end_turn,
+            diagnostics: self.message.diagnostics.clone(),
             content: self.content_snapshot(true),
             replay: self.replay_snapshot(),
             usage: self.message.usage.clone(),
+            cost: self.message.cost.clone(),
             finish,
             timestamp: self.message.timestamp,
         }
@@ -1368,6 +1497,9 @@ impl AssistantAssembler {
         // MessageStarted does not carry a clock value. A terminal event does,
         // so a consumer applying a complete stream learns the timestamp here.
         self.message.timestamp = message.timestamp;
+        // API-family cost calculation is authoritative at the terminal
+        // response boundary and deliberately remains separate from Usage.
+        self.message.cost = message.cost.clone();
         let assembled = self.build_message(message.finish.clone(), allow_partial)?;
         if assembled != *message {
             return Err(AssemblyError::TerminalMessageMismatch);
@@ -1442,12 +1574,18 @@ pub struct AssistantMessageSnapshot {
     pub response_model: Option<ModelId>,
     /// Last provider response identifier.
     pub response_id: Option<String>,
+    /// Last provider end-turn indication.
+    pub end_turn: Option<bool>,
+    /// Redacted diagnostics observed so far.
+    pub diagnostics: Vec<AssistantMessageDiagnostic>,
     /// Canonical partial content without JSON or binary parser scratch.
     pub content: Vec<ContentBlock>,
     /// Ordered replay artifacts, with unfinished items marked incomplete.
     pub replay: ReplayEnvelope,
     /// Last authoritative cumulative usage.
     pub usage: Usage,
+    /// Provider-priced response cost once the terminal record is known.
+    pub cost: Option<Cost>,
     /// Stable message timestamp.
     pub timestamp: Timestamp,
     /// Terminal record after applying a terminal event.
@@ -1465,6 +1603,8 @@ pub enum AssemblyError {
     ResponseIdChanged,
     /// Concrete response model changed after becoming known.
     ResponseModelChanged,
+    /// Provider end-turn metadata changed after becoming known.
+    EndTurnChanged,
     /// An event was observed after a terminal event.
     EventAfterTerminal,
     /// A stable content block identifier was started twice.
@@ -1547,6 +1687,9 @@ impl fmt::Display for AssemblyError {
             }
             Self::ResponseModelChanged => {
                 formatter.write_str("concrete response model changed during streaming")
+            }
+            Self::EndTurnChanged => {
+                formatter.write_str("provider end-turn metadata changed during streaming")
             }
             Self::EventAfterTerminal => {
                 formatter.write_str("assistant event observed after terminal")

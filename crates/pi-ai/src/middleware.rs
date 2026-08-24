@@ -2,8 +2,9 @@
 //! v2 part 2 §2.5–§2.6.
 
 use crate::{
-    ApiFamily, ApiId, CancellationToken, LocalBoxFuture, LocalBoxStream, ModelDescriptor, ModelRef,
-    ProviderId, SendBoxFuture, SendBoxStream, TypedModelDescriptor,
+    ApiFamily, ApiId, AssistantMessageDiagnostic, CancellationToken, LocalBoxFuture,
+    LocalBoxStream, ModelDescriptor, ModelRef, ProviderId, SendBoxFuture, SendBoxStream,
+    StreamTransport, TypedModelDescriptor,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
 use std::any::Any;
@@ -23,10 +24,22 @@ pub struct HttpRequest {
     pub url: Url,
     /// Final attempt-local headers.
     pub headers: HeaderMap,
+    /// Credential-derived and API-option-derived invariant headers before
+    /// model, caller, transform, and attempt overlays. Specialized transports
+    /// use this only to reassert provider protocol invariants.
+    pub auth_headers: HeaderMap,
+    /// API-option-derived session key retained independently of logical
+    /// headers. Specialized transports use this for connection affinity,
+    /// continuation state, and sticky fallback decisions.
+    pub session_id: Option<String>,
     /// Frozen logical request body.
     pub body: Vec<u8>,
     /// Per-attempt response-establishment timeout.
     pub timeout: Option<Duration>,
+    /// Preferred multi-protocol transport, when supported.
+    pub transport: Option<StreamTransport>,
+    /// WebSocket connection/open timeout.
+    pub websocket_connect_timeout: Option<Duration>,
     /// Zero-based transport-attempt number.
     pub attempt: u32,
 }
@@ -38,8 +51,15 @@ impl fmt::Debug for HttpRequest {
             .field("method", &self.method)
             .field("url", &"<redacted endpoint>")
             .field("headers", &"<redacted headers>")
+            .field("auth_headers", &"<redacted credential headers>")
+            .field(
+                "session_id",
+                &self.session_id.as_ref().map(|_| "<redacted session id>"),
+            )
             .field("body", &"<redacted body>")
             .field("timeout", &self.timeout)
+            .field("transport", &self.transport)
+            .field("websocket_connect_timeout", &self.websocket_connect_timeout)
             .field("attempt", &self.attempt)
             .finish()
     }
@@ -58,6 +78,12 @@ pub struct HttpResponse {
     pub status: u16,
     /// Raw response headers.
     pub headers: HeaderMap,
+    /// Redacted transport recovery diagnostics to seed into the assistant
+    /// stream before provider body events are decoded.
+    pub diagnostics: Vec<AssistantMessageDiagnostic>,
+    /// Whether this response represents an HTTP exchange visible to response
+    /// observers. Synthetic WebSocket adapters set this to `false`.
+    pub notify_observers: bool,
     /// Unconsumed response body.
     pub body: HttpBody,
 }
@@ -68,6 +94,8 @@ impl HttpResponse {
         Self {
             status,
             headers,
+            diagnostics: Vec::new(),
+            notify_observers: true,
             body: Box::pin(futures_util::stream::once(async move { Ok(body) })),
         }
     }
@@ -77,6 +105,8 @@ impl HttpResponse {
         Self {
             status,
             headers,
+            diagnostics: Vec::new(),
+            notify_observers: true,
             body: Box::pin(futures_util::stream::empty()),
         }
     }
@@ -88,6 +118,8 @@ impl fmt::Debug for HttpResponse {
             .debug_struct("HttpResponse")
             .field("status", &self.status)
             .field("headers", &"<redacted headers>")
+            .field("diagnostics", &self.diagnostics)
+            .field("notify_observers", &self.notify_observers)
             .field("body", &"<stream>")
             .finish()
     }
@@ -99,6 +131,12 @@ pub struct LocalHttpResponse {
     pub status: u16,
     /// Raw response headers.
     pub headers: HeaderMap,
+    /// Redacted transport recovery diagnostics to seed into the local
+    /// assistant stream.
+    pub diagnostics: Vec<AssistantMessageDiagnostic>,
+    /// Whether this response represents an HTTP exchange visible to local
+    /// response observers. Synthetic WebSocket adapters set this to `false`.
+    pub notify_observers: bool,
     /// Unconsumed local response body.
     pub body: LocalHttpBody,
 }
@@ -109,6 +147,8 @@ impl LocalHttpResponse {
         Self {
             status,
             headers,
+            diagnostics: Vec::new(),
+            notify_observers: true,
             body: Box::pin(futures_util::stream::once(async move { Ok(body) })),
         }
     }
@@ -118,6 +158,8 @@ impl LocalHttpResponse {
         Self {
             status,
             headers,
+            diagnostics: Vec::new(),
+            notify_observers: true,
             body: Box::pin(futures_util::stream::empty()),
         }
     }
@@ -129,6 +171,8 @@ impl fmt::Debug for LocalHttpResponse {
             .debug_struct("LocalHttpResponse")
             .field("status", &self.status)
             .field("headers", &"<redacted headers>")
+            .field("diagnostics", &self.diagnostics)
+            .field("notify_observers", &self.notify_observers)
             .field("body", &"<local stream>")
             .finish()
     }
@@ -141,6 +185,9 @@ pub struct TransportError {
     pub code: String,
     /// Secret-free diagnostic text.
     pub message: String,
+    /// Redacted diagnostics that must be committed if this failure terminates
+    /// an already-established semantic stream.
+    pub diagnostics: Vec<AssistantMessageDiagnostic>,
 }
 
 impl TransportError {
@@ -149,7 +196,14 @@ impl TransportError {
         Self {
             code: code.into(),
             message: message.into(),
+            diagnostics: Vec::new(),
         }
+    }
+
+    /// Attaches one redacted diagnostic to an established-body failure.
+    pub fn with_diagnostic(mut self, diagnostic: AssistantMessageDiagnostic) -> Self {
+        self.diagnostics.push(diagnostic);
+        self
     }
 }
 
@@ -330,6 +384,7 @@ impl<A: ApiFamily> ErasedProviderPayloadBody for TypedProviderPayloadBody<A> {
 pub struct ProviderPayload {
     /// HTTP method used for this payload.
     pub method: Method,
+    transport_session_id: Option<String>,
     body: Box<dyn ErasedProviderPayloadBody>,
 }
 
@@ -338,6 +393,7 @@ impl ProviderPayload {
     pub fn json(body_bytes: impl Into<Vec<u8>>) -> Self {
         Self {
             method: Method::POST,
+            transport_session_id: None,
             body: Box::new(RawProviderPayloadBody(body_bytes.into())),
         }
     }
@@ -356,6 +412,7 @@ impl ProviderPayload {
     {
         Self {
             method,
+            transport_session_id: None,
             body: Box::new(TypedProviderPayloadBody::<A> {
                 model,
                 wire_request,
@@ -386,6 +443,18 @@ impl ProviderPayload {
         self.body.encode()
     }
 
+    /// Retains one typed API-option-derived session key outside mutable
+    /// payload and header middleware.
+    pub fn with_transport_session_id(mut self, session_id: Option<String>) -> Self {
+        self.transport_session_id = session_id;
+        self
+    }
+
+    /// Returns the typed session key selected before payload middleware.
+    pub fn transport_session_id(&self) -> Option<&str> {
+        self.transport_session_id.as_deref()
+    }
+
     fn typed_mut<A: ApiFamily>(&mut self) -> Option<&mut TypedProviderPayloadBody<A>> {
         self.body
             .as_any_mut()
@@ -398,6 +467,13 @@ impl fmt::Debug for ProviderPayload {
         formatter
             .debug_struct("ProviderPayload")
             .field("method", &self.method)
+            .field(
+                "transport_session_id",
+                &self
+                    .transport_session_id
+                    .as_ref()
+                    .map(|_| "<redacted session id>"),
+            )
             .field("body", &"<typed wire request>")
             .finish()
     }

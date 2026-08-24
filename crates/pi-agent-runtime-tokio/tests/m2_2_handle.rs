@@ -114,9 +114,12 @@ fn terminal_message(id: &str, reason: AssistantFinishReason) -> AssistantMessage
         requested_model: model.clone(),
         response_model: None,
         response_id: None,
+        end_turn: None,
+        diagnostics: Vec::new(),
         content: Vec::new(),
         replay: ReplayEnvelope::new(ReplayScope::new(provider, api, model.clone(), model)),
         usage: Usage::zero(UsageSource::Unknown),
+        cost: None,
         finish: AssistantFinish {
             reason,
             raw_provider_reason: None,

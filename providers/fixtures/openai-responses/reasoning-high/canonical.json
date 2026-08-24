@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "family": "openai-responses",
+  "case": "reasoning-high",
+  "description": "Simple reasoning level high.",
+  "piCommit": "c49906ec77788625aacbdc53ebca6fbe65bd20f5",
+  "model": {
+    "id": "fixture-openai-model",
+    "name": "Fixture OpenAI Model",
+    "api": "openai-responses",
+    "provider": "fixture-openai",
+    "baseUrl": "http://127.0.0.1:<injected-port>/v1",
+    "reasoning": true,
+    "input": [
+      "text",
+      "image"
+    ],
+    "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0
+    },
+    "contextWindow": 128000,
+    "maxTokens": 8192,
+    "thinkingLevelMap": {
+      "off": "none",
+      "minimal": "minimal",
+      "low": "low",
+      "medium": "medium",
+      "high": "high",
+      "xhigh": "xhigh",
+      "max": "max"
+    },
+    "compat": {
+      "supportsDeveloperRole": true,
+      "supportsReasoningEffort": true,
+      "supportsStrictMode": true,
+      "supportsLongCacheRetention": true,
+      "supportsOpenAIGrammarTools": false
+    }
+  },
+  "context": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "Return a concise fixture response.",
+        "timestamp": 1700000000000
+      }
+    ]
+  },
+  "options": {
+    "reasoning": "high",
+    "maxTokens": 4096,
+    "maxRetries": 0,
+    "timeoutMs": 10000
+  },
+  "entrypoint": "streamSimple",
+  "turnTwoAppend": [
+    {
+      "role": "user",
+      "content": "Deterministic turn-two follow-up.",
+      "timestamp": 1700000000000
+    }
+  ],
+  "deterministicInjections": {
+    "timestamp": 1700000000000,
+    "sessionId": "session-m4-00000000",
+    "requestId": "request-fixture-0001",
+    "toolCallIds": [
+      "call_fixture_0001",
+      "call_fixture_0002"
+    ]
+  }
+}

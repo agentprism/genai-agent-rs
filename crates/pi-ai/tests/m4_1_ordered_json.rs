@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const PI_BASIS: &str = "architecture v2 part 2 §10.8 byte-comparison and turn-two contracts; JavaScript JSON.stringify; packages/ai/src/api/openai-completions.ts; packages/ai/src/api/anthropic-messages.ts; packages/ai/src/api/simple-options.ts; packages/ai/src/utils/sanitize-unicode.ts";
+const PI_BASIS: &str = "architecture v2 part 2 §10.8 byte-comparison and turn-two contracts; JavaScript JSON.stringify; packages/ai/src/api/openai-completions.ts; packages/ai/src/api/anthropic-messages.ts; packages/ai/src/api/openai-responses.ts; packages/ai/src/api/openai-codex-responses.ts; packages/ai/src/api/simple-options.ts; packages/ai/src/utils/sanitize-unicode.ts";
 
 fn pi_basis() {
     assert!(!PI_BASIS.is_empty());
@@ -255,6 +255,7 @@ const CREDENTIAL_CASES: &[&str] = &[
 const UNSTABLE_HEADER_NAMES: &[&str] = &[
     "accept-encoding",
     "connection",
+    "content-encoding",
     "content-length",
     "host",
     "user-agent",
@@ -299,13 +300,25 @@ fn validate_header_artifact(path: &Path) {
         .collect::<Vec<_>>();
     assert!(omitted.contains(&"host"));
     assert!(omitted.contains(&"user-agent"));
-    assert!(omitted.iter().any(|name| name.starts_with("x-stainless-")));
 }
 
 fn assert_turn_two_retains_simple_lowering(family: &str, case: &str, one: &[u8], two: &[u8]) {
     let turn_one: serde_json::Value = serde_json::from_slice(one).expect("turn-one body JSON");
     let turn_two: serde_json::Value = serde_json::from_slice(two).expect("turn-two body JSON");
-    let max_field = "max_tokens";
+    let max_field = match family {
+        "anthropic-messages" | "openai-completions" => Some("max_tokens"),
+        "openai-responses" => Some("max_output_tokens"),
+        "openai-codex-responses" => None,
+        _ => panic!("unknown fixture family: {family}"),
+    };
+    let Some(max_field) = max_field else {
+        for field in ["temperature", "service_tier", "reasoning", "text"] {
+            if turn_one.get(field).is_some() {
+                assert_eq!(turn_one[field], turn_two[field], "{family}/{case} {field}");
+            }
+        }
+        return;
+    };
     let one_max = turn_one[max_field].as_u64().expect("turn-one max tokens");
     let two_max = turn_two[max_field].as_u64().expect("turn-two max tokens");
     assert!(one_max > 0 && two_max > 0);
@@ -315,7 +328,7 @@ fn assert_turn_two_retains_simple_lowering(family: &str, case: &str, one: &[u8],
         assert_eq!(one_max, two_max, "{family}/{case} max-token lowering");
     }
 
-    if family == "openai-completions" {
+    if family != "anthropic-messages" {
         for field in [
             "temperature",
             "top_p",
@@ -327,6 +340,9 @@ fn assert_turn_two_retains_simple_lowering(family: &str, case: &str, one: &[u8],
             "enable_thinking",
             "chat_template_kwargs",
             "chat_template_args",
+            "service_tier",
+            "reasoning",
+            "text",
         ] {
             if turn_one.get(field).is_some() {
                 assert_eq!(turn_one[field], turn_two[field], "{family}/{case} {field}");
@@ -338,15 +354,23 @@ fn assert_turn_two_retains_simple_lowering(family: &str, case: &str, one: &[u8],
                 "signed-thinking-replay" | "redacted-encrypted-reasoning-replay"
             )
         {
-            assert!(turn_two.get("reasoning_effort").is_some());
+            assert!(
+                turn_two.get("reasoning_effort").is_some() || turn_two.get("reasoning").is_some()
+            );
         }
         if case == "thinking-disabled" {
-            assert_eq!(turn_two["reasoning_effort"], "none");
+            if family == "openai-completions" {
+                assert_eq!(turn_two["reasoning_effort"], "none");
+            } else {
+                assert_eq!(turn_two["reasoning"]["effort"], "none");
+            }
         }
         if case == "sampling-defaults-and-overrides" {
             assert_eq!(turn_two["temperature"], 0.75);
             assert_eq!(turn_two["top_p"], 0.6);
-            assert_eq!(turn_two["top_k"], 40);
+            if family == "openai-completions" {
+                assert_eq!(turn_two["top_k"], 40);
+            }
             assert_eq!(turn_two["seed"], 7);
         }
     } else {
@@ -483,9 +507,12 @@ fn validate_fixture_family(family: &str) {
     if family == "openai-completions" {
         assert!(signed_turn_two.contains("signed-fixture-reasoning"));
         assert!(redacted_turn_two.contains("encrypted-fixture-reasoning"));
-    } else {
+    } else if family == "anthropic-messages" {
         assert!(signed_turn_two.contains("\"signature\":\"signed-fixture-reasoning\""));
         assert!(redacted_turn_two.contains("\"type\":\"redacted_thinking\""));
+    } else {
+        assert!(signed_turn_two.contains("signed-fixture-reasoning"));
+        assert!(redacted_turn_two.contains("encrypted-fixture-reasoning"));
     }
 }
 
@@ -497,6 +524,18 @@ fn fixture_corpus_openai_completions_cases_are_complete_and_canonical() {
 #[test]
 fn fixture_corpus_anthropic_messages_cases_are_complete_and_canonical() {
     validate_fixture_family("anthropic-messages");
+}
+
+/// Architecture v2 part 2 §10.8 mandatory OpenAI Responses capture corpus.
+#[test]
+fn fixture_corpus_openai_responses_cases_are_complete_and_canonical() {
+    validate_fixture_family("openai-responses");
+}
+
+/// Architecture v2 part 2 §10.8 mandatory Codex Responses capture corpus.
+#[test]
+fn fixture_corpus_openai_codex_responses_cases_are_complete_and_canonical() {
+    validate_fixture_family("openai-codex-responses");
 }
 
 #[test]

@@ -326,6 +326,7 @@ fn resolved_request(
         request_options: pi_ai::ApiRequestOptions::default(),
         endpoint: Url::parse("https://effective.example/v1").unwrap(),
         headers: headers(&[("content-type", "application/json")]),
+        auth_headers: HeaderMap::new(),
         api_key: None,
         api: ApiId::new("test-api"),
         payload_transforms: Arc::from(payload_transforms),
@@ -348,6 +349,116 @@ fn run_http(
 ) -> Result<AssistantStream, AiError> {
     let api = HttpChatApi::new(handler, transport).with_retry_sleeper(sleeper);
     block_on(api.stream(request, CancellationToken::new()))
+}
+
+struct StaticLocalHttpTransport {
+    status: u16,
+    body: Vec<u8>,
+}
+
+impl LocalHttpTransport for StaticLocalHttpTransport {
+    fn execute(
+        &self,
+        _request: HttpRequest,
+        _cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<LocalHttpResponse, TransportError>> {
+        let status = self.status;
+        let body = self.body.clone();
+        Box::pin(async move {
+            Ok(LocalHttpResponse::from_bytes(
+                status,
+                HeaderMap::new(),
+                body,
+            ))
+        })
+    }
+}
+
+struct PendingErrorBodyTransport;
+
+impl HttpTransport for PendingErrorBodyTransport {
+    fn execute(
+        &self,
+        _request: HttpRequest,
+        _cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<HttpResponse, TransportError>> {
+        Box::pin(async {
+            Ok(HttpResponse {
+                status: 503,
+                headers: HeaderMap::new(),
+                diagnostics: Vec::new(),
+                notify_observers: true,
+                body: Box::pin(futures_util::stream::pending()),
+            })
+        })
+    }
+}
+
+struct LocalPendingErrorBodyTransport;
+
+impl LocalHttpTransport for LocalPendingErrorBodyTransport {
+    fn execute(
+        &self,
+        _request: HttpRequest,
+        _cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<LocalHttpResponse, TransportError>> {
+        Box::pin(async {
+            Ok(LocalHttpResponse {
+                status: 503,
+                headers: HeaderMap::new(),
+                diagnostics: Vec::new(),
+                notify_observers: true,
+                body: Box::pin(futures_util::stream::pending()),
+            })
+        })
+    }
+}
+
+struct InspectingRetryClassifier(Arc<Mutex<Vec<String>>>);
+
+impl RetryClassifier for InspectingRetryClassifier {
+    fn classify(&self, failure: &AttemptFailure, _policy: &RetryPolicy) -> RetryDecision {
+        if let AttemptFailure::Http { message, .. } = failure {
+            lock(&self.0).push(message.clone());
+        }
+        RetryDecision::DoNotRetry
+    }
+}
+
+struct LocalInspectingRetryClassifier(Rc<RefCell<Vec<String>>>);
+
+impl LocalRetryClassifier for LocalInspectingRetryClassifier {
+    fn classify(&self, failure: &AttemptFailure, _policy: &RetryPolicy) -> RetryDecision {
+        if let AttemptFailure::Http { message, .. } = failure {
+            self.0.borrow_mut().push(message.clone());
+        }
+        RetryDecision::DoNotRetry
+    }
+}
+
+fn local_resolved_request(
+    retry_classifier: Rc<dyn LocalRetryClassifier>,
+    max_retries: u32,
+) -> LocalResolvedApiRequest {
+    let send = resolved_request(Vec::new(), Vec::new(), Vec::new(), max_retries);
+    LocalResolvedApiRequest {
+        model: send.model,
+        context: send.context,
+        options: send.options,
+        full_options: send.full_options,
+        request_options: send.request_options,
+        endpoint: send.endpoint,
+        headers: send.headers,
+        auth_headers: send.auth_headers,
+        api_key: send.api_key,
+        api: send.api,
+        payload_transforms: Rc::from([]),
+        response_observers: Rc::from([]),
+        attempt_middleware: Rc::from([]),
+        retry_policy: send.retry_policy,
+        timeout: send.timeout,
+        retry_classifier,
+    }
 }
 
 fn assert_debug_redacted(label: &str, value: &impl std::fmt::Debug) {
@@ -380,8 +491,12 @@ fn request_debug_redacts_secrets() {
         method: Method::POST,
         url: secret_url.clone(),
         headers: secret_headers.clone(),
+        auth_headers: secret_headers.clone(),
+        session_id: Some(SECRET_SENTINEL.into()),
         body: SECRET_SENTINEL.as_bytes().to_vec(),
         timeout: Some(Duration::from_secs(1)),
+        transport: None,
+        websocket_connect_timeout: None,
         attempt: 2,
     };
     assert_debug_redacted("HttpRequest", &request);
@@ -445,6 +560,129 @@ fn request_debug_redacts_secrets() {
         ..SimpleGenerationOptions::default()
     };
     assert_debug_redacted("SimpleGenerationOptions", &secret_options);
+}
+
+/// Architecture v2 part 2 §10.1 `stream_error_sanitizes_secrets`; real Send
+/// and Local HTTP establishment paths. Raw non-2xx response bytes are
+/// available to retry classification but never become `AiError` text.
+#[test]
+fn stream_error_sanitizes_secrets_http_pipeline_send_and_local() {
+    let body = format!("provider denied {SECRET_SENTINEL}; body-secret-plain").into_bytes();
+    let mut send_request = resolved_request(Vec::new(), Vec::new(), Vec::new(), 0);
+    send_request.headers = headers(&[("authorization", SECRET_SENTINEL)]);
+    send_request.auth_headers = send_request.headers.clone();
+    let send_error = run_http(
+        Arc::new(TestHandler::new(b"{}")),
+        Arc::new(FakeHttpTransport::new([TransportOutcome::Response {
+            status: 403,
+            headers: HeaderMap::new(),
+            body: body.clone(),
+        }])),
+        Arc::new(ImmediateSleeper::default()),
+        send_request,
+    )
+    .expect_err("Send provider rejection");
+
+    let local_api = LocalHttpChatApi::new(
+        Rc::new(RcLocalHandler(Rc::new(Cell::new(0)))),
+        Rc::new(StaticLocalHttpTransport { status: 403, body }),
+    );
+    let mut local_request =
+        local_resolved_request(Rc::new(LocalDefaultRetryClassifier::default()), 0);
+    local_request.headers = headers(&[("authorization", SECRET_SENTINEL)]);
+    local_request.auth_headers = local_request.headers.clone();
+    let local_error = block_on(local_api.stream(local_request, CancellationToken::new()))
+        .expect_err("local provider rejection");
+
+    for error in [&send_error, &local_error] {
+        assert_eq!(error.status, Some(403));
+        assert!(
+            error
+                .message
+                .contains("provider rejected request before streaming")
+        );
+        assert!(!error.message.contains(SECRET_SENTINEL));
+        assert!(!error.message.contains("body-secret-plain"));
+    }
+}
+
+/// Architecture v2 part 2 §2.4/§9.5/§10.1. Non-success bodies are capped at
+/// 64 KiB for classifier input and remain interruptible through the portable
+/// cancellation token in both trait families.
+#[test]
+fn provider_error_body_read_is_bounded_and_cancellable_send_and_local() {
+    let mut oversized = vec![b'x'; 128 * 1024];
+    oversized.extend_from_slice(b"tail-marker-must-not-be-read");
+
+    let send_observed = Arc::new(Mutex::new(Vec::new()));
+    let mut send_request = resolved_request(Vec::new(), Vec::new(), Vec::new(), 1);
+    send_request.retry_classifier = Arc::new(InspectingRetryClassifier(Arc::clone(&send_observed)));
+    let send_error = run_http(
+        Arc::new(TestHandler::new(b"{}")),
+        Arc::new(FakeHttpTransport::new([TransportOutcome::Response {
+            status: 503,
+            headers: HeaderMap::new(),
+            body: oversized.clone(),
+        }])),
+        Arc::new(ImmediateSleeper::default()),
+        send_request,
+    )
+    .expect_err("bounded Send rejection");
+    assert!(!send_error.message.contains("tail-marker"));
+    assert_eq!(lock(&send_observed)[0].len(), 64 * 1024);
+    assert!(!lock(&send_observed)[0].contains("tail-marker"));
+
+    let local_observed = Rc::new(RefCell::new(Vec::new()));
+    let local_api = LocalHttpChatApi::new(
+        Rc::new(RcLocalHandler(Rc::new(Cell::new(0)))),
+        Rc::new(StaticLocalHttpTransport {
+            status: 503,
+            body: oversized,
+        }),
+    );
+    let local_error = block_on(local_api.stream(
+        local_resolved_request(
+            Rc::new(LocalInspectingRetryClassifier(Rc::clone(&local_observed))),
+            1,
+        ),
+        CancellationToken::new(),
+    ))
+    .expect_err("bounded local rejection");
+    assert!(!local_error.message.contains("tail-marker"));
+    assert_eq!(local_observed.borrow()[0].len(), 64 * 1024);
+    assert!(!local_observed.borrow()[0].contains("tail-marker"));
+
+    let send_api = HttpChatApi::new(
+        Arc::new(TestHandler::new(b"{}")),
+        Arc::new(PendingErrorBodyTransport),
+    );
+    let send_cancellation = CancellationToken::new();
+    let mut send = Box::pin(send_api.stream(
+        resolved_request(Vec::new(), Vec::new(), Vec::new(), 0),
+        send_cancellation.clone(),
+    ));
+    assert!(poll_once(send.as_mut()).is_pending());
+    send_cancellation.cancel();
+    let Poll::Ready(Err(send_cancelled)) = poll_once(send.as_mut()) else {
+        panic!("Send error-body read did not observe cancellation")
+    };
+    assert_eq!(send_cancelled.kind, AiErrorKind::Cancelled);
+
+    let local_api = LocalHttpChatApi::new(
+        Rc::new(RcLocalHandler(Rc::new(Cell::new(0)))),
+        Rc::new(LocalPendingErrorBodyTransport),
+    );
+    let local_cancellation = CancellationToken::new();
+    let mut local = Box::pin(local_api.stream(
+        local_resolved_request(Rc::new(LocalDefaultRetryClassifier::default()), 0),
+        local_cancellation.clone(),
+    ));
+    assert!(poll_once(local.as_mut()).is_pending());
+    local_cancellation.cancel();
+    let Poll::Ready(Err(local_cancelled)) = poll_once(local.as_mut()) else {
+        panic!("local error-body read did not observe cancellation")
+    };
+    assert_eq!(local_cancelled.kind, AiErrorKind::Cancelled);
 }
 
 #[test]
@@ -832,6 +1070,8 @@ fn failed_events() -> Vec<AssistantEvent> {
         requested_model: model.clone(),
         response_model: None,
         response_id: None,
+        end_turn: None,
+        diagnostics: Vec::new(),
         content: Vec::new(),
         replay: ReplayEnvelope::new(ReplayScope::new(
             provider.clone(),
@@ -840,6 +1080,7 @@ fn failed_events() -> Vec<AssistantEvent> {
             model.clone(),
         )),
         usage: Usage::zero(UsageSource::Unknown),
+        cost: None,
         finish: AssistantFinish {
             reason: AssistantFinishReason::Error,
             raw_provider_reason: None,
@@ -881,6 +1122,62 @@ impl AttemptMiddleware for AttemptHeader {
             Ok(())
         })
     }
+}
+
+struct HostileCredentialOverlay;
+
+impl AttemptMiddleware for HostileCredentialOverlay {
+    fn before_attempt<'a>(
+        &'a self,
+        _attempt: u32,
+        request: &'a mut HttpRequest,
+    ) -> SendBoxFuture<'a, Result<(), MiddlewareError>> {
+        request.headers.insert(
+            HeaderName::from_static("authorization"),
+            HeaderValue::from_static("Bearer hostile-logical-overlay"),
+        );
+        request.auth_headers.insert(
+            HeaderName::from_static("authorization"),
+            HeaderValue::from_static("Bearer hostile-snapshot-overlay"),
+        );
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// Architecture v2 part 2 §2.6 correction; Codex's final transport must see
+/// the credential contribution even if attempt middleware mutates every
+/// public request field before dispatch.
+#[test]
+fn attempt_middleware_cannot_replace_credential_header_snapshot() {
+    let transport = Arc::new(FakeHttpTransport::new([TransportOutcome::Response {
+        status: 200,
+        headers: HeaderMap::new(),
+        body: Vec::new(),
+    }]));
+    let mut request = resolved_request(
+        Vec::new(),
+        Vec::new(),
+        vec![Arc::new(HostileCredentialOverlay)],
+        0,
+    );
+    request.auth_headers = headers(&[("authorization", "Bearer credential")]);
+    run_http(
+        Arc::new(TestHandler::new(b"{}")),
+        Arc::clone(&transport),
+        Arc::new(ImmediateSleeper::default()),
+        request,
+    )
+    .unwrap();
+
+    let requests = lock(&transport.requests);
+    assert_eq!(
+        requests[0].headers["authorization"],
+        "Bearer hostile-logical-overlay"
+    );
+    assert_eq!(
+        requests[0].auth_headers["authorization"],
+        "Bearer credential"
+    );
 }
 
 #[test]

@@ -569,8 +569,12 @@ fn exchange_request(code: String, verifier: String) -> Result<HttpRequest, AuthE
             )
         })?,
         headers,
+        auth_headers: HeaderMap::new(),
+        session_id: None,
         body,
         timeout: Some(TOKEN_EXCHANGE_TIMEOUT),
+        transport: None,
+        websocket_connect_timeout: None,
         attempt: 0,
     })
 }

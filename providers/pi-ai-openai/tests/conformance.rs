@@ -1,25 +1,27 @@
 use futures_util::{StreamExt, stream};
 use http::{HeaderMap, HeaderValue};
 use pi_ai::{
-    ApiFamily, ApiModelConfig, AssistantEvent, AssistantFinish, AssistantFinishReason,
-    AssistantMessage, AuthAnswer, AuthEvent, AuthHostCapabilities, AuthInteraction,
-    AuthInteractionError, AuthPrompt, CONTEXT_SAFETY_TOKENS, CacheControlFormat, CacheRetention,
-    CacheWriteRetention, CacheWriteRetentionPricing, CancellationToken, ChatTemplateKwargValue,
-    ChatTemplateValues, ChatTemplateVariable, ChatTemplateVariableName, CommonModelDescriptor,
-    ConstrainedSampling, ConstrainedSamplingConfig, ContentBlock, ContentBlockId, Context,
-    Credential, Currency, DefaultRetryClassifier, DeferredToolsMode, EncodeContext, GrammarFormat,
-    HeaderMapSpec, HeaderTransform, HeaderTransformContext, HttpRequest, HttpResponse,
-    HttpTransport, InMemoryCredentialStore, JsonSchemaStrictMode, LevelSupport,
-    LocalAuthInteraction, LocalBoxFuture, LocalDefaultRetryClassifier, LocalHeaderTransform,
+    ApiFamily, ApiModelConfig, ApiRequestOptions, AssistantEvent, AssistantFinish,
+    AssistantFinishReason, AssistantMessage, AuthAnswer, AuthError, AuthEvent,
+    AuthHostCapabilities, AuthInteraction, AuthInteractionError, AuthPrompt, AuthResolver,
+    CONTEXT_SAFETY_TOKENS, CacheControlFormat, CacheRetention, CacheWriteRetention,
+    CacheWriteRetentionPricing, CancellationToken, ChatTemplateKwargValue, ChatTemplateValues,
+    ChatTemplateVariable, ChatTemplateVariableName, CommonModelDescriptor, ConstrainedSampling,
+    ConstrainedSamplingConfig, ContentBlock, ContentBlockId, Context, Credential, Currency,
+    DefaultRetryClassifier, DeferredToolsMode, EncodeContext, GrammarFormat, HeaderMapSpec,
+    HeaderTransform, HeaderTransformContext, HttpRequest, HttpResponse, HttpTransport,
+    InMemoryCredentialStore, JsonSchemaStrictMode, LevelSupport, LocalAuthInteraction,
+    LocalAuthResolver, LocalBoxFuture, LocalDefaultRetryClassifier, LocalHeaderTransform,
     LocalHttpResponse, LocalHttpTransport, LocalModelRuntime, LocalModels, LocalOAuthAuth,
-    LocalProviderRegistration, LocalRedirectReceiver, LocalResolvedApiRequest, MaxTokensField,
-    Message, MessageId, MiddlewareError, Modality, ModalityCapabilities, ModelDescriptor,
-    ModelLimits, ModelPricing, ModelRef, ModelRequest, ModelRuntime, Models, MoneyRate, OAuthAuth,
-    OAuthCredential, OPENAI_CHAT_REASONING_DETAIL_KIND, OPENAI_CHAT_REASONING_FIELD_KIND,
-    OpenAiAllowedToolsMode, OpenAiCompletions, OpenAiCompletionsCompat, OpenAiCompletionsHandoff,
-    OpenAiCompletionsModelConfig, OpenAiCompletionsOptions, OpenAiCompletionsToolChoice,
-    OpenAiReasoningEffortProvenance, OpenAiReasoningMode, OpenAiReasoningPlan,
-    OpenAiReasoningTokenBudget, OpenAiThinkingFormat, OpenAiThinkingValue, OrderedJsonArray,
+    LocalProviderRegistration, LocalRedirectReceiver, LocalResolveAuthRequest,
+    LocalResolvedApiRequest, MaxTokensField, Message, MessageId, MiddlewareError, Modality,
+    ModalityCapabilities, ModelDescriptor, ModelLimits, ModelPricing, ModelRef, ModelRequest,
+    ModelRuntime, Models, MoneyRate, OAuthAuth, OAuthCredential, OPENAI_CHAT_REASONING_DETAIL_KIND,
+    OPENAI_CHAT_REASONING_FIELD_KIND, OpenAiAllowedToolsMode, OpenAiCompletions,
+    OpenAiCompletionsCompat, OpenAiCompletionsHandoff, OpenAiCompletionsModelConfig,
+    OpenAiCompletionsOptions, OpenAiCompletionsToolChoice, OpenAiReasoningEffortProvenance,
+    OpenAiReasoningMode, OpenAiReasoningPlan, OpenAiReasoningTokenBudget, OpenAiResponses,
+    OpenAiResponsesOptions, OpenAiThinkingFormat, OpenAiThinkingValue, OrderedJsonArray,
     OrderedJsonObject, OrderedJsonValue, OrderedJsonWriter, ProviderOAuthExtra,
     ProviderRegistration, RedirectArrival, RedirectReceiver, RedirectReceiverRequest,
     ReplayApplicability, ReplayCompleteness, ReplayEnvelope, ReplayItem, ReplayItemId, ReplayKind,
@@ -34,7 +36,8 @@ use pi_ai::{
 use pi_ai_openai::{
     LocalOpenRouterOAuth, OpenAiCompletionsDecodeContext, OpenRouterOAuth,
     decode_openai_completions_sse, deepseek_models, deepseek_provider_with_api,
-    local_openai_completions_api, openai_completions_api, openrouter_models,
+    local_openai_completions_api, local_openai_provider, local_openai_responses_api,
+    openai_completions_api, openai_provider, openai_responses_api, openrouter_models,
     openrouter_provider_with_api,
 };
 use serde_json::Value;
@@ -1245,6 +1248,8 @@ fn stream_failure_is_terminal_message() {
     let response = HttpResponse {
         status: 200,
         headers: HeaderMap::new(),
+        diagnostics: Vec::new(),
+        notify_observers: true,
         body: Box::pin(stream::iter(vec![
             Ok(partial_text_sse()),
             Err(TransportError::new("body", "body disconnected")),
@@ -1278,6 +1283,8 @@ fn stream_cancellation_is_terminal_message() {
     let response = HttpResponse {
         status: 200,
         headers: HeaderMap::new(),
+        diagnostics: Vec::new(),
+        notify_observers: true,
         body: Box::pin(stream::iter(vec![
             Ok(partial_text_sse()),
             Ok(br#"data: {"id":"chat-1","model":"fixture-openai-model","choices":[{"delta":{"content":" ignored"},"finish_reason":"stop"}]}
@@ -1325,6 +1332,8 @@ fn openai_local_stream_body_error_preserves_partial_content() {
     let response = LocalHttpResponse {
         status: 200,
         headers: HeaderMap::new(),
+        diagnostics: Vec::new(),
+        notify_observers: true,
         body: Box::pin(stream::iter(vec![
             Ok(partial_text_sse()),
             Err(TransportError::new("body", "local body disconnected")),
@@ -1554,6 +1563,273 @@ fn headers_transform_can_delete_default() {
     assert_final_affinity_headers(&local_requests[0].headers);
 }
 
+/// Architecture v2 part 2 §2.6 and §10.4; pinned Pi basis:
+/// `openai-responses.ts:getClientApiKey` accepts a non-empty explicit
+/// Authorization header without a separately resolved API key.
+#[test]
+fn openai_responses_header_only_auth_send() {
+    let response = responses_empty_response();
+    let transport = Arc::new(FixturePipelineTransport::new([response]));
+    let mut registration =
+        openai_provider(Arc::clone(&transport) as Arc<dyn HttpTransport>).expect("OpenAI provider");
+    registration.auth = Arc::new(AbsentAuth);
+    let model = registration.catalog.snapshot()[0].clone();
+    let models = Models::builder()
+        .provider(registration)
+        .build()
+        .expect("OpenAI Models");
+    let mut headers = HeaderMapSpec::new();
+    headers.insert(
+        "Authorization".into(),
+        Some("Bearer explicit-header-only".into()),
+    );
+    drain_send_runtime(
+        &models,
+        &model,
+        SimpleGenerationOptions {
+            headers,
+            ..Default::default()
+        },
+        "header-only OpenAI Responses request",
+    );
+    assert_eq!(
+        transport.requests.lock().unwrap()[0].headers["authorization"],
+        "Bearer explicit-header-only"
+    );
+}
+
+/// Local trait-family realization of `openai_responses_header_only_auth_send`;
+/// pinned Pi also recognizes Cloudflare AI Gateway's auth header.
+#[test]
+fn openai_responses_header_only_auth_local() {
+    let response = responses_empty_response();
+    let transport = Rc::new(LocalFixturePipelineTransport::new([response]));
+    let mut registration =
+        local_openai_provider(Rc::clone(&transport) as Rc<dyn LocalHttpTransport>)
+            .expect("local OpenAI provider");
+    registration.auth = Rc::new(AbsentAuth);
+    let model = registration.catalog.snapshot()[0].clone();
+    let models = LocalModels::builder()
+        .provider(registration)
+        .build()
+        .expect("local OpenAI Models");
+    let mut headers = HeaderMapSpec::new();
+    headers.insert(
+        "CF-AIG-Authorization".into(),
+        Some("Bearer cloudflare-header-only".into()),
+    );
+    drain_local_runtime(
+        &models,
+        &model,
+        SimpleGenerationOptions {
+            headers,
+            ..Default::default()
+        },
+        "local header-only OpenAI Responses request",
+    );
+    assert_eq!(
+        transport.requests.borrow()[0].headers["cf-aig-authorization"],
+        "Bearer cloudflare-header-only"
+    );
+}
+
+/// Architecture v2 part 2 §2.6; pinned Pi basis:
+/// `openai-responses.ts:getClientApiKey` inspects only caller option headers
+/// before client construction. Model headers and final header transforms
+/// cannot make an otherwise unconfigured request eligible for header-only
+/// authentication.
+#[test]
+fn openai_responses_header_only_auth_requires_explicit_options_send_and_local() {
+    let mut model = pi_ai_openai::openai_models().unwrap().remove(0);
+    model.common.headers.insert(
+        "Authorization".into(),
+        Some("Bearer model-header-only".into()),
+    );
+
+    let send_transport = Arc::new(FixturePipelineTransport::new([responses_empty_response()]));
+    let send_registration = ProviderRegistration::builder("openai")
+        .base_url(model.common.base_url.clone())
+        .auth(Arc::new(AbsentAuth))
+        .models(vec![model.clone()])
+        .api(
+            OpenAiResponses::API_ID,
+            openai_responses_api(Arc::clone(&send_transport) as Arc<dyn HttpTransport>),
+        )
+        .build()
+        .unwrap();
+    let send_models = Models::builder()
+        .provider(send_registration)
+        .build()
+        .unwrap();
+    let send_result = futures_executor::block_on(send_models.stream_simple(
+        ModelRequest {
+            model: model.common.model_ref.clone(),
+            context: Context::new(None),
+            options: SimpleGenerationOptions::default(),
+        },
+        CancellationToken::new(),
+    ));
+    assert!(send_result.is_err());
+    assert!(send_transport.requests.lock().unwrap().is_empty());
+
+    let local_model = pi_ai_openai::openai_models().unwrap().remove(0);
+    let local_transport = Rc::new(LocalFixturePipelineTransport::new([
+        responses_empty_response(),
+    ]));
+    let local_registration = LocalProviderRegistration::builder("openai")
+        .base_url(local_model.common.base_url.clone())
+        .auth(Rc::new(AbsentAuth))
+        .models(vec![local_model.clone()])
+        .api(
+            OpenAiResponses::API_ID,
+            local_openai_responses_api(Rc::clone(&local_transport) as Rc<dyn LocalHttpTransport>),
+        )
+        .build()
+        .unwrap();
+    let local_models = LocalModels::builder()
+        .provider(local_registration)
+        .header_transform(Rc::new(LocalHeaderOnlyAuthGrant))
+        .build()
+        .unwrap();
+    let local_result = futures_executor::block_on(local_models.stream_simple(
+        ModelRequest {
+            model: local_model.common.model_ref,
+            context: Context::new(None),
+            options: SimpleGenerationOptions::default(),
+        },
+        CancellationToken::new(),
+    ));
+    assert!(local_result.is_err());
+    assert!(local_transport.requests.borrow().is_empty());
+}
+
+/// Architecture v2 part 2 §3.2/§9.2/§10.4; pinned Pi basis:
+/// `openai-responses.ts:createClient` applies session affinity after model
+/// headers and before explicit request headers in both trait families.
+#[test]
+fn openai_responses_full_affinity_follows_model_headers_send_and_local() {
+    let mut model = pi_ai_openai::openai_models().unwrap().remove(0);
+    model
+        .common
+        .headers
+        .insert("session_id".into(), Some("model-session".into()));
+    model
+        .common
+        .headers
+        .insert("x-client-request-id".into(), Some("model-request".into()));
+    let options = OpenAiResponsesOptions {
+        max_output_tokens: None,
+        temperature: None,
+        sampling: OrderedJsonObject::new(),
+        reasoning_effort: None,
+        reasoning_summary: None,
+        service_tier: None,
+        tool_choice: None,
+        cache_retention: CacheRetention::Short,
+        session_id: Some("full-session".into()),
+    };
+    let mut request_headers = HeaderMapSpec::new();
+    request_headers.insert(
+        "authorization".into(),
+        Some("Bearer explicit-header".into()),
+    );
+    let request_options = ApiRequestOptions {
+        headers: request_headers,
+        ..Default::default()
+    };
+
+    let send_transport = Arc::new(FixturePipelineTransport::new([responses_empty_response()]));
+    let send_registration = ProviderRegistration::builder("openai")
+        .base_url(model.common.base_url.clone())
+        .auth(Arc::new(AbsentAuth))
+        .models(vec![model.clone()])
+        .api(
+            OpenAiResponses::API_ID,
+            openai_responses_api(Arc::clone(&send_transport) as Arc<dyn HttpTransport>),
+        )
+        .build()
+        .unwrap();
+    let send_models = Models::builder()
+        .provider(send_registration)
+        .build()
+        .unwrap();
+    let send_stream = futures_executor::block_on(
+        send_models.stream_api_with_request_options::<OpenAiResponses>(
+            model.common.model_ref.clone(),
+            Context::new(None),
+            options.clone(),
+            request_options.clone(),
+            CancellationToken::new(),
+        ),
+    )
+    .unwrap();
+    futures_executor::block_on(async { send_stream.collect::<Vec<_>>().await });
+    let send_headers = &send_transport.requests.lock().unwrap()[0].headers;
+    assert_eq!(send_headers["session_id"], "full-session");
+    assert_eq!(send_headers["x-client-request-id"], "full-session");
+
+    let local_transport = Rc::new(LocalFixturePipelineTransport::new([
+        responses_empty_response(),
+    ]));
+    let local_registration = LocalProviderRegistration::builder("openai")
+        .base_url(model.common.base_url.clone())
+        .auth(Rc::new(AbsentAuth))
+        .models(vec![model.clone()])
+        .api(
+            OpenAiResponses::API_ID,
+            local_openai_responses_api(Rc::clone(&local_transport) as Rc<dyn LocalHttpTransport>),
+        )
+        .build()
+        .unwrap();
+    let local_models = LocalModels::builder()
+        .provider(local_registration)
+        .build()
+        .unwrap();
+    let local_stream = futures_executor::block_on(
+        local_models.stream_api_with_request_options::<OpenAiResponses>(
+            model.common.model_ref,
+            Context::new(None),
+            options,
+            request_options,
+            CancellationToken::new(),
+        ),
+    )
+    .unwrap();
+    futures_executor::block_on(async { local_stream.collect::<Vec<_>>().await });
+    let local_headers = &local_transport.requests.borrow()[0].headers;
+    assert_eq!(local_headers["session_id"], "full-session");
+    assert_eq!(local_headers["x-client-request-id"], "full-session");
+}
+
+fn responses_empty_response() -> Vec<u8> {
+    br#"data: {"type":"response.done","response":{"id":"resp_header","status":"completed","output":[]}}
+
+"#
+    .to_vec()
+}
+
+struct AbsentAuth;
+
+impl AuthResolver for AbsentAuth {
+    fn resolve(
+        &self,
+        _request: ResolveAuthRequest,
+        _cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<Option<pi_ai::ResolvedAuth>, AuthError>> {
+        Box::pin(async { Ok(None) })
+    }
+}
+
+impl LocalAuthResolver for AbsentAuth {
+    fn resolve(
+        &self,
+        _request: LocalResolveAuthRequest,
+        _cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<Option<pi_ai::ResolvedAuth>, AuthError>> {
+        Box::pin(async { Ok(None) })
+    }
+}
+
 struct AffinityHeaderEditor;
 
 impl HeaderTransform for AffinityHeaderEditor {
@@ -1576,6 +1852,22 @@ impl LocalHeaderTransform for LocalAffinityHeaderEditor {
         headers: &'a mut HeaderMap,
     ) -> LocalBoxFuture<'a, Result<(), MiddlewareError>> {
         edit_affinity_headers(headers);
+        Box::pin(async { Ok(()) })
+    }
+}
+
+struct LocalHeaderOnlyAuthGrant;
+
+impl LocalHeaderTransform for LocalHeaderOnlyAuthGrant {
+    fn transform<'a>(
+        &'a self,
+        _context: HeaderTransformContext<'a>,
+        headers: &'a mut HeaderMap,
+    ) -> LocalBoxFuture<'a, Result<(), MiddlewareError>> {
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer transform-header-only"),
+        );
         Box::pin(async { Ok(()) })
     }
 }
@@ -1903,6 +2195,7 @@ fn resolved_request(model: ModelDescriptor) -> ResolvedApiRequest {
         request_options: pi_ai::ApiRequestOptions::default(),
         endpoint,
         headers: HeaderMap::new(),
+        auth_headers: HeaderMap::new(),
         api_key: None,
         api: OpenAiCompletions::API_ID.into(),
         payload_transforms: Arc::from([]),
@@ -1924,6 +2217,7 @@ fn local_resolved_request(model: ModelDescriptor) -> LocalResolvedApiRequest {
         request_options: pi_ai::ApiRequestOptions::default(),
         endpoint,
         headers: HeaderMap::new(),
+        auth_headers: HeaderMap::new(),
         api_key: None,
         api: OpenAiCompletions::API_ID.into(),
         payload_transforms: Rc::from([]),
@@ -2984,9 +3278,12 @@ fn fixture_assistant(
         requested_model: requested_model.into(),
         response_model: None,
         response_id: None,
+        end_turn: None,
+        diagnostics: Vec::new(),
         content,
         replay,
         usage: fixture_usage(&value["usage"]),
+        cost: None,
         finish: AssistantFinish {
             reason: match value["stopReason"].as_str().unwrap_or("stop") {
                 "stop" => AssistantFinishReason::Stop,
@@ -3254,6 +3551,8 @@ fn assistant_with_thinking_detail() -> AssistantMessage {
         requested_model: "fixture-openai-model".into(),
         response_model: None,
         response_id: Some("chat-1".into()),
+        end_turn: None,
+        diagnostics: Vec::new(),
         content: vec![ContentBlock::Thinking {
             id: block_id.clone(),
             text: "thought".into(),
@@ -3282,6 +3581,7 @@ fn assistant_with_thinking_detail() -> AssistantMessage {
             }],
         },
         usage: Usage::zero(UsageSource::ProviderReported),
+        cost: None,
         finish: AssistantFinish {
             reason: AssistantFinishReason::Stop,
             raw_provider_reason: Some("stop".into()),
@@ -3299,6 +3599,8 @@ fn assistant_with_tool_call() -> AssistantMessage {
         requested_model: "fixture-openai-model".into(),
         response_model: None,
         response_id: Some("chat-tool".into()),
+        end_turn: None,
+        diagnostics: Vec::new(),
         content: vec![ContentBlock::ToolCall {
             id: ContentBlockId::new("tool-block-1"),
             call: ToolCall {
@@ -3314,6 +3616,7 @@ fn assistant_with_tool_call() -> AssistantMessage {
             "fixture-openai-model",
         )),
         usage: Usage::zero(UsageSource::ProviderReported),
+        cost: None,
         finish: AssistantFinish {
             reason: AssistantFinishReason::ToolUse,
             raw_provider_reason: Some("tool_calls".into()),

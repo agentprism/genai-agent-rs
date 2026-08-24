@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "method": "POST",
+  "path": "/v1/responses",
+  "headers": {
+    "accept": "application/json",
+    "authorization": "[REDACTED]",
+    "content-type": "application/json",
+    "session_id": "session-m4-00000000",
+    "x-client-request-id": "session-m4-00000000"
+  },
+  "omittedRuntimeHeaders": [
+    "accept-encoding",
+    "connection",
+    "content-length",
+    "host",
+    "user-agent",
+    "x-stainless-arch",
+    "x-stainless-lang",
+    "x-stainless-os",
+    "x-stainless-package-version",
+    "x-stainless-retry-count",
+    "x-stainless-runtime",
+    "x-stainless-runtime-version",
+    "x-stainless-timeout"
+  ]
+}

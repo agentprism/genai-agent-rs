@@ -258,6 +258,8 @@ fn anthropic_complete_replay_item_is_found_after_message_round_trip() {
         requested_model: source.requested_model.clone(),
         response_model: Some(source.produced_by_model.clone()),
         response_id: Some("msg_provider_0".into()),
+        end_turn: None,
+        diagnostics: Vec::new(),
         content: vec![ContentBlock::Thinking {
             id: ContentBlockId::new("b0"),
             text: "reasoning".into(),
@@ -276,6 +278,7 @@ fn anthropic_complete_replay_item_is_found_after_message_round_trip() {
             )],
         },
         usage: usage(),
+        cost: None,
         finish: finish(AssistantFinishReason::Stop),
         timestamp: Timestamp::from_unix_millis(10),
     };
@@ -324,6 +327,8 @@ fn persisted_openai_responses_message_round_trip() {
         requested_model: source.requested_model.clone(),
         response_model: None,
         response_id: Some("resp_123".into()),
+        end_turn: None,
+        diagnostics: Vec::new(),
         content: vec![ContentBlock::Text {
             id: ContentBlockId::new("b1"),
             text: "I found the issue.".into(),
@@ -342,6 +347,7 @@ fn persisted_openai_responses_message_round_trip() {
             )],
         },
         usage: usage(),
+        cost: None,
         finish: finish(AssistantFinishReason::Stop),
         timestamp: Timestamp::from_unix_millis(20),
     };
@@ -705,6 +711,11 @@ fn all_api_model_config_variants_round_trip() {
             sampling_defaults: OrderedJsonObject::new(),
         }),
         ApiModelConfig::OpenAiResponses(OpenAiResponsesModelConfig {
+            compat: OpenAiResponsesCompat::default(),
+            thinking_levels: empty_level_map(),
+            sampling_defaults: OrderedJsonObject::new(),
+        }),
+        ApiModelConfig::OpenAiCodexResponses(OpenAiResponsesModelConfig {
             compat: OpenAiResponsesCompat::default(),
             thinking_levels: empty_level_map(),
             sampling_defaults: OrderedJsonObject::new(),

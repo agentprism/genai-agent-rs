@@ -534,6 +534,8 @@ fn token_request(body: OrderedJsonObject) -> Result<HttpRequest, AuthError> {
         url: Url::parse(TOKEN_URL)
             .map_err(|error| AuthError::new("anthropic_oauth", error.to_string()))?,
         headers,
+        auth_headers: HeaderMap::new(),
+        session_id: None,
         body: OrderedJsonWriter::to_vec(&body.into()).map_err(|error| {
             AuthError::new(
                 "anthropic_oauth",
@@ -541,6 +543,8 @@ fn token_request(body: OrderedJsonObject) -> Result<HttpRequest, AuthError> {
             )
         })?,
         timeout: Some(TOKEN_TIMEOUT),
+        transport: None,
+        websocket_connect_timeout: None,
         attempt: 0,
     })
 }

@@ -59,6 +59,8 @@ fn assistant_message(
         requested_model: ModelId::new("gpt-test"),
         response_model: Some(ModelId::new("gpt-test-2026-08-01")),
         response_id: Some("response-1".into()),
+        end_turn: None,
+        diagnostics: Vec::new(),
         content: vec![ContentBlock::Text {
             id: ContentBlockId::new("text-0"),
             text: text.into(),
@@ -70,6 +72,7 @@ fn assistant_message(
             "gpt-test-2026-08-01",
         )),
         usage: message_usage,
+        cost: None,
         finish: AssistantFinish {
             reason,
             raw_provider_reason: None,

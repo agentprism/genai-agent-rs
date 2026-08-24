@@ -2,8 +2,8 @@
 //! and part 2 §1.2 and §2.1.
 
 use crate::{
-    ApiId, ContentBlockId, MessageId, ModelId, ProviderId, ReplayEnvelope, ReplayItemId, Timestamp,
-    ToolCallId, Usage, VersionedExtension,
+    ApiId, ContentBlockId, Cost, MessageId, ModelId, ProviderId, ReplayEnvelope, ReplayItemId,
+    Timestamp, ToolCallId, Usage, VersionedExtension,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::{Value, value::RawValue};
@@ -138,6 +138,15 @@ pub struct AssistantMessage {
     pub response_model: Option<ModelId>,
     /// Provider response identifier when reported.
     pub response_id: Option<String>,
+    /// Provider indication that the model explicitly ended its turn.
+    ///
+    /// Pinned Pi currently exposes this only for ChatGPT Codex Responses and
+    /// treats it as diagnostic metadata rather than agent-loop control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_turn: Option<bool>,
+    /// Redacted provider/runtime diagnostics retained across persistence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<AssistantMessageDiagnostic>,
     /// Ordered displayable and executable canonical content.
     #[serde(default, deserialize_with = "deserialize_null_vec")]
     pub content: Vec<ContentBlock>,
@@ -145,10 +154,64 @@ pub struct AssistantMessage {
     pub replay: ReplayEnvelope,
     /// Last authoritative cumulative response usage.
     pub usage: Usage,
+    /// Provider-priced monetary cost for this response, when calculated.
+    ///
+    /// Cost remains distinct from token usage (Architecture v2 part 1 §3.9)
+    /// and is populated by the API family that normalizes the response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<Cost>,
     /// Terminal finish metadata.
     pub finish: AssistantFinish,
     /// Creation time in Unix milliseconds.
     pub timestamp: Timestamp,
+}
+
+/// Schema version for persisted assistant diagnostics.
+pub const ASSISTANT_MESSAGE_DIAGNOSTIC_SCHEMA_VERSION: u32 = 1;
+
+/// Provider diagnostic error-code domain from pinned Pi.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DiagnosticErrorCode {
+    /// String-valued transport or provider code.
+    String(String),
+    /// Number-valued host or provider code.
+    Number(serde_json::Number),
+}
+
+/// Redacted error identity stored inside an assistant diagnostic.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DiagnosticErrorInfo {
+    /// Error class or transport category when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Secret-free display text.
+    pub message: String,
+    /// Sanitized stack text when a host deliberately retains one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<String>,
+    /// Optional stable provider or transport code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<DiagnosticErrorCode>,
+}
+
+/// Versioned redacted provider/runtime diagnostic attached to an assistant
+/// message.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AssistantMessageDiagnostic {
+    /// Persisted diagnostic schema version.
+    pub schema_version: u32,
+    /// Open diagnostic kind such as `provider_transport_failure`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Time at which the diagnostic was observed.
+    pub timestamp: Timestamp,
+    /// Sanitized failure information, when the diagnostic records an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<DiagnosticErrorInfo>,
+    /// Secret-free structured details.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub details: BTreeMap<String, Value>,
 }
 
 /// Canonical tool-result transcript message (Architecture v2 part 1 §3.1).

@@ -7,6 +7,8 @@ const PINNED_COMMIT = "c49906ec77788625aacbdc53ebca6fbe65bd20f5";
 const FIXTURE_TIMESTAMP = 1_700_000_000_000;
 const FIXTURE_SESSION_ID = "session-m4-00000000";
 const FIXTURE_API_KEY = "fixture-api-key-never-forwarded";
+const FIXTURE_CODEX_API_KEY =
+	"eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjb3VudC1maXh0dXJlIn19.signature";
 const TOOL_CALL_1 = "call_fixture_0001";
 const TOOL_CALL_2 = "call_fixture_0002";
 const PNG_1X1 =
@@ -28,7 +30,11 @@ const strictTool = {
 	constrainedSampling: { type: "json_schema", strict: "require" },
 };
 
-type Family = "openai-completions" | "anthropic-messages";
+type Family =
+	| "openai-completions"
+	| "anthropic-messages"
+	| "openai-responses"
+	| "openai-codex-responses";
 type ResponseKind = "text" | "tool" | "multiple-tools" | "signed-reasoning" | "redacted-reasoning";
 type CaptureMode = "hermetic" | "credential-backed";
 
@@ -76,6 +82,14 @@ interface CredentialCaptureResult {
 	case: string;
 	status: "captured" | "not-captured";
 	reason?: string;
+}
+
+function isOpenAiFamily(family: Family): boolean {
+	return family !== "anthropic-messages";
+}
+
+function isResponsesFamily(family: Family): boolean {
+	return family === "openai-responses" || family === "openai-codex-responses";
 }
 
 function user(content: unknown): Record<string, unknown> {
@@ -290,20 +304,18 @@ function commonCases(api: Family, provider: string, model: string): FixtureCase[
 			description: "Default short prompt-cache markers.",
 			context: { ...baseContext(), systemPrompt: "Cache fixture." },
 			options: { cacheRetention: "short", sessionId: FIXTURE_SESSION_ID },
-			modelPatch:
-				api === "openai-completions"
-					? { compat: { cacheControlFormat: "anthropic", supportsLongCacheRetention: true } }
-					: {},
+			modelPatch: api === "openai-completions"
+				? { compat: { cacheControlFormat: "anthropic", supportsLongCacheRetention: true } }
+				: {},
 		},
 		{
 			name: "cache-long",
 			description: "Long prompt-cache markers and one-hour TTL where supported.",
 			context: { ...baseContext(), systemPrompt: "Cache fixture." },
 			options: { cacheRetention: "long", sessionId: FIXTURE_SESSION_ID },
-			modelPatch:
-				api === "openai-completions"
-					? { compat: { cacheControlFormat: "anthropic", supportsLongCacheRetention: true } }
-					: { compat: { supportsLongCacheRetention: true } },
+			modelPatch: api === "openai-completions"
+				? { compat: { cacheControlFormat: "anthropic", supportsLongCacheRetention: true } }
+				: { compat: { supportsLongCacheRetention: true } },
 		},
 		{
 			name: "sampling-defaults-and-overrides",
@@ -325,10 +337,9 @@ function commonCases(api: Family, provider: string, model: string): FixtureCase[
 			name: "strict-tool-schema",
 			description: "Required strict JSON-schema constrained sampling.",
 			context: { messages: [user("Read Cargo.toml.")], tools: [strictTool] },
-			modelPatch:
-				api === "openai-completions"
-					? { compat: { supportsStrictMode: true } }
-					: { compat: { supportsStrictTools: true } },
+			modelPatch: isOpenAiFamily(api)
+				? { compat: { supportsStrictMode: true } }
+				: { compat: { supportsStrictTools: true } },
 		},
 		{
 			name: "provider-model-headers",
@@ -342,19 +353,23 @@ function commonCases(api: Family, provider: string, model: string): FixtureCase[
 			description: "Deterministically injected session affinity identifier.",
 			context: baseContext(),
 			options: { sessionId: FIXTURE_SESSION_ID },
-			modelPatch:
-				api === "openai-completions"
-					? { compat: { sendSessionAffinityHeaders: true, sessionAffinityFormat: "openai" } }
-					: { compat: { sendSessionAffinityHeaders: true } },
+			modelPatch: api === "openai-completions"
+				? { compat: { sendSessionAffinityHeaders: true, sessionAffinityFormat: "openai" } }
+				: api === "anthropic-messages"
+					? { compat: { sendSessionAffinityHeaders: true } }
+					: api === "openai-responses"
+						? { compat: { sessionAffinityFormat: "openai" } }
+						: {},
 		},
 		{
 			name: "api-specific-compat-flags",
 			description: "One family-specific compatibility branch made observable on wire.",
 			context: toolHistoryContext(api, provider, model),
-			modelPatch:
-				api === "openai-completions"
-					? { compat: { requiresAssistantAfterToolResult: true, requiresToolResultName: true } }
-					: { compat: { allowEmptySignature: true, supportsEagerToolInputStreaming: false } },
+			modelPatch: api === "openai-completions"
+				? { compat: { requiresAssistantAfterToolResult: true, requiresToolResultName: true } }
+				: api === "anthropic-messages"
+					? { compat: { allowEmptySignature: true, supportsEagerToolInputStreaming: false } }
+					: { compat: { supportsStrictMode: false } },
 		},
 		{
 			name: "cross-provider-handoff",
@@ -396,12 +411,18 @@ function mergeNested(base: Record<string, unknown>, patch: Record<string, unknow
 }
 
 function modelFor(family: Family, baseUrl: string, patch: Record<string, unknown> = {}): Record<string, unknown> {
-	const openAi = family === "openai-completions";
+	const openAi = isOpenAiFamily(family);
+	const responses = isResponsesFamily(family);
+	const codex = family === "openai-codex-responses";
 	const base: Record<string, unknown> = {
-		id: openAi ? "fixture-openai-model" : "fixture-anthropic-model",
-		name: openAi ? "Fixture OpenAI Model" : "Fixture Anthropic Model",
+		id: codex
+			? "fixture-codex-model"
+			: openAi
+				? "fixture-openai-model"
+				: "fixture-anthropic-model",
+		name: codex ? "Fixture Codex Model" : openAi ? "Fixture OpenAI Model" : "Fixture Anthropic Model",
 		api: family,
-		provider: openAi ? "fixture-openai" : "fixture-anthropic",
+		provider: codex ? "openai-codex" : openAi ? "fixture-openai" : "fixture-anthropic",
 		baseUrl,
 		reasoning: true,
 		input: ["text", "image"],
@@ -417,7 +438,15 @@ function modelFor(family: Family, baseUrl: string, patch: Record<string, unknown
 			xhigh: "xhigh",
 			max: "max",
 		},
-		compat: openAi
+		compat: responses
+			? {
+					supportsDeveloperRole: true,
+					supportsReasoningEffort: true,
+					supportsStrictMode: true,
+					supportsLongCacheRetention: true,
+					supportsOpenAIGrammarTools: false,
+				}
+			: openAi
 			? {
 					supportsStore: false,
 					supportsDeveloperRole: false,
@@ -491,6 +520,9 @@ async function credentialTargetFor(
 	family: Family,
 	store: Record<string, unknown>,
 ): Promise<CredentialBackedTarget> {
+	if (isResponsesFamily(family)) {
+		throw new Error(`${family} credential-backed capture is not configured; use hermetic capture`);
+	}
 	if (family === "openai-completions") {
 		const apiKey = process.env.OPENROUTER_API_KEY;
 		if (!apiKey) throw new Error("OPENROUTER_API_KEY is unavailable");
@@ -773,10 +805,136 @@ function anthropicFrames(kind: ResponseKind, model: string, turn: number): strin
 	return events.map(({ event, data }) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join("");
 }
 
+function responsesFrames(
+	family: "openai-responses" | "openai-codex-responses",
+	kind: ResponseKind,
+	model: string,
+	turn: number,
+): string {
+	const responseId = `resp_fixture_${turn}`;
+	const events: Record<string, unknown>[] = [
+		{
+			type: "response.created",
+			response: { id: responseId, model, status: "in_progress", output: [] },
+		},
+	];
+	const output: Record<string, unknown>[] = [];
+	let outputIndex = 0;
+	if (kind === "text") {
+		const item = {
+			type: "message",
+			role: "assistant",
+			content: [
+				{
+					type: "output_text",
+					text: `fixture response turn ${turn}`,
+					annotations: [],
+				},
+			],
+			status: "completed",
+			id: `msg_fixture_${turn}`,
+			phase: "final_answer",
+		};
+		events.push({
+			type: "response.output_item.added",
+			output_index: outputIndex,
+			item: { ...item, content: [], status: "in_progress" },
+		});
+		events.push({
+			type: "response.output_text.delta",
+			output_index: outputIndex,
+			delta: `fixture response turn ${turn}`,
+		});
+		events.push({ type: "response.output_item.done", output_index: outputIndex, item });
+		output.push(item);
+	} else {
+		if (kind === "signed-reasoning" || kind === "redacted-reasoning") {
+			const reasoning = {
+				id: `rs_fixture_${turn}`,
+				type: "reasoning",
+				summary: [{ type: "summary_text", text: "Inspect the requested fixture." }],
+				content: [],
+				encrypted_content:
+					kind === "signed-reasoning"
+						? "signed-fixture-reasoning"
+						: "encrypted-fixture-reasoning",
+				status: "completed",
+			};
+			events.push({
+				type: "response.output_item.added",
+				output_index: outputIndex,
+				item: { id: reasoning.id, type: "reasoning", summary: [] },
+			});
+			events.push({
+				type: "response.reasoning_summary_text.delta",
+				output_index: outputIndex,
+				delta: "Inspect the requested fixture.",
+			});
+			events.push({ type: "response.output_item.done", output_index: outputIndex, item: reasoning });
+			output.push(reasoning);
+			outputIndex += 1;
+		}
+
+		const paths = kind === "multiple-tools" ? ["Cargo.toml", "README.md"] : ["Cargo.toml"];
+		for (const [offset, path] of paths.entries()) {
+			const callId = offset === 0 ? TOOL_CALL_1 : TOOL_CALL_2;
+			const itemId = `fc_fixture_${turn}_${offset + 1}`;
+			const argumentsJson = JSON.stringify({ path });
+			const item = {
+				type: "function_call",
+				id: itemId,
+				call_id: callId,
+				name: "read_file",
+				arguments: argumentsJson,
+				status: "completed",
+			};
+			events.push({
+				type: "response.output_item.added",
+				output_index: outputIndex + offset,
+				item: { ...item, arguments: "", status: "in_progress" },
+			});
+			events.push({
+				type: "response.function_call_arguments.delta",
+				output_index: outputIndex + offset,
+				delta: argumentsJson,
+			});
+			events.push({
+				type: "response.function_call_arguments.done",
+				output_index: outputIndex + offset,
+				arguments: argumentsJson,
+			});
+			events.push({
+				type: "response.output_item.done",
+				output_index: outputIndex + offset,
+				item,
+			});
+			output.push(item);
+		}
+	}
+
+	events.push({
+		type: family === "openai-codex-responses" ? "response.done" : "response.completed",
+		response: {
+			id: responseId,
+			model,
+			status: "completed",
+			output,
+			usage: {
+				input_tokens: 12,
+				output_tokens: 8,
+				total_tokens: 20,
+				input_tokens_details: { cached_tokens: 0 },
+				output_tokens_details: { reasoning_tokens: kind.includes("reasoning") ? 3 : 0 },
+			},
+		},
+	});
+	return events.map((value) => `data: ${JSON.stringify(value)}\n\n`).join("");
+}
+
 function responseFrames(family: Family, kind: ResponseKind, model: string, turn: number): string {
-	return family === "openai-completions"
-		? openAiFrames(kind, model, turn)
-		: anthropicFrames(kind, model, turn);
+	if (family === "openai-completions") return openAiFrames(kind, model, turn);
+	if (family === "anthropic-messages") return anthropicFrames(kind, model, turn);
+	return responsesFrames(family, kind, model, turn);
 }
 
 const SECRET_HEADER_NAMES = new Set([
@@ -806,6 +964,10 @@ const SEMANTIC_HEADER_NAMES = new Set([
 	"openai-intent",
 	"openai-organization",
 	"openai-project",
+	"openai-beta",
+	"chatgpt-account-id",
+	"originator",
+	"session-id",
 	"session_id",
 	"x-app",
 	"x-client-request-id",
@@ -865,7 +1027,10 @@ function startCaptureServer(state: CaptureServerState): ReturnType<typeof Bun.se
 		port: 0,
 		async fetch(request) {
 			const requestUrl = new URL(request.url);
-			const body = new Uint8Array(await request.arrayBuffer());
+			const transportBody = new Uint8Array(await request.arrayBuffer());
+			const body = request.headers.get("content-encoding") === "zstd"
+				? Bun.zstdDecompressSync(transportBody)
+				: transportBody;
 			const capturedHeaders = captureHeaders(request.headers);
 			state.requests.push({
 				method: request.method,
@@ -980,9 +1145,19 @@ function assertRetainedTurnTwoLowering(
 
 	const maxTokenField = family === "anthropic-messages"
 		? "max_tokens"
-		: Object.hasOwn(turnOne, "max_tokens")
-			? "max_tokens"
-			: "max_completion_tokens";
+		: family === "openai-responses"
+			? "max_output_tokens"
+			: Object.hasOwn(turnOne, "max_tokens")
+				? "max_tokens"
+				: family === "openai-completions"
+					? "max_completion_tokens"
+					: undefined;
+	if (maxTokenField === undefined) {
+		for (const field of ["temperature", "service_tier", "reasoning", "text"]) {
+			if (Object.hasOwn(turnOne, field)) assertSameJsonField(family, fixture, turnOne, turnTwo, field);
+		}
+		return;
+	}
 	const turnOneMax = turnOne[maxTokenField];
 	const turnTwoMax = turnTwo[maxTokenField];
 	if (typeof turnOneMax !== "number" || typeof turnTwoMax !== "number" || turnOneMax < 1 || turnTwoMax < 1) {
@@ -997,7 +1172,7 @@ function assertRetainedTurnTwoLowering(
 		assertSameJsonField(family, fixture, turnOne, turnTwo, maxTokenField);
 	}
 
-	if (family === "openai-completions") {
+	if (isOpenAiFamily(family)) {
 		for (const field of [
 			"temperature",
 			"top_p",
@@ -1009,6 +1184,9 @@ function assertRetainedTurnTwoLowering(
 			"enable_thinking",
 			"chat_template_kwargs",
 			"chat_template_args",
+			"service_tier",
+			"reasoning",
+			"text",
 		]) {
 			if (Object.hasOwn(turnOne, field)) assertSameJsonField(family, fixture, turnOne, turnTwo, field);
 		}
@@ -1082,7 +1260,8 @@ async function captureCase(
 	};
 	const server = startCaptureServer(state);
 	try {
-		const localBasePath = credentialTarget?.upstream.localBasePath ?? "/v1";
+		const localBasePath = credentialTarget?.upstream.localBasePath ??
+			(family === "openai-codex-responses" ? "" : "/v1");
 		const baseUrl = `http://127.0.0.1:${server.port}${localBasePath}`;
 		const model = modelFor(
 			family,
@@ -1103,12 +1282,13 @@ async function captureCase(
 				? { headers: { ...credentialTarget?.optionHeaders, ...fixtureHeaders } }
 				: {}),
 			...(mode === "hermetic"
-				? { apiKey: FIXTURE_API_KEY }
+				? { apiKey: family === "openai-codex-responses" ? FIXTURE_CODEX_API_KEY : FIXTURE_API_KEY }
 				: credentialTarget?.apiKey
 					? { apiKey: credentialTarget.apiKey }
 					: {}),
 			maxRetries: 0,
 			timeoutMs: mode === "credential-backed" ? 60_000 : 10_000,
+			...(family === "openai-codex-responses" ? { transport: "sse" } : {}),
 		};
 		const streamFunction = fixture.simple ? apiModule.streamSimple : apiModule.stream;
 		const turnOne = await streamFunction(model, structuredClone(fixture.context), options).result();
@@ -1254,6 +1434,12 @@ async function main(): Promise<void> {
 	const anthropicModule = await import(
 		`${pathToFileURL(join(workRoot, "src", "api", "anthropic-messages.ts")).href}?pin=${PINNED_COMMIT}`
 	);
+	const openAiResponsesModule = await import(
+		`${pathToFileURL(join(workRoot, "src", "api", "openai-responses.ts")).href}?pin=${PINNED_COMMIT}`
+	);
+	const openAiCodexResponsesModule = await import(
+		`${pathToFileURL(join(workRoot, "src", "api", "openai-codex-responses.ts")).href}?pin=${PINNED_COMMIT}`
+	);
 	const families: Array<{
 		family: Family;
 		provider: string;
@@ -1271,6 +1457,18 @@ async function main(): Promise<void> {
 			provider: "fixture-anthropic",
 			model: "fixture-anthropic-model",
 			module: anthropicModule,
+		},
+		{
+			family: "openai-responses",
+			provider: "fixture-openai",
+			model: "fixture-openai-model",
+			module: openAiResponsesModule,
+		},
+		{
+			family: "openai-codex-responses",
+			provider: "openai-codex",
+			model: "fixture-codex-model",
+			module: openAiCodexResponsesModule,
 		},
 	];
 

@@ -247,6 +247,7 @@ fn responses_message() -> AssistantMessage {
         .apply(&AssistantEvent::ResponseMetadata {
             response_id: Some("resp_123".into()),
             response_model: None,
+            end_turn: None,
         })
         .unwrap();
 
@@ -447,6 +448,7 @@ fn stream_failure_is_terminal_message() {
         .apply(&AssistantEvent::ResponseMetadata {
             response_id: Some("chatcmpl-7".into()),
             response_model: Some(ModelId::new("produced-model")),
+            end_turn: None,
         })
         .unwrap();
     assembler
@@ -558,12 +560,14 @@ fn stream_partial_identity_is_stable() {
         .apply(&AssistantEvent::ResponseMetadata {
             response_id: Some("response-1".into()),
             response_model: Some(ModelId::new("produced-1")),
+            end_turn: None,
         })
         .unwrap();
     assert_eq!(
         assembler.apply(&AssistantEvent::ResponseMetadata {
             response_id: Some("response-2".into()),
             response_model: None,
+            end_turn: None,
         }),
         Err(AssemblyError::ResponseIdChanged)
     );
@@ -571,6 +575,7 @@ fn stream_partial_identity_is_stable() {
         assembler.apply(&AssistantEvent::ResponseMetadata {
             response_id: Some("response-1".into()),
             response_model: Some(ModelId::new("produced-2")),
+            end_turn: None,
         }),
         Err(AssemblyError::ResponseModelChanged)
     );
@@ -584,12 +589,14 @@ fn stream_response_id_is_preserved() {
         .apply(&AssistantEvent::ResponseMetadata {
             response_id: Some("resp_1".into()),
             response_model: None,
+            end_turn: None,
         })
         .unwrap();
     assembler
         .apply(&AssistantEvent::ResponseMetadata {
             response_id: None,
             response_model: None,
+            end_turn: None,
         })
         .unwrap();
     let message = assembler
@@ -607,6 +614,7 @@ fn stream_response_model_is_preserved() {
         .apply(&AssistantEvent::ResponseMetadata {
             response_id: None,
             response_model: Some(ModelId::new("anthropic/claude")),
+            end_turn: None,
         })
         .unwrap();
     let message = assembler

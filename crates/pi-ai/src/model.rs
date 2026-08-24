@@ -116,6 +116,9 @@ pub enum ApiModelConfig {
     /// OpenAI Responses.
     #[serde(rename = "openai-responses")]
     OpenAiResponses(OpenAiResponsesModelConfig),
+    /// OpenAI Codex Responses.
+    #[serde(rename = "openai-codex-responses")]
+    OpenAiCodexResponses(OpenAiResponsesModelConfig),
     /// Anthropic Messages.
     #[serde(rename = "anthropic-messages")]
     AnthropicMessages(AnthropicMessagesModelConfig),
@@ -142,6 +145,7 @@ impl ApiModelConfig {
         match self {
             Self::OpenAiCompletions(_) => ApiId::new("openai-completions"),
             Self::OpenAiResponses(_) => ApiId::new("openai-responses"),
+            Self::OpenAiCodexResponses(_) => ApiId::new("openai-codex-responses"),
             Self::AnthropicMessages(_) => ApiId::new("anthropic-messages"),
             Self::GoogleGenerativeAi(_) => ApiId::new("google-generative-ai"),
             Self::GoogleVertex(_) => ApiId::new("google-vertex"),

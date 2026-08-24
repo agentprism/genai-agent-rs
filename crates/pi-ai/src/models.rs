@@ -20,7 +20,9 @@ use crate::{
     RefreshReport, RefreshRequest, RequestStartError, RequestStartErrorKind, ResolvedApiRequest,
     ResponseObserver, SendBoxFuture, SimpleGenerationOptions,
     apply_anthropic_messages_default_headers, apply_header_spec,
-    apply_openai_completions_session_affinity_headers, local_provider_default_headers,
+    apply_openai_codex_responses_session_affinity_headers,
+    apply_openai_completions_session_affinity_headers,
+    apply_openai_responses_session_affinity_headers, local_provider_default_headers,
     merge_header_map, provider_default_headers, publish_candidate, publish_local_candidate,
     restore_local_persisted_candidate, restore_persisted_candidate,
 };
@@ -763,7 +765,7 @@ impl Models {
                 .with_model(request.model.clone()));
             }
 
-            let auth = await_or_cancelled(
+            let resolved_auth = await_or_cancelled(
                 provider.auth.resolve(
                     crate::ResolveAuthRequest {
                         provider: provider.descriptor.clone(),
@@ -781,14 +783,25 @@ impl Models {
             .map_err(|error| {
                 RequestStartError::new(RequestStartErrorKind::RuntimeUnavailable, error.to_string())
                     .with_model(request.model.clone())
-            })?
-            .ok_or_else(|| {
-                RequestStartError::new(
-                    RequestStartErrorKind::RuntimeUnavailable,
-                    format!("provider is not configured: {}", provider.descriptor.id),
-                )
-                .with_model(request.model.clone())
             })?;
+            let header_only_auth = resolved_auth.is_none()
+                && matches!(&model.api, crate::ApiModelConfig::OpenAiResponses(_))
+                && has_responses_auth_header_spec(&request_options.headers);
+            let auth = match resolved_auth {
+                Some(auth) => auth,
+                None if header_only_auth => crate::ResolvedAuth {
+                    api_key: None,
+                    headers: http::HeaderMap::new(),
+                    base_url: None,
+                    source: crate::AuthSource::new("explicit_header"),
+                },
+                None => {
+                    return Err(provider_not_configured(
+                        &request.model,
+                        &provider.descriptor.id,
+                    ));
+                }
+            };
 
             let endpoint = auth
                 .base_url
@@ -796,16 +809,28 @@ impl Models {
                 .or_else(|| provider.descriptor.base_url.clone())
                 .unwrap_or_else(|| model.common.base_url.clone());
 
+            // Keep credential-derived transport invariants distinct from the
+            // mutable logical header overlay. Typed session state travels on
+            // the encoded payload rather than through this header map.
+            let auth_headers = auth.headers.clone();
+
             // provider/auth -> model -> explicit request
             let mut headers =
                 provider_default_headers(&provider).map_err(AiError::into_request_start)?;
             merge_header_map(&mut headers, &auth.headers);
-            if let Some(options) = full_options.as_ref() {
+            if let Some(options) = full_options.as_ref()
+                && !matches!(
+                    &model.api,
+                    crate::ApiModelConfig::OpenAiResponses(_)
+                        | crate::ApiModelConfig::OpenAiCodexResponses(_)
+                )
+            {
                 implementation
                     .apply_full_options_headers(
                         &model,
                         &request.context,
                         options,
+                        &endpoint,
                         &request_options,
                         &mut headers,
                     )
@@ -826,6 +851,24 @@ impl Models {
                 RequestStartError::new(RequestStartErrorKind::InvalidRequest, error.message)
                     .with_model(request.model.clone())
             })?;
+            if let Some(options) = full_options.as_ref()
+                && matches!(
+                    &model.api,
+                    crate::ApiModelConfig::OpenAiResponses(_)
+                        | crate::ApiModelConfig::OpenAiCodexResponses(_)
+                )
+            {
+                implementation
+                    .apply_full_options_headers(
+                        &model,
+                        &request.context,
+                        options,
+                        &endpoint,
+                        &request_options,
+                        &mut headers,
+                    )
+                    .map_err(AiError::into_request_start)?;
+            }
             if full_options.is_none()
                 && let crate::ApiModelConfig::OpenAiCompletions(config) = &model.api
             {
@@ -836,6 +879,29 @@ impl Models {
                     &mut headers,
                 )
                 .map_err(|error| {
+                    RequestStartError::new(RequestStartErrorKind::InvalidRequest, error.message)
+                        .with_model(request.model.clone())
+                })?;
+            }
+            if full_options.is_none() {
+                let affinity = match &model.api {
+                    crate::ApiModelConfig::OpenAiResponses(config) => {
+                        apply_openai_responses_session_affinity_headers(
+                            &endpoint,
+                            &config.compat,
+                            &request.options,
+                            &mut headers,
+                        )
+                    }
+                    crate::ApiModelConfig::OpenAiCodexResponses(_) => {
+                        apply_openai_codex_responses_session_affinity_headers(
+                            &request.options,
+                            &mut headers,
+                        )
+                    }
+                    _ => Ok(()),
+                };
+                affinity.map_err(|error| {
                     RequestStartError::new(RequestStartErrorKind::InvalidRequest, error.message)
                         .with_model(request.model.clone())
                 })?;
@@ -864,6 +930,12 @@ impl Models {
                         .with_model(request.model.clone())
                 })?;
             }
+            if header_only_auth && !has_responses_auth_header(&headers) {
+                return Err(provider_not_configured(
+                    &request.model,
+                    &provider.descriptor.id,
+                ));
+            }
 
             let mut retry_policy = provider.retry_policy.clone();
             if let Some(max_retries) = request_options.max_retries {
@@ -884,6 +956,7 @@ impl Models {
                         request_options,
                         endpoint,
                         headers,
+                        auth_headers,
                         api,
                         api_key: auth.api_key,
                         payload_transforms: Arc::clone(&self.inner.payload_transforms),
@@ -1792,7 +1865,7 @@ impl LocalModels {
                 .with_model(request.model.clone()));
             }
 
-            let auth = await_or_cancelled(
+            let resolved_auth = await_or_cancelled(
                 provider.auth.resolve(
                     crate::LocalResolveAuthRequest {
                         provider: provider.descriptor.clone(),
@@ -1810,14 +1883,25 @@ impl LocalModels {
             .map_err(|error| {
                 RequestStartError::new(RequestStartErrorKind::RuntimeUnavailable, error.to_string())
                     .with_model(request.model.clone())
-            })?
-            .ok_or_else(|| {
-                RequestStartError::new(
-                    RequestStartErrorKind::RuntimeUnavailable,
-                    format!("provider is not configured: {}", provider.descriptor.id),
-                )
-                .with_model(request.model.clone())
             })?;
+            let header_only_auth = resolved_auth.is_none()
+                && matches!(&model.api, crate::ApiModelConfig::OpenAiResponses(_))
+                && has_responses_auth_header_spec(&request_options.headers);
+            let auth = match resolved_auth {
+                Some(auth) => auth,
+                None if header_only_auth => crate::ResolvedAuth {
+                    api_key: None,
+                    headers: http::HeaderMap::new(),
+                    base_url: None,
+                    source: crate::AuthSource::new("explicit_header"),
+                },
+                None => {
+                    return Err(provider_not_configured(
+                        &request.model,
+                        &provider.descriptor.id,
+                    ));
+                }
+            };
 
             let endpoint = auth
                 .base_url
@@ -1825,15 +1909,24 @@ impl LocalModels {
                 .or_else(|| provider.descriptor.base_url.clone())
                 .unwrap_or_else(|| model.common.base_url.clone());
 
+            let auth_headers = auth.headers.clone();
+
             let mut headers =
                 local_provider_default_headers(&provider).map_err(AiError::into_request_start)?;
             merge_header_map(&mut headers, &auth.headers);
-            if let Some(options) = full_options.as_ref() {
+            if let Some(options) = full_options.as_ref()
+                && !matches!(
+                    &model.api,
+                    crate::ApiModelConfig::OpenAiResponses(_)
+                        | crate::ApiModelConfig::OpenAiCodexResponses(_)
+                )
+            {
                 implementation
                     .apply_full_options_headers(
                         &model,
                         &request.context,
                         options,
+                        &endpoint,
                         &request_options,
                         &mut headers,
                     )
@@ -1854,6 +1947,24 @@ impl LocalModels {
                 RequestStartError::new(RequestStartErrorKind::InvalidRequest, error.message)
                     .with_model(request.model.clone())
             })?;
+            if let Some(options) = full_options.as_ref()
+                && matches!(
+                    &model.api,
+                    crate::ApiModelConfig::OpenAiResponses(_)
+                        | crate::ApiModelConfig::OpenAiCodexResponses(_)
+                )
+            {
+                implementation
+                    .apply_full_options_headers(
+                        &model,
+                        &request.context,
+                        options,
+                        &endpoint,
+                        &request_options,
+                        &mut headers,
+                    )
+                    .map_err(AiError::into_request_start)?;
+            }
             if full_options.is_none()
                 && let crate::ApiModelConfig::OpenAiCompletions(config) = &model.api
             {
@@ -1864,6 +1975,29 @@ impl LocalModels {
                     &mut headers,
                 )
                 .map_err(|error| {
+                    RequestStartError::new(RequestStartErrorKind::InvalidRequest, error.message)
+                        .with_model(request.model.clone())
+                })?;
+            }
+            if full_options.is_none() {
+                let affinity = match &model.api {
+                    crate::ApiModelConfig::OpenAiResponses(config) => {
+                        apply_openai_responses_session_affinity_headers(
+                            &endpoint,
+                            &config.compat,
+                            &request.options,
+                            &mut headers,
+                        )
+                    }
+                    crate::ApiModelConfig::OpenAiCodexResponses(_) => {
+                        apply_openai_codex_responses_session_affinity_headers(
+                            &request.options,
+                            &mut headers,
+                        )
+                    }
+                    _ => Ok(()),
+                };
+                affinity.map_err(|error| {
                     RequestStartError::new(RequestStartErrorKind::InvalidRequest, error.message)
                         .with_model(request.model.clone())
                 })?;
@@ -1892,6 +2026,12 @@ impl LocalModels {
                         .with_model(request.model.clone())
                 })?;
             }
+            if header_only_auth && !has_responses_auth_header(&headers) {
+                return Err(provider_not_configured(
+                    &request.model,
+                    &provider.descriptor.id,
+                ));
+            }
 
             let mut retry_policy = provider.retry_policy.clone();
             if let Some(max_retries) = request_options.max_retries {
@@ -1912,6 +2052,7 @@ impl LocalModels {
                         request_options,
                         endpoint,
                         headers,
+                        auth_headers,
                         api,
                         api_key: auth.api_key,
                         payload_transforms: Rc::clone(&self.inner.payload_transforms),
@@ -2106,6 +2247,32 @@ async fn await_or_cancelled<T, E>(
             "request cancelled",
         )),
     }
+}
+
+fn provider_not_configured(model: &ModelRef, provider: &crate::ProviderId) -> RequestStartError {
+    RequestStartError::new(
+        RequestStartErrorKind::RuntimeUnavailable,
+        format!("provider is not configured: {provider}"),
+    )
+    .with_model(model.clone())
+}
+
+fn has_responses_auth_header(headers: &http::HeaderMap) -> bool {
+    ["authorization", "cf-aig-authorization"]
+        .into_iter()
+        .filter_map(|name| headers.get(name))
+        .any(|value| value.to_str().is_ok_and(|value| !value.trim().is_empty()))
+}
+
+fn has_responses_auth_header_spec(headers: &crate::HeaderMapSpec) -> bool {
+    headers.iter().any(|(name, value)| {
+        matches!(
+            name.to_ascii_lowercase().as_str(),
+            "authorization" | "cf-aig-authorization"
+        ) && value
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    })
 }
 
 async fn await_auth_or_cancelled<T>(

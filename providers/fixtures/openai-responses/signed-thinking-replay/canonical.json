@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "family": "openai-responses",
+  "case": "signed-thinking-replay",
+  "description": "Turn one returns signed reasoning and a tool call for exact turn-two replay.",
+  "piCommit": "c49906ec77788625aacbdc53ebca6fbe65bd20f5",
+  "model": {
+    "id": "fixture-openai-model",
+    "name": "Fixture OpenAI Model",
+    "api": "openai-responses",
+    "provider": "fixture-openai",
+    "baseUrl": "http://127.0.0.1:<injected-port>/v1",
+    "reasoning": true,
+    "input": [
+      "text",
+      "image"
+    ],
+    "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0
+    },
+    "contextWindow": 128000,
+    "maxTokens": 8192,
+    "thinkingLevelMap": {
+      "off": "none",
+      "minimal": "minimal",
+      "low": "low",
+      "medium": "medium",
+      "high": "high",
+      "xhigh": "xhigh",
+      "max": "max"
+    },
+    "compat": {
+      "supportsDeveloperRole": true,
+      "supportsReasoningEffort": true,
+      "supportsStrictMode": true,
+      "supportsLongCacheRetention": true,
+      "supportsOpenAIGrammarTools": false
+    }
+  },
+  "context": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "Reason, then read Cargo.toml.",
+        "timestamp": 1700000000000
+      }
+    ],
+    "tools": [
+      {
+        "name": "read_file",
+        "description": "Read one UTF-8 file.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Workspace-relative path."
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      }
+    ]
+  },
+  "options": {
+    "reasoning": "low",
+    "maxTokens": 1024,
+    "maxRetries": 0,
+    "timeoutMs": 10000
+  },
+  "entrypoint": "streamSimple",
+  "turnTwoAppend": [
+    {
+      "role": "toolResult",
+      "toolCallId": "call_fixture_0001|fc_fixture_1_1",
+      "toolName": "read_file",
+      "content": [
+        {
+          "type": "text",
+          "text": "fixture file contents"
+        }
+      ],
+      "isError": false,
+      "timestamp": 1700000000000
+    }
+  ],
+  "deterministicInjections": {
+    "timestamp": 1700000000000,
+    "sessionId": "session-m4-00000000",
+    "requestId": "request-fixture-0001",
+    "toolCallIds": [
+      "call_fixture_0001",
+      "call_fixture_0002"
+    ]
+  }
+}

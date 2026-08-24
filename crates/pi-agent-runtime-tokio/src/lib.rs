@@ -883,6 +883,8 @@ fn started_assistant_snapshot(
         requested_model: requested_model.clone(),
         response_model: None,
         response_id: None,
+        end_turn: None,
+        diagnostics: Vec::new(),
         content: Vec::new(),
         replay: ReplayEnvelope::new(ReplayScope::new(
             provider,
@@ -891,6 +893,7 @@ fn started_assistant_snapshot(
             requested_model,
         )),
         usage: Usage::zero(UsageSource::Unknown),
+        cost: None,
         timestamp: Timestamp::default(),
         terminal_message: None,
     }
@@ -904,9 +907,12 @@ fn snapshot_from_terminal_message(message: &AssistantMessage) -> AssistantMessag
         requested_model: message.requested_model.clone(),
         response_model: message.response_model.clone(),
         response_id: message.response_id.clone(),
+        end_turn: message.end_turn,
+        diagnostics: message.diagnostics.clone(),
         content: message.content.clone(),
         replay: message.replay.clone(),
         usage: message.usage.clone(),
+        cost: message.cost.clone(),
         timestamp: message.timestamp,
         terminal_message: Some(message.clone()),
     }

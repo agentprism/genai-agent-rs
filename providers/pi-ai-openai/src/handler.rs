@@ -12,17 +12,19 @@ use futures_util::{FutureExt, StreamExt, stream};
 use http::{HeaderMap, HeaderValue, Method, header};
 use pi_ai::{
     AiError, AiErrorKind, ApiExecutionContext, ApiFamily, ApiId, ApiModelConfig, AssistantStream,
-    AuthError, AuthInteraction, AuthResolver, CONTEXT_SAFETY_TOKENS, CancellationToken, ChatApi,
-    Context, EncodeContext, EnvironmentApiKeyAuth, ErasedApiHandler, ErasedApiOptionsPatch,
-    HttpBody, HttpChatApi, HttpRequest, HttpResponse, HttpTransport, LocalApiExecutionContext,
-    LocalAssistantStream, LocalAuthInteraction, LocalAuthResolver, LocalBoxFuture, LocalChatApi,
-    LocalErasedApiHandler, LocalHttpBody, LocalHttpChatApi, LocalHttpResponse, LocalHttpTransport,
-    LocalOAuthAuth, LocalProviderAuthResolver, LocalProviderRegistration,
-    LocalProviderResponseStream, LocalResolveAuthRequest, MessageId, MiddlewareError,
-    ModelDescriptor, OAuthAuth, OpenAiCompletions, OpenAiCompletionsHandoff,
-    OpenAiCompletionsSimplePatch, OrderedJsonWriter, ProviderAuthResolver, ProviderPayload,
-    ProviderRegistration, ProviderRegistrationError, ProviderResponseStream, ResolveAuthRequest,
-    ResolvedAuth, SendBoxFuture, SimpleGenerationOptions, SimpleLoweringContext, Timestamp,
+    AttemptFailure, AuthError, AuthInteraction, AuthResolver, CONTEXT_SAFETY_TOKENS,
+    CancellationToken, ChatApi, Context, DefaultRetryClassifier, EncodeContext,
+    EnvironmentApiKeyAuth, ErasedApiHandler, ErasedApiOptionsPatch, HttpBody, HttpChatApi,
+    HttpRequest, HttpResponse, HttpTransport, LocalApiExecutionContext, LocalAssistantStream,
+    LocalAuthInteraction, LocalAuthResolver, LocalBoxFuture, LocalChatApi,
+    LocalDefaultRetryClassifier, LocalErasedApiHandler, LocalHttpBody, LocalHttpChatApi,
+    LocalHttpResponse, LocalHttpTransport, LocalOAuthAuth, LocalProviderAuthResolver,
+    LocalProviderRegistration, LocalProviderResponseStream, LocalResolveAuthRequest,
+    LocalRetryClassifier, MessageId, MiddlewareError, ModelDescriptor, OAuthAuth,
+    OpenAiCompletions, OpenAiCompletionsHandoff, OpenAiCompletionsSimplePatch, OrderedJsonWriter,
+    ProviderAuthResolver, ProviderPayload, ProviderRegistration, ProviderRegistrationError,
+    ProviderResponseStream, ResolveAuthRequest, ResolvedAuth, RetryClassifier, RetryDecision,
+    RetryPolicy, SendBoxFuture, SimpleGenerationOptions, SimpleLoweringContext, Timestamp,
     TypedModelDescriptor, estimate_context_tokens, openai_grammar_tool_input_properties,
     transform_context_for_model,
 };
@@ -31,7 +33,7 @@ use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
 
 static NEXT_MESSAGE_ID: AtomicU64 = AtomicU64::new(1);
@@ -530,6 +532,282 @@ pub fn openrouter_provider(
     openrouter_provider_with_api(api, transport)
 }
 
+/// Builds the pinned OpenAI Responses provider.
+pub fn openai_provider(
+    transport: Arc<dyn HttpTransport>,
+) -> Result<ProviderRegistration, OpenAiProviderError> {
+    openai_provider_with_api(crate::openai_responses_api(transport))
+}
+
+/// Builds OpenAI around a caller-shared Responses API object.
+pub fn openai_provider_with_api(
+    responses_api: Arc<dyn ChatApi>,
+) -> Result<ProviderRegistration, OpenAiProviderError> {
+    ProviderRegistration::builder("openai")
+        .display_name("OpenAI")
+        .base_url(Url::parse("https://api.openai.com/v1").map_err(OpenAiProviderError::Url)?)
+        .auth(Arc::new(BearerAuthResolver::new("OPENAI_API_KEY", None)))
+        .models(crate::openai_models()?)
+        .api(pi_ai::OpenAiResponses::API_ID, responses_api)
+        .build()
+        .map_err(OpenAiProviderError::Registration)
+}
+
+/// Codex's narrower retry classifier from pinned Pi's Responses transport.
+#[derive(Debug, Default)]
+pub struct OpenAiCodexRetryClassifier {
+    default: DefaultRetryClassifier,
+}
+
+impl RetryClassifier for OpenAiCodexRetryClassifier {
+    fn classify(&self, failure: &AttemptFailure, policy: &RetryPolicy) -> RetryDecision {
+        codex_retryable_failure(failure).map_or(RetryDecision::DoNotRetry, |failure| {
+            self.default.classify(&failure, policy)
+        })
+    }
+
+    fn normalize_terminal(&self, failure: AttemptFailure) -> AttemptFailure {
+        normalize_codex_terminal_failure(failure)
+    }
+}
+
+/// Local-executor counterpart to [`OpenAiCodexRetryClassifier`].
+#[derive(Debug, Default)]
+pub struct LocalOpenAiCodexRetryClassifier {
+    default: LocalDefaultRetryClassifier,
+}
+
+impl LocalRetryClassifier for LocalOpenAiCodexRetryClassifier {
+    fn classify(&self, failure: &AttemptFailure, policy: &RetryPolicy) -> RetryDecision {
+        codex_retryable_failure(failure).map_or(RetryDecision::DoNotRetry, |failure| {
+            self.default.classify(&failure, policy)
+        })
+    }
+
+    fn normalize_terminal(&self, failure: AttemptFailure) -> AttemptFailure {
+        normalize_codex_terminal_failure(failure)
+    }
+}
+
+/// Returns the Codex-specific default retry policy.
+pub fn openai_codex_retry_policy() -> RetryPolicy {
+    RetryPolicy {
+        max_retries: 0,
+        max_server_delay: Some(Duration::from_secs(60)),
+        exponential_base: Duration::from_secs(1),
+        exponential_cap: Duration::MAX,
+        jitter_multiplier: 1.0..=1.0,
+    }
+}
+
+fn codex_retryable_failure(failure: &AttemptFailure) -> Option<AttemptFailure> {
+    match failure {
+        AttemptFailure::Transport { source, .. } => {
+            (!contains_usage_limit(&source.message)).then(|| failure.clone())
+        }
+        AttemptFailure::Timeout { .. } => Some(failure.clone()),
+        AttemptFailure::Http {
+            attempt,
+            status,
+            headers,
+            observed_at,
+            message,
+        } => {
+            if *status == 429 && is_terminal_codex_rate_limit(message) {
+                return None;
+            }
+            let retryable_status = matches!(*status, 429 | 500 | 502 | 503 | 504);
+            let retryable_response = retryable_status || is_transient_codex_error(message);
+            let classification_message =
+                codex_classification_error_message(*status, message, *observed_at);
+            if !retryable_response && contains_usage_limit(&classification_message) {
+                return None;
+            }
+            let mut headers = headers.clone();
+            headers.remove("x-should-retry");
+            // Pinned Codex first handles its response-status/text allowlist in
+            // the non-success response branch. Every other parsed HTTP error
+            // is then thrown into the surrounding catch, which retries it with
+            // exponential backoff but does not consult response delay headers.
+            if !retryable_response {
+                headers.clear();
+            }
+            Some(AttemptFailure::http_at(
+                *attempt,
+                if retryable_status { *status } else { 429 },
+                headers,
+                *observed_at,
+                classification_message,
+            ))
+        }
+        AttemptFailure::Middleware { .. }
+        | AttemptFailure::Cancelled
+        | AttemptFailure::RetryDelayTooLong { .. } => None,
+        _ => None,
+    }
+}
+
+fn normalize_codex_terminal_failure(failure: AttemptFailure) -> AttemptFailure {
+    match failure {
+        AttemptFailure::Http {
+            attempt,
+            status,
+            headers,
+            observed_at,
+            message,
+        } => AttemptFailure::http_at(
+            attempt,
+            status,
+            headers,
+            observed_at,
+            codex_public_error_message(status, &message, observed_at),
+        ),
+        other => other,
+    }
+}
+
+fn codex_public_error_message(status: u16, raw: &str, observed_at: SystemTime) -> String {
+    // The raw body is retry-classification input only. Terminal public errors
+    // may retain a parsed provider message, but malformed/plain response bytes
+    // never cross the public boundary.
+    codex_error_message(status, raw, observed_at, "Request failed")
+}
+
+fn codex_classification_error_message(status: u16, raw: &str, observed_at: SystemTime) -> String {
+    // Pinned Pi applies the catch-path `"usage limit"` exclusion to
+    // `parseErrorResponse`'s result. For an unstructured body that result is
+    // the raw text, but it must remain internal to retry classification.
+    codex_error_message(status, raw, observed_at, raw)
+}
+
+fn codex_error_message(status: u16, raw: &str, observed_at: SystemTime, fallback: &str) -> String {
+    let fallback = fallback.to_owned();
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return fallback;
+    };
+    let Some(error) = parsed.get("error").and_then(serde_json::Value::as_object) else {
+        return fallback;
+    };
+    let code = error
+        .get("code")
+        .or_else(|| error.get("type"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let usage_code = [
+        "usage_limit_reached",
+        "usage_not_included",
+        "rate_limit_exceeded",
+    ]
+    .into_iter()
+    .any(|candidate| code.eq_ignore_ascii_case(candidate));
+    if usage_code || status == 429 {
+        let plan = error
+            .get("plan_type")
+            .and_then(serde_json::Value::as_str)
+            .map(|plan| format!(" ({} plan)", plan.to_lowercase()))
+            .unwrap_or_default();
+        let when = error
+            .get("resets_at")
+            .and_then(serde_json::Value::as_f64)
+            .and_then(|reset_seconds| {
+                let observed_millis =
+                    observed_at.duration_since(UNIX_EPOCH).ok()?.as_secs_f64() * 1_000.0;
+                let minutes = ((reset_seconds * 1_000.0 - observed_millis) / 60_000.0)
+                    .round()
+                    .max(0.0);
+                Some(format!(" Try again in ~{minutes:.0} min."))
+            })
+            .unwrap_or_default();
+        return format!("You have hit your ChatGPT usage limit{plan}.{when}")
+            .trim()
+            .to_owned();
+    }
+    error
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .filter(|message| !message.is_empty())
+        .map_or(fallback, str::to_owned)
+}
+
+fn contains_usage_limit(message: &str) -> bool {
+    message.contains("usage limit")
+}
+
+fn is_terminal_codex_rate_limit(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "gousagelimiterror",
+        "freeusagelimiterror",
+        "monthly usage limit reached",
+        "you have hit your chatgpt usage limit",
+        "available balance",
+        "insufficient_quota",
+        "out of budget",
+        "quota exceeded",
+        "billing",
+    ]
+    .into_iter()
+    .any(|pattern| message.contains(pattern))
+}
+
+fn is_transient_codex_error(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("overloaded")
+        || contains_optional_separator(&message, "rate", "limit")
+        || contains_optional_separator(&message, "service", "unavailable")
+        || contains_optional_separator(&message, "upstream", "connect")
+        || contains_optional_separator(&message, "connection", "refused")
+}
+
+fn contains_optional_separator(message: &str, prefix: &str, suffix: &str) -> bool {
+    message.match_indices(prefix).any(|(index, _)| {
+        let remainder = &message[index + prefix.len()..];
+        remainder.starts_with(suffix)
+            || remainder.chars().next().is_some_and(|separator| {
+                !matches!(separator, '\n' | '\r' | '\u{2028}' | '\u{2029}')
+                    && remainder[separator.len_utf8()..].starts_with(suffix)
+            })
+    })
+}
+
+/// Builds ChatGPT Codex Responses with its provider-owned OAuth flow.
+pub fn openai_codex_provider(
+    transport: Arc<dyn HttpTransport>,
+) -> Result<ProviderRegistration, OpenAiProviderError> {
+    let api = crate::openai_codex_responses_api(Arc::clone(&transport));
+    let oauth: Arc<dyn OAuthAuth> = Arc::new(crate::OpenAiCodexOAuth::new(transport));
+    ProviderRegistration::builder("openai-codex")
+        .display_name("OpenAI Codex")
+        .base_url(Url::parse("https://chatgpt.com/backend-api").map_err(OpenAiProviderError::Url)?)
+        .auth(Arc::new(CodexAuthResolver::new(oauth)))
+        .models(crate::openai_codex_models()?)
+        .api(pi_ai::OpenAiCodexResponses::API_ID, api)
+        .retry_policy(openai_codex_retry_policy())
+        .retry_classifier(Arc::new(OpenAiCodexRetryClassifier::default()))
+        .build()
+        .map_err(OpenAiProviderError::Registration)
+}
+
+/// Builds ChatGPT Codex Responses with selectable SSE, WebSocket,
+/// cached-WebSocket, and automatic-fallback transports.
+pub fn openai_codex_provider_with_websocket(
+    transport: Arc<dyn HttpTransport>,
+    websocket: Arc<dyn crate::OpenAiCodexWebSocketTransport>,
+) -> Result<ProviderRegistration, OpenAiProviderError> {
+    let api = crate::openai_codex_responses_api_with_websocket(Arc::clone(&transport), websocket);
+    let oauth: Arc<dyn OAuthAuth> = Arc::new(crate::OpenAiCodexOAuth::new(transport));
+    ProviderRegistration::builder("openai-codex")
+        .display_name("OpenAI Codex")
+        .base_url(Url::parse("https://chatgpt.com/backend-api").map_err(OpenAiProviderError::Url)?)
+        .auth(Arc::new(CodexAuthResolver::new(oauth)))
+        .models(crate::openai_codex_models()?)
+        .api(pi_ai::OpenAiCodexResponses::API_ID, api)
+        .retry_policy(openai_codex_retry_policy())
+        .retry_classifier(Arc::new(OpenAiCodexRetryClassifier::default()))
+        .build()
+        .map_err(OpenAiProviderError::Registration)
+}
+
 /// Builds a local DeepSeek registration around a caller-shared API object.
 pub fn local_deepseek_provider_with_api(
     api: Rc<dyn LocalChatApi>,
@@ -575,6 +853,69 @@ pub fn local_openrouter_provider(
 ) -> Result<LocalProviderRegistration, OpenAiProviderError> {
     let api = local_openai_completions_api(Rc::clone(&transport));
     local_openrouter_provider_with_api(api, transport)
+}
+
+/// Builds the local-executor OpenAI Responses provider.
+pub fn local_openai_provider(
+    transport: Rc<dyn LocalHttpTransport>,
+) -> Result<LocalProviderRegistration, OpenAiProviderError> {
+    local_openai_provider_with_api(crate::local_openai_responses_api(transport))
+}
+
+/// Builds local OpenAI around a caller-shared Responses API object.
+pub fn local_openai_provider_with_api(
+    responses_api: Rc<dyn LocalChatApi>,
+) -> Result<LocalProviderRegistration, OpenAiProviderError> {
+    LocalProviderRegistration::builder("openai")
+        .display_name("OpenAI")
+        .base_url(Url::parse("https://api.openai.com/v1").map_err(OpenAiProviderError::Url)?)
+        .auth(Rc::new(LocalBearerAuthResolver::new(
+            "OPENAI_API_KEY",
+            None,
+        )))
+        .models(crate::openai_models()?)
+        .api(pi_ai::OpenAiResponses::API_ID, responses_api)
+        .build()
+        .map_err(OpenAiProviderError::Registration)
+}
+
+/// Builds the local-executor ChatGPT Codex provider and OAuth flow.
+pub fn local_openai_codex_provider(
+    transport: Rc<dyn LocalHttpTransport>,
+) -> Result<LocalProviderRegistration, OpenAiProviderError> {
+    let api = crate::local_openai_codex_responses_api(Rc::clone(&transport));
+    let oauth: Rc<dyn LocalOAuthAuth> = Rc::new(crate::LocalOpenAiCodexOAuth::new(transport));
+    LocalProviderRegistration::builder("openai-codex")
+        .display_name("OpenAI Codex")
+        .base_url(Url::parse("https://chatgpt.com/backend-api").map_err(OpenAiProviderError::Url)?)
+        .auth(Rc::new(LocalCodexAuthResolver::new(oauth)))
+        .models(crate::openai_codex_models()?)
+        .api(pi_ai::OpenAiCodexResponses::API_ID, api)
+        .retry_policy(openai_codex_retry_policy())
+        .retry_classifier(Rc::new(LocalOpenAiCodexRetryClassifier::default()))
+        .build()
+        .map_err(OpenAiProviderError::Registration)
+}
+
+/// Builds the local-executor ChatGPT Codex provider with selectable SSE,
+/// WebSocket, cached-WebSocket, and automatic-fallback transports.
+pub fn local_openai_codex_provider_with_websocket(
+    transport: Rc<dyn LocalHttpTransport>,
+    websocket: Rc<dyn crate::LocalOpenAiCodexWebSocketTransport>,
+) -> Result<LocalProviderRegistration, OpenAiProviderError> {
+    let api =
+        crate::local_openai_codex_responses_api_with_websocket(Rc::clone(&transport), websocket);
+    let oauth: Rc<dyn LocalOAuthAuth> = Rc::new(crate::LocalOpenAiCodexOAuth::new(transport));
+    LocalProviderRegistration::builder("openai-codex")
+        .display_name("OpenAI Codex")
+        .base_url(Url::parse("https://chatgpt.com/backend-api").map_err(OpenAiProviderError::Url)?)
+        .auth(Rc::new(LocalCodexAuthResolver::new(oauth)))
+        .models(crate::openai_codex_models()?)
+        .api(pi_ai::OpenAiCodexResponses::API_ID, api)
+        .retry_policy(openai_codex_retry_policy())
+        .retry_classifier(Rc::new(LocalOpenAiCodexRetryClassifier::default()))
+        .build()
+        .map_err(OpenAiProviderError::Registration)
 }
 
 fn provider_registration(
@@ -643,6 +984,108 @@ impl std::error::Error for OpenAiProviderError {}
 impl From<crate::OpenAiCatalogError> for OpenAiProviderError {
     fn from(value: crate::OpenAiCatalogError) -> Self {
         Self::Catalog(value)
+    }
+}
+
+struct CodexAuthResolver {
+    access_token: crate::OpenAiCodexAccessTokenAuth,
+    inner: ProviderAuthResolver,
+}
+
+impl CodexAuthResolver {
+    fn new(oauth: Arc<dyn OAuthAuth>) -> Self {
+        Self {
+            access_token: crate::OpenAiCodexAccessTokenAuth,
+            inner: ProviderAuthResolver::new(None, Some(oauth)),
+        }
+    }
+}
+
+impl AuthResolver for CodexAuthResolver {
+    fn resolve(
+        &self,
+        request: ResolveAuthRequest,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<Option<ResolvedAuth>, AuthError>> {
+        if let Some(key) = request.overrides.api_key.clone() {
+            return pi_ai::ApiKeyAuth::resolve(
+                &self.access_token,
+                pi_ai::ApiKeyResolveRequest {
+                    provider: request.provider,
+                    credential: Some(pi_ai::ApiKeyCredential {
+                        key: Some(key),
+                        environment: request.overrides.environment.clone(),
+                    }),
+                    context: request.auth_context,
+                    environment: request.overrides.environment,
+                },
+                cancellation,
+            );
+        }
+        self.inner.resolve(request, cancellation)
+    }
+
+    fn login(
+        &self,
+        interaction: Arc<dyn AuthInteraction>,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<pi_ai::Credential, AuthError>> {
+        self.inner.login(interaction, cancellation)
+    }
+
+    fn logout(&self, cancellation: CancellationToken) -> SendBoxFuture<'_, Result<(), AuthError>> {
+        self.inner.logout(cancellation)
+    }
+}
+
+struct LocalCodexAuthResolver {
+    access_token: crate::OpenAiCodexAccessTokenAuth,
+    inner: LocalProviderAuthResolver,
+}
+
+impl LocalCodexAuthResolver {
+    fn new(oauth: Rc<dyn LocalOAuthAuth>) -> Self {
+        Self {
+            access_token: crate::OpenAiCodexAccessTokenAuth,
+            inner: LocalProviderAuthResolver::new(None, Some(oauth)),
+        }
+    }
+}
+
+impl LocalAuthResolver for LocalCodexAuthResolver {
+    fn resolve(
+        &self,
+        request: LocalResolveAuthRequest,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<Option<ResolvedAuth>, AuthError>> {
+        if let Some(key) = request.overrides.api_key.clone() {
+            return pi_ai::LocalApiKeyAuth::resolve(
+                &self.access_token,
+                pi_ai::LocalApiKeyResolveRequest {
+                    provider: request.provider,
+                    credential: Some(pi_ai::ApiKeyCredential {
+                        key: Some(key),
+                        environment: request.overrides.environment.clone(),
+                    }),
+                    context: request.auth_context,
+                    environment: request.overrides.environment,
+                },
+                cancellation,
+            );
+        }
+        self.inner.resolve(request, cancellation)
+    }
+
+    fn login(
+        &self,
+        interaction: Rc<dyn LocalAuthInteraction>,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<pi_ai::Credential, AuthError>> {
+        self.inner.login(interaction, cancellation)
+    }
+
+    fn logout(&self, cancellation: CancellationToken) -> LocalBoxFuture<'_, Result<(), AuthError>> {
+        self.inner.logout(cancellation)
     }
 }
 

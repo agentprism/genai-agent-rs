@@ -2,11 +2,11 @@
 
 This is the M4.1 capture corpus required by Architecture v2 part 2 §10.8. It was generated from Pi commit `c49906ec77788625aacbdc53ebca6fbe65bd20f5` on 2026-08-23.
 
-The checked `openai-completions/` and `anthropic-messages/` trees are deterministic captures from Pi's real API-family modules. A local Bun server records the exact request bytes and returns fixed SSE frames. Pi assembles turn one, the tool appends a fixed tool result or user message, and **the same logical entrypoint (`stream` or `streamSimple`) is invoked for turn two**. Capture-time assertions reject a turn-two request that loses simple-option reasoning/thinking, sampling overlays, or max-output clamping.
+The checked `openai-completions/`, `anthropic-messages/`, `openai-responses/`, and `openai-codex-responses/` trees are deterministic captures from Pi's real API-family modules. A local Bun server records the exact logical JSON request bytes and returns fixed SSE frames. Pi assembles turn one, the tool appends a fixed tool result or user message, and **the same logical entrypoint (`stream` or `streamSimple`) is invoked for turn two**. Capture-time assertions reject a turn-two request that loses simple-option reasoning/thinking, sampling overlays, or max-output clamping. Codex requests are captured with `transport: "sse"`; the server decompresses Pi's level-three Zstandard HTTP entity before recording the byte-exact logical JSON body.
 
 The additional `credential-backed/` tree was captured through the same local server acting as a reverse proxy to live endpoints. It proves that the tool can capture real provider frames with available credentials while keeping credentials out of the artifacts and tests.
 
-The M4.1 Rust tests validate corpus provenance, completeness, redaction, digests, and canonical `JSON.stringify` form. They deliberately do **not** use the §10.8 exact wire/replay conformance names: those remain planned until the OpenAI Completions and Anthropic Messages Rust encoders can consume the canonical fixtures, and replay fixtures can pass through `AssistantAssembler`, persistence, continuation append, and turn-two Rust encoding before byte comparison.
+The Rust tests validate corpus provenance, completeness, redaction, digests, and canonical `JSON.stringify` form. The M6.1 Responses conformance suite additionally performs byte-exact family encoding and encrypted-reasoning turn-two replay checks; the earlier OpenAI Completions and Anthropic Messages exact family comparisons remain tracked separately in the parity manifest.
 
 ## Artifact layout
 
@@ -26,7 +26,7 @@ Hermetic deterministic inputs are timestamp `1700000000000`, session ID `session
 
 ## Hermetic cases captured
 
-All §10.8 cases applicable to these two families are captured for both families:
+All §10.8 cases are captured for each of the four families:
 
 - text-only;
 - system/developer prompt;
@@ -56,7 +56,7 @@ The minimum acceptance cases are `text-only`, `one-tool-call`, `tool-results`, a
 
 At capture time, `DEEPSEEK_API_KEY`, `GEMINI_API_KEY`, and `OPENROUTER_API_KEY` were available. `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` were unavailable. The Pi auth store contained `anthropic`, `openai`, `openai-codex`, and `github-copilot` credentials; the stored Anthropic OAuth access token was expired, so it was not refreshed because refresh-token rotation would require updating a credential file outside this task's allowed paths.
 
-The checked credential-backed corpus captured all four acceptance cases for both families:
+The checked credential-backed corpus captured all four acceptance cases for the two M4.1 families:
 
 - `openai-completions`: `text-only`, `one-tool-call`, `tool-results`, and `signed-thinking-replay`, using `OPENROUTER_API_KEY` with `openai/gpt-oss-20b`;
 - `anthropic-messages`: the same four cases, using `OPENROUTER_API_KEY` with OpenRouter's Anthropic Messages endpoint and `anthropic/claude-haiku-4.5`.
@@ -65,7 +65,7 @@ No acceptance case remained unavailable. Before selecting the OpenRouter Anthrop
 
 The remaining §10.8 cases are present in the deterministic corpus but were not repeated against live credentials. They exercise synthetic compatibility branches, fake model/request headers, unsupported reasoning-level matrices, cache modes, cross-provider history, image payloads, and failure repair; repeating them would add live cost and provider-dependent failures without changing Pi's captured request-construction bytes. `credential-backed/report.json` is the machine-readable record of the live acceptance run.
 
-`DEEPSEEK_API_KEY` was not selected because the OpenRouter model supplied the required structured reasoning replay. `GEMINI_API_KEY` targets a different API family. The OpenAI/OpenAI-Codex auth-store entries target Responses-family APIs rather than this package's `openai-completions` capture.
+`DEEPSEEK_API_KEY` was not selected because the OpenRouter model supplied the required structured reasoning replay. `GEMINI_API_KEY` targets a different API family. The Responses-family M6.1 corpus is hermetic, so it requires neither live credentials nor network access.
 
 ## Regeneration
 

@@ -4,8 +4,9 @@ use pi_ai::{
     ApiModelConfig, CacheControlFormat, CacheWriteRetentionPricing, CommonModelDescriptor,
     HeaderMapSpec, LevelSupport, MaxTokensField, Modality, ModalityCapabilities, ModelDescriptor,
     ModelLimits, ModelPricing, ModelRef, MoneyRate, OpenAiCompletionsCompat,
-    OpenAiCompletionsModelConfig, OpenAiThinkingFormat, OpenAiThinkingValue, ThinkingLevelMap,
-    TokenPriceRates,
+    OpenAiCompletionsModelConfig, OpenAiResponsesCompat, OpenAiResponsesModelConfig,
+    OpenAiThinkingFormat, OpenAiThinkingValue, RequestWidePriceTier, SessionAffinityFormat,
+    ThinkingLevelMap, TokenPriceRates,
 };
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
@@ -17,6 +18,12 @@ pub const DEEPSEEK_CATALOG_JSON: &str = include_str!("../data/deepseek.json");
 
 /// Pinned OpenRouter catalog bytes published by `@earendil-works/pi-ai@0.84.2`.
 pub const OPENROUTER_CATALOG_JSON: &str = include_str!("../data/openrouter.json");
+
+/// Pinned OpenAI Responses catalog bytes.
+pub const OPENAI_CATALOG_JSON: &str = include_str!("../data/openai.json");
+
+/// Pinned ChatGPT Codex Responses catalog bytes.
+pub const OPENAI_CODEX_CATALOG_JSON: &str = include_str!("../data/openai-codex.json");
 
 /// Failure while converting Pi's published catalog into typed Rust models.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -42,32 +49,48 @@ impl std::error::Error for OpenAiCatalogError {}
 
 /// Loads the exact DeepSeek model set published by pinned Pi.
 pub fn deepseek_models() -> Result<Vec<ModelDescriptor>, OpenAiCatalogError> {
-    parse_published_catalog(DEEPSEEK_CATALOG_JSON, "deepseek")
+    parse_published_catalog(DEEPSEEK_CATALOG_JSON, "deepseek", "openai-completions")
 }
 
 /// Loads the exact OpenRouter model set published by pinned Pi.
 pub fn openrouter_models() -> Result<Vec<ModelDescriptor>, OpenAiCatalogError> {
-    parse_published_catalog(OPENROUTER_CATALOG_JSON, "openrouter")
+    parse_published_catalog(OPENROUTER_CATALOG_JSON, "openrouter", "openai-completions")
+}
+
+/// Loads the exact OpenAI Responses model set published by pinned Pi.
+pub fn openai_models() -> Result<Vec<ModelDescriptor>, OpenAiCatalogError> {
+    parse_published_catalog(OPENAI_CATALOG_JSON, "openai", "openai-responses")
+}
+
+/// Loads the exact ChatGPT Codex model set published by pinned Pi.
+pub fn openai_codex_models() -> Result<Vec<ModelDescriptor>, OpenAiCatalogError> {
+    parse_published_catalog(
+        OPENAI_CODEX_CATALOG_JSON,
+        "openai-codex",
+        "openai-codex-responses",
+    )
 }
 
 fn parse_published_catalog(
     source: &str,
     expected_provider: &str,
+    expected_api: &str,
 ) -> Result<Vec<ModelDescriptor>, OpenAiCatalogError> {
     let root: Value = serde_json::from_str(source)
         .map_err(|error| OpenAiCatalogError::new(format!("invalid published catalog: {error}")))?;
     let family = object(&root, "catalog root")?
-        .get("openai-completions")
-        .ok_or_else(|| OpenAiCatalogError::new("catalog omits openai-completions"))?;
-    object(family, "openai-completions catalog")?
+        .get(expected_api)
+        .ok_or_else(|| OpenAiCatalogError::new(format!("catalog omits {expected_api}")))?;
+    object(family, "API-family catalog")?
         .values()
-        .map(|model| parse_model(model, expected_provider))
+        .map(|model| parse_model(model, expected_provider, expected_api))
         .collect()
 }
 
 fn parse_model(
     value: &Value,
     expected_provider: &str,
+    expected_api: &str,
 ) -> Result<ModelDescriptor, OpenAiCatalogError> {
     let model = object(value, "model")?;
     let id = string(model, "id")?;
@@ -77,9 +100,9 @@ fn parse_model(
             "catalog model {id} belongs to {provider}, expected {expected_provider}"
         )));
     }
-    if string(model, "api")? != "openai-completions" {
+    if string(model, "api")? != expected_api {
         return Err(OpenAiCatalogError::new(format!(
-            "catalog model {id} does not use openai-completions"
+            "catalog model {id} does not use {expected_api}"
         )));
     }
 
@@ -126,19 +149,102 @@ fn parse_model(
                     cache_read: money_rate(cost, "cacheRead")?,
                     cache_write: money_rate(cost, "cacheWrite")?,
                 },
-                request_wide_tiers: Vec::new(),
+                request_wide_tiers: parse_price_tiers(cost)?,
                 cache_write_retention: CacheWriteRetentionPricing::default(),
             },
             reasoning: boolean(model, "reasoning")?,
             headers: HeaderMapSpec::new(),
         },
-        api: ApiModelConfig::OpenAiCompletions(OpenAiCompletionsModelConfig {
-            compat: parse_compat(model.get("compat"), provider, id)?,
-            thinking_levels: parse_thinking_levels(model.get("thinkingLevelMap"), id)?,
-            sampling_defaults: Default::default(),
-        }),
+        api: match expected_api {
+            "openai-completions" => {
+                ApiModelConfig::OpenAiCompletions(OpenAiCompletionsModelConfig {
+                    compat: parse_compat(model.get("compat"), provider, id)?,
+                    thinking_levels: parse_thinking_levels(model.get("thinkingLevelMap"), id)?,
+                    sampling_defaults: Default::default(),
+                })
+            }
+            "openai-responses" => ApiModelConfig::OpenAiResponses(OpenAiResponsesModelConfig {
+                compat: parse_responses_compat(model.get("compat"), id)?,
+                thinking_levels: parse_thinking_levels(model.get("thinkingLevelMap"), id)?,
+                sampling_defaults: Default::default(),
+            }),
+            "openai-codex-responses" => {
+                ApiModelConfig::OpenAiCodexResponses(OpenAiResponsesModelConfig {
+                    compat: parse_responses_compat(model.get("compat"), id)?,
+                    thinking_levels: parse_thinking_levels(model.get("thinkingLevelMap"), id)?,
+                    sampling_defaults: Default::default(),
+                })
+            }
+            _ => {
+                return Err(OpenAiCatalogError::new(format!(
+                    "unsupported API family {expected_api}"
+                )));
+            }
+        },
         extensions: Default::default(),
     })
+}
+
+fn parse_responses_compat(
+    value: Option<&Value>,
+    model_id: &str,
+) -> Result<OpenAiResponsesCompat, OpenAiCatalogError> {
+    let Some(value) = value else {
+        return Ok(OpenAiResponsesCompat::default());
+    };
+    let compat = object(value, "model compat")?;
+    let session_affinity_format = compat
+        .get("sessionAffinityFormat")
+        .map(|value| serde_json::from_value::<SessionAffinityFormat>(value.clone()))
+        .transpose()
+        .map_err(|error| {
+            OpenAiCatalogError::new(format!("invalid session affinity for {model_id}: {error}"))
+        })?;
+    Ok(OpenAiResponsesCompat {
+        supports_developer_role: optional_bool(compat, "supportsDeveloperRole", model_id)?,
+        session_affinity_format,
+        supports_long_cache_retention: optional_bool(
+            compat,
+            "supportsLongCacheRetention",
+            model_id,
+        )?,
+        supports_strict_mode: optional_bool(compat, "supportsStrictMode", model_id)?,
+        supports_openai_grammar_tools: optional_bool(
+            compat,
+            "supportsOpenAIGrammarTools",
+            model_id,
+        )?,
+        supports_additional_tools: optional_bool(compat, "supportsAdditionalTools", model_id)?,
+        supports_tool_search: optional_bool(compat, "supportsToolSearch", model_id)?,
+        supports_explicit_prompt_cache_mode: optional_bool(
+            compat,
+            "supportsExplicitPromptCacheMode",
+            model_id,
+        )?,
+        extensions: Default::default(),
+    })
+}
+
+fn parse_price_tiers(
+    cost: &Map<String, Value>,
+) -> Result<Vec<RequestWidePriceTier>, OpenAiCatalogError> {
+    cost.get("tiers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|tier| {
+            let tier = object(tier, "price tier")?;
+            Ok(RequestWidePriceTier {
+                input_tokens_above: unsigned(tier, "inputTokensAbove")?,
+                rates: TokenPriceRates {
+                    input: money_rate(tier, "input")?,
+                    output: money_rate(tier, "output")?,
+                    cache_read: money_rate(tier, "cacheRead")?,
+                    cache_write: money_rate(tier, "cacheWrite")?,
+                },
+            })
+        })
+        .collect()
 }
 
 fn parse_compat(

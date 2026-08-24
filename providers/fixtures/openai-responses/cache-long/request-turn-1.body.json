@@ -1,0 +1,1 @@
+{"model":"fixture-openai-model","input":[{"role":"developer","content":"Cache fixture."},{"role":"user","content":[{"type":"input_text","text":"Return a concise fixture response."}]}],"stream":true,"prompt_cache_key":"session-m4-00000000","prompt_cache_retention":"24h","store":false,"reasoning":{"effort":"none"}}

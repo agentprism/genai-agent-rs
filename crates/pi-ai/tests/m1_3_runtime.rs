@@ -305,6 +305,7 @@ fn stream_start_precedes_content() {
                     | AssistantEvent::ThinkingDelta { .. }
                     | AssistantEvent::ToolCallMetadata { .. }
                     | AssistantEvent::ToolArgumentsDelta { .. }
+                    | AssistantEvent::ToolArgumentsReplaced { .. }
             )
         })
         .unwrap();

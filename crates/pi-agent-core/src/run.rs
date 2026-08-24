@@ -858,6 +858,8 @@ macro_rules! agent_run_stream {
             let mut current_reasoning = $guard.agent.state.reasoning;
             let mut turn = 0_u32;
             let mut run_usage: Option<Usage> = None;
+            let mut run_cost: Option<pi_ai::Cost> = None;
+            let mut run_cost_complete = true;
 
             $guard.agent.phase = Some(AgentPhase::StartRun);
             $guard.agent.bump_event_sequence();
@@ -1158,6 +1160,12 @@ macro_rules! agent_run_stream {
                     None => assistant.usage.clone(),
                     Some(total) => add_usage(total, &assistant.usage),
                 });
+                if run_cost_complete {
+                    match add_cost(run_cost.take(), assistant.cost.as_ref()) {
+                        Ok(total) => run_cost = total,
+                        Err(()) => run_cost_complete = false,
+                    }
+                }
                 $guard.agent.last_error = assistant.finish.error.clone();
                 $guard.agent.bump_event_sequence();
                 yield AgentEvent::MessageCommitted {
@@ -1447,7 +1455,7 @@ macro_rules! agent_run_stream {
                         outcome: RunOutcome::Completed {
                             final_message_id: final_id,
                             usage: run_usage.clone().unwrap_or_else(|| Usage::zero(UsageSource::Unknown)),
-                            cost: None,
+                            cost: run_cost_complete.then(|| run_cost.clone()).flatten(),
                         },
                     };
                     return;
@@ -1475,7 +1483,7 @@ macro_rules! agent_run_stream {
                             outcome: RunOutcome::Completed {
                                 final_message_id: final_id,
                                 usage: run_usage.clone().unwrap_or_else(|| Usage::zero(UsageSource::Unknown)),
-                                cost: None,
+                                cost: run_cost_complete.then(|| run_cost.clone()).flatten(),
                             },
                         };
                         return;
@@ -1880,6 +1888,8 @@ fn empty_terminal_message(
         requested_model: model.model.clone(),
         response_model: None,
         response_id: None,
+        end_turn: None,
+        diagnostics: Vec::new(),
         content: Vec::new(),
         replay: ReplayEnvelope::new(ReplayScope::new(
             model.provider.clone(),
@@ -1888,6 +1898,7 @@ fn empty_terminal_message(
             model.model.clone(),
         )),
         usage: Usage::zero(UsageSource::Unknown),
+        cost: None,
         finish: AssistantFinish {
             reason,
             raw_provider_reason: None,
@@ -1905,9 +1916,12 @@ fn snapshot_from_message(message: &AssistantMessage) -> AssistantMessageSnapshot
         requested_model: message.requested_model.clone(),
         response_model: message.response_model.clone(),
         response_id: message.response_id.clone(),
+        end_turn: message.end_turn,
+        diagnostics: message.diagnostics.clone(),
         content: message.content.clone(),
         replay: message.replay.clone(),
         usage: message.usage.clone(),
+        cost: message.cost.clone(),
         timestamp: message.timestamp,
         terminal_message: Some(message.clone()),
     }
@@ -1922,7 +1936,7 @@ fn turn_outcome(
         assistant_finish: assistant.finish.reason,
         tool_result_message_ids,
         usage: assistant.usage.clone(),
-        cost: None,
+        cost: assistant.cost.clone(),
     }
 }
 
@@ -1952,9 +1966,26 @@ fn terminal_run_outcome(message: &AssistantMessage) -> RunOutcome {
         | AssistantFinishReason::Deferred => RunOutcome::Completed {
             final_message_id: message.id.clone(),
             usage: message.usage.clone(),
-            cost: None,
+            cost: message.cost.clone(),
         },
     }
+}
+
+fn add_cost(
+    total: Option<pi_ai::Cost>,
+    next: Option<&pi_ai::Cost>,
+) -> Result<Option<pi_ai::Cost>, ()> {
+    let Some(next) = next else {
+        return Err(());
+    };
+    let Some(mut total) = total else {
+        return Ok(Some(next.clone()));
+    };
+    if total.currency != next.currency {
+        return Err(());
+    }
+    total.micros = total.micros.checked_add(next.micros).ok_or(())?;
+    Ok(Some(total))
 }
 
 fn add_usage(mut total: Usage, next: &Usage) -> Usage {

@@ -214,6 +214,25 @@ impl ModelPricing {
         currency: Currency,
         retention: CacheWriteRetention,
     ) -> Result<Cost, CostArithmeticError> {
+        self.calculate_cost_with_multiplier(usage, currency, retention, 1, 1)
+    }
+
+    /// Calculates a response cost and applies an exact rational multiplier.
+    ///
+    /// API families use this for request-wide service tiers such as one-half
+    /// (`flex`) and five-halves (`gpt-5.5` priority) without floating-point
+    /// money or premature per-rate rounding.
+    pub fn calculate_cost_with_multiplier(
+        &self,
+        usage: &Usage,
+        currency: Currency,
+        retention: CacheWriteRetention,
+        multiplier_numerator: i128,
+        multiplier_denominator: i128,
+    ) -> Result<Cost, CostArithmeticError> {
+        if multiplier_denominator <= 0 {
+            return Err(CostArithmeticError::InvalidMultiplier);
+        }
         let rates = self.rates_for(usage);
         let ordinary_cache_write_rate = match retention {
             CacheWriteRetention::Default => rates.cache_write,
@@ -252,7 +271,13 @@ impl ModelPricing {
                     .ok_or(CostArithmeticError::Overflow)?;
                 total.checked_add(part).ok_or(CostArithmeticError::Overflow)
             })?;
-        let micros = numerator / TOKENS_PER_PRICE_RATE;
+        let scaled_numerator = numerator
+            .checked_mul(multiplier_numerator)
+            .ok_or(CostArithmeticError::Overflow)?;
+        let denominator = TOKENS_PER_PRICE_RATE
+            .checked_mul(multiplier_denominator)
+            .ok_or(CostArithmeticError::Overflow)?;
+        let micros = scaled_numerator / denominator;
 
         Ok(Cost { currency, micros })
     }
@@ -264,11 +289,18 @@ impl ModelPricing {
 pub enum CostArithmeticError {
     /// A multiplication or addition exceeded `u128`.
     Overflow,
+    /// A rational multiplier used a zero or negative denominator.
+    InvalidMultiplier,
 }
 
 impl fmt::Display for CostArithmeticError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("integer cost arithmetic overflowed")
+        match self {
+            Self::Overflow => formatter.write_str("integer cost arithmetic overflowed"),
+            Self::InvalidMultiplier => {
+                formatter.write_str("cost multiplier denominator must be positive")
+            }
+        }
     }
 }
 

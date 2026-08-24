@@ -22,14 +22,20 @@ use crate::{
     establish_with_retry_and_local_sleeper, establish_with_retry_and_sleeper,
     request_id_from_headers,
 };
-use futures_util::future::{Either, select};
+use futures_util::{
+    StreamExt,
+    future::{Either, select},
+};
 use http::HeaderMap;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use url::Url;
+
+const MAX_PROVIDER_ERROR_BODY_BYTES: usize = 64 * 1024;
 
 /// Public provider identity and logical request defaults.
 #[derive(Clone, Eq, PartialEq)]
@@ -541,6 +547,9 @@ pub struct ResolvedApiRequest {
     pub endpoint: Url,
     /// Final logical headers after all header transforms.
     pub headers: HeaderMap,
+    /// Credential-derived and API-option-derived invariant headers retained
+    /// independently of later overlays for specialized transports.
+    pub auth_headers: HeaderMap,
     /// Resolved provider secret, when required outside headers.
     pub api_key: Option<SecretString>,
     /// Selected API identifier.
@@ -557,6 +566,27 @@ pub struct ResolvedApiRequest {
     pub timeout: Option<Duration>,
     /// Provider-selected retry classifier.
     pub retry_classifier: Arc<dyn RetryClassifier>,
+}
+
+/// Original call-option representation retained through response decoding.
+#[derive(Clone, Copy)]
+pub enum ApiCallOptions<'a> {
+    /// Provider-neutral simple options plus their single erased API patch.
+    Simple(&'a SimpleGenerationOptions),
+    /// Fully typed API-family options.
+    Full(&'a ErasedApiFullOptions),
+}
+
+impl fmt::Debug for ApiCallOptions<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Simple(_) => formatter.write_str("ApiCallOptions::Simple(<redacted>)"),
+            Self::Full(options) => formatter
+                .debug_tuple("ApiCallOptions::Full")
+                .field(&options.api)
+                .finish(),
+        }
+    }
 }
 
 /// API execution resources available during lowering, transport, and decoding.
@@ -579,6 +609,8 @@ pub struct ApiExecutionContext<'a> {
     pub cancellation: &'a CancellationToken,
     /// Resolved API key for SDK-style handlers that cannot consume a header.
     pub api_key: Option<&'a SecretString>,
+    /// Original call options, unaffected by payload middleware.
+    pub call_options: ApiCallOptions<'a>,
 }
 
 /// Established provider response passed to the API-family stream decoder.
@@ -627,6 +659,7 @@ pub trait ErasedApiHandler: Send + Sync + 'static {
         _model: &ModelDescriptor,
         _context: &Context,
         _options: &ErasedApiFullOptions,
+        _effective_base_url: &Url,
         _request_options: &ApiRequestOptions,
         _headers: &mut HeaderMap,
     ) -> Result<(), AiError> {
@@ -703,6 +736,7 @@ pub trait ChatApi: Send + Sync + 'static {
         _model: &ModelDescriptor,
         _context: &Context,
         _options: &ErasedApiFullOptions,
+        _effective_base_url: &Url,
         _request_options: &ApiRequestOptions,
         _headers: &mut HeaderMap,
     ) -> Result<(), AiError> {
@@ -769,6 +803,10 @@ impl HttpChatApi {
             transport: self.transport.as_ref(),
             cancellation: &cancellation,
             api_key: request.api_key.as_ref(),
+            call_options: request.full_options.as_ref().map_or(
+                ApiCallOptions::Simple(&request.options),
+                ApiCallOptions::Full,
+            ),
         };
         let mut payload = if let Some(full_options) = request.full_options.as_ref() {
             validate_erased_full_options(
@@ -801,6 +839,7 @@ impl HttpChatApi {
             endpoint: &request.endpoint,
             headers: &request.headers,
         };
+        let transport_session_id = payload.transport_session_id().map(str::to_owned);
         for transform in request.payload_transforms.iter() {
             match transform
                 .transform(payload_context, &mut payload)
@@ -822,8 +861,15 @@ impl HttpChatApi {
             method: payload.method,
             url: request.endpoint.clone(),
             headers: request.headers.clone(),
+            auth_headers: request.auth_headers.clone(),
+            session_id: transport_session_id,
             body,
             timeout: request.timeout,
+            transport: request.request_options.transport,
+            websocket_connect_timeout: request
+                .request_options
+                .websocket_connect_timeout_ms
+                .map(Duration::from_millis),
             attempt: 0,
         };
 
@@ -833,13 +879,16 @@ impl HttpChatApi {
         let api_id = request.api.clone();
         let endpoint = request.endpoint.clone();
         let transport = Arc::clone(&self.transport);
-        let response = establish_with_retry_and_sleeper(
+        let retry_diagnostics = Arc::new(Mutex::new(Vec::new()));
+        let mut response = establish_with_retry_and_sleeper(
             &request.retry_policy,
             request.retry_classifier.as_ref(),
             self.sleeper.as_ref(),
             &cancellation,
             |attempt| {
                 let mut attempt_request = frozen.clone();
+                let invariant_headers = frozen.auth_headers.clone();
+                let invariant_session_id = frozen.session_id.clone();
                 let cancellation = cancellation.clone();
                 let attempt_middleware = Arc::clone(&attempt_middleware);
                 let response_observers = Arc::clone(&response_observers);
@@ -847,6 +896,7 @@ impl HttpChatApi {
                 let api_id = api_id.clone();
                 let endpoint = endpoint.clone();
                 let transport = Arc::clone(&transport);
+                let retry_diagnostics = Arc::clone(&retry_diagnostics);
                 async move {
                     attempt_request.attempt = attempt;
                     for middleware in attempt_middleware.iter() {
@@ -855,13 +905,27 @@ impl HttpChatApi {
                             .await
                             .map_err(|source| AttemptFailure::Middleware { attempt, source })?;
                     }
+                    attempt_request.auth_headers = invariant_headers;
+                    attempt_request.session_id = invariant_session_id;
 
-                    let response = execute_transport_attempt(
+                    let mut response = match execute_transport_attempt(
                         transport.as_ref(),
                         attempt_request,
-                        cancellation,
+                        cancellation.clone(),
                     )
-                    .await?;
+                    .await
+                    {
+                        Ok(response) => response,
+                        Err(mut failure) => {
+                            if let AttemptFailure::Transport { source, .. } = &mut failure {
+                                retry_diagnostics
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .extend(std::mem::take(&mut source.diagnostics));
+                            }
+                            return Err(failure);
+                        }
+                    };
                     let metadata = ProviderResponseMetadata {
                         attempt,
                         status: response.status,
@@ -873,20 +937,20 @@ impl HttpChatApi {
                         api: &api_id,
                         endpoint: &endpoint,
                     };
-                    for observer in response_observers.iter() {
-                        observer
-                            .on_response(observation, &metadata)
-                            .await
-                            .map_err(|source| AttemptFailure::Middleware { attempt, source })?;
+                    if response.notify_observers {
+                        for observer in response_observers.iter() {
+                            observer
+                                .on_response(observation, &metadata)
+                                .await
+                                .map_err(|source| AttemptFailure::Middleware { attempt, source })?;
+                        }
                     }
                     if !(200..300).contains(&response.status) {
-                        return Err(AttemptFailure::http_at(
-                            attempt,
-                            response.status,
-                            response.headers,
-                            SystemTime::now(),
-                            "provider rejected request before streaming",
-                        ));
+                        retry_diagnostics
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .extend(std::mem::take(&mut response.diagnostics));
+                        return Err(send_http_failure(attempt, response, &cancellation).await);
                     }
                     Ok(response)
                 }
@@ -899,8 +963,20 @@ impl HttpChatApi {
                 &request.model.common.model_ref,
                 request.retry_classifier.as_ref(),
                 &request.retry_policy,
+                &request_error_secret_values(
+                    &request.headers,
+                    &request.auth_headers,
+                    request.api_key.as_ref(),
+                ),
             )
         })?;
+        let mut diagnostics = retry_diagnostics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !diagnostics.is_empty() {
+            diagnostics.append(&mut response.diagnostics);
+            response.diagnostics = std::mem::take(&mut *diagnostics);
+        }
 
         let execution = ApiExecutionContext {
             model: &request.model,
@@ -912,6 +988,10 @@ impl HttpChatApi {
             transport: self.transport.as_ref(),
             cancellation: &cancellation,
             api_key: request.api_key.as_ref(),
+            call_options: request.full_options.as_ref().map_or(
+                ApiCallOptions::Simple(&request.options),
+                ApiCallOptions::Full,
+            ),
         };
         Ok(self.handler.decode_stream(response, &execution))
     }
@@ -923,11 +1003,18 @@ impl ChatApi for HttpChatApi {
         model: &ModelDescriptor,
         context: &Context,
         options: &ErasedApiFullOptions,
+        effective_base_url: &Url,
         request_options: &ApiRequestOptions,
         headers: &mut HeaderMap,
     ) -> Result<(), AiError> {
-        self.handler
-            .apply_full_options_headers(model, context, options, request_options, headers)
+        self.handler.apply_full_options_headers(
+            model,
+            context,
+            options,
+            effective_base_url,
+            request_options,
+            headers,
+        )
     }
 
     fn stream(
@@ -956,6 +1043,9 @@ pub struct LocalResolvedApiRequest {
     pub endpoint: Url,
     /// Final logical headers.
     pub headers: HeaderMap,
+    /// Credential-derived and API-option-derived invariant headers retained
+    /// independently of later overlays.
+    pub auth_headers: HeaderMap,
     /// Resolved provider secret.
     pub api_key: Option<SecretString>,
     /// Selected API identifier.
@@ -994,6 +1084,8 @@ pub struct LocalApiExecutionContext<'a> {
     pub cancellation: &'a CancellationToken,
     /// Resolved API key for SDK-style handlers.
     pub api_key: Option<&'a SecretString>,
+    /// Original call options, unaffected by payload middleware.
+    pub call_options: ApiCallOptions<'a>,
 }
 
 /// Established local provider response passed to the local decoder.
@@ -1041,6 +1133,7 @@ pub trait LocalErasedApiHandler: 'static {
         _model: &ModelDescriptor,
         _context: &Context,
         _options: &ErasedApiFullOptions,
+        _effective_base_url: &Url,
         _request_options: &ApiRequestOptions,
         _headers: &mut HeaderMap,
     ) -> Result<(), AiError> {
@@ -1072,6 +1165,7 @@ pub trait LocalChatApi: 'static {
         _model: &ModelDescriptor,
         _context: &Context,
         _options: &ErasedApiFullOptions,
+        _effective_base_url: &Url,
         _request_options: &ApiRequestOptions,
         _headers: &mut HeaderMap,
     ) -> Result<(), AiError> {
@@ -1140,6 +1234,10 @@ impl LocalHttpChatApi {
             transport: self.transport.as_ref(),
             cancellation: &cancellation,
             api_key: request.api_key.as_ref(),
+            call_options: request.full_options.as_ref().map_or(
+                ApiCallOptions::Simple(&request.options),
+                ApiCallOptions::Full,
+            ),
         };
         let mut payload = if let Some(full_options) = request.full_options.as_ref() {
             validate_erased_full_options(
@@ -1172,6 +1270,7 @@ impl LocalHttpChatApi {
             endpoint: &request.endpoint,
             headers: &request.headers,
         };
+        let transport_session_id = payload.transport_session_id().map(str::to_owned);
         for transform in request.payload_transforms.iter() {
             match transform
                 .transform(payload_context, &mut payload)
@@ -1192,8 +1291,15 @@ impl LocalHttpChatApi {
             method: payload.method,
             url: request.endpoint.clone(),
             headers: request.headers.clone(),
+            auth_headers: request.auth_headers.clone(),
+            session_id: transport_session_id,
             body,
             timeout: request.timeout,
+            transport: request.request_options.transport,
+            websocket_connect_timeout: request
+                .request_options
+                .websocket_connect_timeout_ms
+                .map(Duration::from_millis),
             attempt: 0,
         };
 
@@ -1203,13 +1309,16 @@ impl LocalHttpChatApi {
         let api_id = request.api.clone();
         let endpoint = request.endpoint.clone();
         let transport = Rc::clone(&self.transport);
-        let response = establish_with_retry_and_local_sleeper(
+        let retry_diagnostics = Rc::new(RefCell::new(Vec::new()));
+        let mut response = establish_with_retry_and_local_sleeper(
             &request.retry_policy,
             request.retry_classifier.as_ref(),
             self.sleeper.as_ref(),
             &cancellation,
             |attempt| {
                 let mut attempt_request = frozen.clone();
+                let invariant_headers = frozen.auth_headers.clone();
+                let invariant_session_id = frozen.session_id.clone();
                 let cancellation = cancellation.clone();
                 let attempt_middleware = Rc::clone(&attempt_middleware);
                 let response_observers = Rc::clone(&response_observers);
@@ -1217,6 +1326,7 @@ impl LocalHttpChatApi {
                 let api_id = api_id.clone();
                 let endpoint = endpoint.clone();
                 let transport = Rc::clone(&transport);
+                let retry_diagnostics = Rc::clone(&retry_diagnostics);
                 async move {
                     attempt_request.attempt = attempt;
                     for middleware in attempt_middleware.iter() {
@@ -1225,13 +1335,26 @@ impl LocalHttpChatApi {
                             .await
                             .map_err(|source| AttemptFailure::Middleware { attempt, source })?;
                     }
+                    attempt_request.auth_headers = invariant_headers;
+                    attempt_request.session_id = invariant_session_id;
 
-                    let response = execute_local_transport_attempt(
+                    let mut response = match execute_local_transport_attempt(
                         transport.as_ref(),
                         attempt_request,
-                        cancellation,
+                        cancellation.clone(),
                     )
-                    .await?;
+                    .await
+                    {
+                        Ok(response) => response,
+                        Err(mut failure) => {
+                            if let AttemptFailure::Transport { source, .. } = &mut failure {
+                                retry_diagnostics
+                                    .borrow_mut()
+                                    .extend(std::mem::take(&mut source.diagnostics));
+                            }
+                            return Err(failure);
+                        }
+                    };
                     let metadata = ProviderResponseMetadata {
                         attempt,
                         status: response.status,
@@ -1243,20 +1366,19 @@ impl LocalHttpChatApi {
                         api: &api_id,
                         endpoint: &endpoint,
                     };
-                    for observer in response_observers.iter() {
-                        observer
-                            .on_response(observation, &metadata)
-                            .await
-                            .map_err(|source| AttemptFailure::Middleware { attempt, source })?;
+                    if response.notify_observers {
+                        for observer in response_observers.iter() {
+                            observer
+                                .on_response(observation, &metadata)
+                                .await
+                                .map_err(|source| AttemptFailure::Middleware { attempt, source })?;
+                        }
                     }
                     if !(200..300).contains(&response.status) {
-                        return Err(AttemptFailure::http_at(
-                            attempt,
-                            response.status,
-                            response.headers,
-                            SystemTime::now(),
-                            "provider rejected request before streaming",
-                        ));
+                        retry_diagnostics
+                            .borrow_mut()
+                            .extend(std::mem::take(&mut response.diagnostics));
+                        return Err(local_http_failure(attempt, response, &cancellation).await);
                     }
                     Ok(response)
                 }
@@ -1276,8 +1398,22 @@ impl LocalHttpChatApi {
                     .retry_classifier
                     .classify(original, &request.retry_policy),
             };
-            attempt_ai_error_with_decision(error, &request.model.common.model_ref, decision)
+            attempt_ai_error_with_decision(
+                error,
+                &request.model.common.model_ref,
+                decision,
+                &request_error_secret_values(
+                    &request.headers,
+                    &request.auth_headers,
+                    request.api_key.as_ref(),
+                ),
+            )
         })?;
+        let mut diagnostics = retry_diagnostics.borrow_mut();
+        if !diagnostics.is_empty() {
+            diagnostics.append(&mut response.diagnostics);
+            response.diagnostics = std::mem::take(&mut *diagnostics);
+        }
 
         let execution = LocalApiExecutionContext {
             model: &request.model,
@@ -1289,6 +1425,10 @@ impl LocalHttpChatApi {
             transport: self.transport.as_ref(),
             cancellation: &cancellation,
             api_key: request.api_key.as_ref(),
+            call_options: request.full_options.as_ref().map_or(
+                ApiCallOptions::Simple(&request.options),
+                ApiCallOptions::Full,
+            ),
         };
         Ok(self.handler.decode_stream(response, &execution))
     }
@@ -1300,11 +1440,18 @@ impl LocalChatApi for LocalHttpChatApi {
         model: &ModelDescriptor,
         context: &Context,
         options: &ErasedApiFullOptions,
+        effective_base_url: &Url,
         request_options: &ApiRequestOptions,
         headers: &mut HeaderMap,
     ) -> Result<(), AiError> {
-        self.handler
-            .apply_full_options_headers(model, context, options, request_options, headers)
+        self.handler.apply_full_options_headers(
+            model,
+            context,
+            options,
+            effective_base_url,
+            request_options,
+            headers,
+        )
     }
 
     fn stream(
@@ -1342,6 +1489,34 @@ async fn execute_local_transport_attempt(
     }
 }
 
+async fn local_http_failure(
+    attempt: u32,
+    response: LocalHttpResponse,
+    cancellation: &CancellationToken,
+) -> AttemptFailure {
+    let LocalHttpResponse {
+        status,
+        headers,
+        diagnostics: _,
+        notify_observers: _,
+        mut body,
+    } = response;
+    let bytes = match read_provider_failure_body(&mut body, cancellation).await {
+        Ok(bytes) => bytes,
+        Err(ErrorBodyReadError::Cancelled) => return AttemptFailure::Cancelled,
+        Err(ErrorBodyReadError::Transport(source)) => {
+            return AttemptFailure::transport(attempt, source);
+        }
+    };
+    AttemptFailure::http_at(
+        attempt,
+        status,
+        headers,
+        SystemTime::now(),
+        provider_failure_text(&bytes),
+    )
+}
+
 fn middleware_ai_error(error: crate::MiddlewareError, model: &ModelRef) -> AiError {
     AiError::new(AiErrorKind::Internal, error.message).with_model(model.clone())
 }
@@ -1372,11 +1547,77 @@ async fn execute_transport_attempt(
     }
 }
 
+async fn send_http_failure(
+    attempt: u32,
+    response: HttpResponse,
+    cancellation: &CancellationToken,
+) -> AttemptFailure {
+    let HttpResponse {
+        status,
+        headers,
+        diagnostics: _,
+        notify_observers: _,
+        mut body,
+    } = response;
+    let bytes = match read_provider_failure_body(&mut body, cancellation).await {
+        Ok(bytes) => bytes,
+        Err(ErrorBodyReadError::Cancelled) => return AttemptFailure::Cancelled,
+        Err(ErrorBodyReadError::Transport(source)) => {
+            return AttemptFailure::transport(attempt, source);
+        }
+    };
+    AttemptFailure::http_at(
+        attempt,
+        status,
+        headers,
+        SystemTime::now(),
+        provider_failure_text(&bytes),
+    )
+}
+
+fn provider_failure_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+enum ErrorBodyReadError {
+    Cancelled,
+    Transport(crate::TransportError),
+}
+
+async fn read_provider_failure_body<S>(
+    body: &mut S,
+    cancellation: &CancellationToken,
+) -> Result<Vec<u8>, ErrorBodyReadError>
+where
+    S: futures_core::Stream<Item = Result<Vec<u8>, crate::TransportError>> + Unpin + ?Sized,
+{
+    let mut bytes = Vec::new();
+    while bytes.len() < MAX_PROVIDER_ERROR_BODY_BYTES {
+        if cancellation.is_cancelled() {
+            return Err(ErrorBodyReadError::Cancelled);
+        }
+        let next = Box::pin(body.next());
+        let cancelled = Box::pin(cancellation.cancelled());
+        let chunk = match select(next, cancelled).await {
+            Either::Left((chunk, _)) => chunk,
+            Either::Right(((), _)) => return Err(ErrorBodyReadError::Cancelled),
+        };
+        let Some(chunk) = chunk else {
+            break;
+        };
+        let chunk = chunk.map_err(ErrorBodyReadError::Transport)?;
+        let remaining = MAX_PROVIDER_ERROR_BODY_BYTES - bytes.len();
+        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+    }
+    Ok(bytes)
+}
+
 fn attempt_ai_error(
     error: AttemptFailure,
     model: &ModelRef,
     classifier: &dyn RetryClassifier,
     policy: &RetryPolicy,
+    secret_values: &[String],
 ) -> AiError {
     let original = error.original();
     let decision = match &error {
@@ -1388,13 +1629,14 @@ fn attempt_ai_error(
         },
         _ => classifier.classify(original, policy),
     };
-    attempt_ai_error_with_decision(error, model, decision)
+    attempt_ai_error_with_decision(error, model, decision, secret_values)
 }
 
 fn attempt_ai_error_with_decision(
     error: AttemptFailure,
     model: &ModelRef,
     decision: RetryDecision,
+    secret_values: &[String],
 ) -> AiError {
     let original = error.original();
     let kind = match original {
@@ -1412,7 +1654,9 @@ fn attempt_ai_error_with_decision(
         RetryDecision::RetryAfter(delay) => (true, Some(delay)),
         RetryDecision::RejectServerDelay { requested, .. } => (true, Some(requested)),
     };
-    let mut result = AiError::new(kind, error.to_string()).with_model(model.clone());
+    let secret_values = secret_values.iter().map(String::as_str).collect::<Vec<_>>();
+    let message = crate::sanitization::redact_public_text(error.to_string(), &secret_values);
+    let mut result = AiError::new(kind, message).with_model(model.clone());
     result.retryable = retryable;
     result.retry_after = retry_after;
     result.status = original.status();
@@ -1433,6 +1677,49 @@ fn attempt_ai_error_with_decision(
         AttemptFailure::Cancelled | AttemptFailure::RetryDelayTooLong { .. } => {}
     }
     result
+}
+
+fn request_error_secret_values(
+    headers: &HeaderMap,
+    auth_headers: &HeaderMap,
+    api_key: Option<&SecretString>,
+) -> Vec<String> {
+    let mut values = auth_headers
+        .values()
+        .filter_map(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    values.extend(
+        headers
+            .iter()
+            .filter(|(name, _)| sensitive_header_name(name.as_str()))
+            .filter_map(|(_, value)| value.to_str().ok())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+    );
+    if let Some(api_key) = api_key
+        && !api_key.expose_secret().is_empty()
+    {
+        values.push(api_key.expose_secret().to_owned());
+    }
+    values.sort_unstable();
+    values.dedup();
+    values
+}
+
+fn sensitive_header_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "authorization"
+            | "proxy-authorization"
+            | "cf-aig-authorization"
+            | "x-api-key"
+            | "x-goog-api-key"
+            | "api-key"
+            | "cookie"
+            | "set-cookie"
+    )
 }
 
 /// Complete provider composition registered atomically with [`crate::Models`].

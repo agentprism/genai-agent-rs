@@ -178,6 +178,8 @@ pub enum OpaquePayload {
 }
 ```
 
+> Correction: Pinned Pi retains the calculated monetary cost on every assistant response as part of `usage.cost`, including after persistence. Because Part 1 §3.9 deliberately separates token `Usage` from monetary `Cost`, the Rust `AssistantMessage` and `AssistantMessageSnapshot` additionally carry `cost: Option<Cost>`; API-family decoders populate it at terminal assembly and `pi-agent-core` may aggregate only same-currency, fully known response costs (`packages/ai/src/types.ts:319–332`; `packages/ai/src/models.ts:878–897`; `packages/ai/src/api/openai-responses.ts:347–379`; `packages/ai/src/api/openai-codex-responses.ts:593–630`).
+
 Two distinctions matter:
 
 * **Canonical content** is what applications display, summarize, edit, and hand off.
@@ -339,6 +341,8 @@ impl AssistantAssembler {
 ```
 
 > Correction: Pinned Pi assigns `rawStopReason` before mapping a provider finish reason and retains it when that mapping produces a failed assistant (including `content_filter`). The Rust assembler's failed-terminal operation therefore also accepts `raw_provider_reason: Option<String>`; provider decoders pass the observed value while transport failures pass `None` (`packages/ai/src/api/openai-completions.ts:535–545,641–674`; `packages/ai/test/openai-completions-raw-stop-reason.test.ts`).
+
+> Correction: Pinned OpenAI Responses initializes a function-call scratch buffer from `response.output_item.added.item.arguments` and replaces it with the authoritative `response.output_item.done.item.arguments`, which need not extend the streamed prefix. The immutable Rust protocol therefore includes `ToolArgumentsReplaced { block_id, arguments }` in addition to `ToolArgumentsDelta`; decoders emit the initial value as a delta and use replacement when the final value is not an append-only extension (`packages/ai/src/api/openai-responses-shared.ts:650–760`).
 
 Completion validation is strict:
 
@@ -733,7 +737,31 @@ OpenAI Responses stores several kinds of replay information:
 
 On turn two, Pi reconstructs reasoning output items from their serialized signatures, output-message IDs from text signatures, and function-call IDs from compound tool-call IDs. See `packages/ai/src/api/openai-responses-shared.ts:40–280`.
 
+> Correction: Pinned Pi reconstructs Responses assistant input by walking the projected canonical content blocks in order and consulting each surviving replay identity in place; it does not emit every applicable replay record before canonical fallback blocks. After cross-model projection, reasoning and text identities can be removed while a deferred function-call identity survives, so canonical `[thinking, text, tool]` encodes as `[message, message, function_call]`. Rust preserves that canonical block order while retaining provider output ordinals in the persisted replay envelope (`packages/ai/src/api/openai-responses-shared.ts:218–293`).
+
 During streaming, Pi creates slots by `output_index`; when a complete reasoning item arrives, it replaces the visible thinking and serializes the entire reasoning item. Message completion records the message ID and phase, while function-call completion finalizes arguments and namespace. See `packages/ai/src/api/openai-responses-shared.ts:560–790`.
+
+> Correction: Pinned Pi treats completed Responses reasoning and text as authoritative assignments, even when the completed value is not an append-only extension of streamed deltas. The immutable Rust protocol therefore includes `ThinkingReplaced { block_id, thinking }` and `TextReplaced { block_id, text }`; Responses decoders use them for non-prefix final values. Codex also copies boolean `response.end_turn` into the assistant record, and pre-stream WebSocket fallback appends a persisted `provider_transport_failure` diagnostic before continuing over SSE, so `AssistantMessage` and `ResponseMetadata` retain end-turn metadata and the event protocol can append diagnostics (`packages/ai/src/api/openai-responses-shared.ts:680–707`; `packages/ai/src/api/openai-codex-responses.ts:330–363,717–749`; `packages/ai/src/utils/diagnostics.ts:1–45`).
+
+> Correction: Pinned Codex cached-WebSocket continuation is derived by re-encoding the fully assembled assistant message, not by copying the terminal `response.output` array. The latter may omit tool calls and may contain non-canonical streaming-only fields. The Rust Codex transport therefore assembles `response.output_item.done` records by `output_index`, canonicalizes message and tool-call items using the same turn-two shapes, backfills terminal encrypted reasoning, and uses that canonical sequence with `previous_response_id` (`packages/ai/src/api/openai-codex-responses.ts:1390–1439,1521–1532`; `packages/ai/src/api/openai-responses-shared.ts:218–291`).
+
+> Correction: Pinned Codex maps `response.failed` and top-level `error` events before the shared Responses decoder: a failed response exposes only its nested provider message, a top-level error accepts nested code/message fields and prefixes the failure with `Codex error:`, and neither path retains `response.status` as `rawStopReason`. Public OpenAI Responses retains the shared mapper behavior described above (`packages/ai/src/api/openai-codex-responses.ts:704–749`; `packages/ai/src/api/openai-responses-shared.ts:704–736`).
+
+> Correction: Pinned Responses completion falls back to streamed reasoning when both final summary and content are empty, to streamed function arguments when final arguments are absent or empty, and to streamed custom-tool input when final input is absent. It backfills encrypted reasoning only from non-empty terminal content, and the shared decoder records `response.id` but does not copy `response.model` onto the assistant message. Rust preserves those exact finalization rules (`packages/ai/src/api/openai-responses-shared.ts:650–707,744–769`).
+
+> Correction: Pinned Responses preserves a function/custom-tool namespace across a same-provider/API model change when that tool is deferred, while dropping a paired `fc_*` output-item ID. Function-call identity replay therefore uses `ExactProviderApi` applicability and the encoder applies the model-sensitive item-ID and namespace sub-rules; reasoning and output-message replay remain `ExactProviderApiModel` (`packages/ai/src/api/openai-responses-shared.ts:248–291`).
+
+> Correction: Pinned Codex treats any mapped WebSocket event, including `codex.rate_limits`, as stream start, but still retries one nested `previous_response_not_found` error regardless of whether such an event preceded it. Its `onResponse` callback runs only for the SSE `fetch` path, not for WebSocket exchanges. Rust scans the WebSocket prelude for that continuation error without making later connection-limit failures pre-stream-retryable, and synthetic WebSocket responses suppress `ResponseObserver` (`packages/ai/src/api/openai-codex-responses.ts:294–414,704–749,1442–1539`; `packages/ai/test/openai-codex-stream.test.ts`).
+
+> Correction: Pinned Responses increments its fallback `msg_pi_*` message counter only after a source message emits at least one wire item; empty user messages and assistant messages containing only unsigned thinking are skipped without consuming an index. Rust likewise advances the counter only after conversion emits output (`packages/ai/src/api/openai-responses-shared.ts:184–349`; `packages/ai/test/openai-responses-message-id.test.ts`).
+
+> Correction: Pinned Codex normalizes an unknown terminal response status to an absent status, which the shared Responses finalizer treats as `stop`; public Responses retains its exhaustive unknown-status failure. The Codex SSE parser also dispatches only blank-line-terminated frames and discards an unterminated EOF tail. Rust applies both behaviors only to the Codex family (`packages/ai/src/api/openai-codex-responses.ts:740–758,765–822`; `packages/ai/src/api/openai-responses-shared.ts:704–736`).
+
+> Correction: Pinned Codex records a typed-session sticky SSE fallback for any WebSocket transport failure, including a body failure after semantic stream start, while clearing that session's cached continuation. The current request remains failed after start, but the next request for the same typed session bypasses WebSocket. Rust performs the same state transition in both Send and Local body adapters (`packages/ai/src/api/openai-codex-responses.ts:333–363,930–949,1534–1539`).
+
+> Correction: Pinned shared Responses recognizes only `response.completed` and `response.incomplete` as successful terminal events; `response.done` becomes terminal only after the Codex event mapper translates it. The shared decoder also deletes every `output_index` slot at `response.output_item.done`, so later text, reasoning, function-argument, and custom-input events for that slot are ignored. Rust applies the same family-specific terminal rule and post-completion behavior (`packages/ai/src/api/openai-responses-shared.ts:650–735`; `packages/ai/src/api/openai-codex-responses.ts:704–758`).
+
+> Correction: Pinned public and Codex Responses price `flex` at one-half and `priority` at two, except GPT-5.5 priority at five-halves. Codex additionally resolves a response-echoed `default` tier back to the requested `flex` or `priority` tier. Rust applies those multipliers with checked integer/rational arithmetic after provider usage normalization; the decoder configuration therefore retains the original requested service tier independently of payload middleware (`packages/ai/src/api/openai-responses.ts:347–379`; `packages/ai/src/api/openai-codex-responses.ts:593–630`; `packages/ai/test/openai-codex-stream.test.ts`).
 
 ### Rust representation
 
@@ -1375,6 +1403,8 @@ See `packages/ai/src/utils/provider-retry.ts:1–260`.
 
 > Correction: Pinned Pi's implementation retries every numeric status `>= 500`, not only statuses in the HTTP 5xx range. The Rust classifier preserves that exact predicate (`packages/ai/src/utils/provider-retry.ts:22–36`).
 
+> Correction: Pinned Codex Responses does not use the generic OpenAI retry classifier. It defaults to zero retries. When retries are enabled, status 429/500/502/503/504 and the transient raw-response-text allowlist are handled first with `retry-after-ms`/`Retry-After` support and the configured maximum server delay; named account/quota/billing 429 responses are terminal. Every other HTTP body is then parsed through `parseErrorResponse`, and the surrounding catch applies its case-sensitive `"usage limit"` exclusion to that parsed friendly/error message, not to the raw JSON; those catch-path retries ignore response delay headers. Network failures use the same case-sensitive exclusion. Backoff is an unjittered one-second exponential base. The Codex provider registrations therefore install a family-specific Send/Local classifier and policy, retain raw response text for initial classification, and normalize the terminal public failure through the classifier's object-safe Send/Local terminal hook (`packages/ai/src/api/openai-codex-responses.ts:44–48,113–167,377–451,1549–1574`).
+
 ### Correct owner
 
 The retry loop belongs inside the **API transport implementation**, immediately around the operation that establishes the HTTP response or provider SDK stream.
@@ -1447,6 +1477,8 @@ pub struct ApiExecutionContext<'a> {
 ```
 
 > Correction: Pinned OpenAI Completions decoding closes streamed custom grammar-tool input with the input-property name derived from the request's configured tool schema. The execution context must therefore retain the canonical request context (or an equivalent request-scoped decoder configuration) through response decoding; the Rust `ApiExecutionContext` and local counterpart include `context: &Context` for that purpose (`packages/ai/src/api/openai-completions.ts:290–490`; `packages/ai/src/api/constrained-sampling.ts:250–277`).
+
+> Correction: Pinned Codex Responses pricing must distinguish a response-echoed `service_tier: "default"` from the caller's requested `flex` or `priority`, and request payload middleware must not silently change the pricing contract after lowering. The Rust `ApiExecutionContext` and local counterpart therefore also retain a borrowed `ApiCallOptions` view of the original simple or full call options for request-scoped decoder configuration (`packages/ai/src/api/openai-codex-responses.ts:623–630,655–665,1508–1519`; `packages/ai/test/openai-codex-stream.test.ts`).
 
 ### Cancellable retry loop
 
@@ -1661,6 +1693,14 @@ The exact request pipeline should be:
 13. After the first semantic event is visible, all subsequent failure is terminal
     and in-band; there is no transparent full-request retry.
 ```
+
+> Correction: Pinned Pi's Codex SSE transport applies model and caller headers first, then reasserts `Authorization`, `chatgpt-account-id`, `originator`, and `User-Agent`, followed by its SSE protocol headers. The Codex transport must therefore treat its auth/account/originator and protocol headers as final transport invariants rather than ordinary logical defaults (`packages/ai/src/api/openai-codex-responses.ts:1593–1631`).
+
+> Correction: When Codex session affinity is enabled, pinned Pi derives its internal WebSocket cache, continuation, and sticky-fallback key only from typed `options.sessionId` plus cache retention, never from merged HTTP headers. It retains the raw typed session for that internal key, separately clamps the protocol-facing prompt/session identifier, and sets option-derived `session-id` and `x-client-request-id` after model and caller headers. The SSE transport therefore carries typed session state independently of hostile logical overlays and reasserts only the clamped protocol values at the final transport boundary in both Send and Local paths (`packages/ai/src/api/openai-codex-responses.ts:267–288,930–949,1466–1486,1614–1631`).
+
+> Correction: Pinned public OpenAI Responses accepts a non-empty case-insensitive `Authorization` or `CF-AIG-Authorization` header when no separate API key resolves only when that header came from the caller's explicit option headers; model defaults or later transforms cannot grant initial auth eligibility. `Models` and `LocalModels` therefore require explicit-option eligibility before entering the logical header pipeline, allow this mode only for `openai-responses`, and still reject the request if neither header remains non-empty after final transforms (`packages/ai/src/api/openai-responses.ts:35–47,198–215,218–265`).
+
+> Correction: Pinned public Responses applies option-derived session-affinity headers after model headers and before explicit request headers for both simple and full entrypoints. Rust delays full Responses affinity until the model-header overlay has completed; explicit request headers and final transforms remain later (`packages/ai/src/api/openai-responses.ts:218–289`).
 
 ### Bedrock signing special case
 
@@ -1909,6 +1949,8 @@ fn plan_common(
 > Correction: Pinned Pi bypasses context estimation and clamping when the catalog context window is nonpositive. For a positive window it clamps the caller's requested/default output only to the remaining context (with a minimum of one), not separately to the catalog maximum; an explicit request may therefore exceed `model.maxTokens` when context permits. Rust preserves those predicates (`packages/ai/src/api/simple-options.ts:11–18,34`).
 
 > Correction: Pinned Pi keeps model/request `samplingParams` separate from named simple fields, merges request keys over model keys, and applies that object after named OpenAI-family request fields. Thus model `samplingParams.temperature = 1` overrides named request `temperature = 0` unless request `samplingParams` supplies a later value. Rust preserves this ordered overlay (`packages/ai/src/api/simple-options.ts:21–34`; `packages/ai/src/api/openai-completions.ts:942–945`; `packages/ai/test/sampling-options.test.ts`).
+
+> Correction: Pinned Responses simple adapters clamp to a reasoning-level name and pass that name to the full encoder; the full encoder then applies `thinkingLevelMap` exactly once. A missing or null mapped full-option value falls back to the requested string, while a public summary-only request uses literal `medium` without mapping it. Rust lowering therefore retains the clamped level name instead of eagerly replacing it with the mapped provider string, and both public and Codex full encoders perform the single applicable map (`packages/ai/src/api/openai-responses.ts:196–205,266–305`; `packages/ai/src/api/openai-codex-responses.ts:471–493,518–569`).
 
 For Pi wire parity, the initial implementation should use Pi-equivalent token estimation rather than introducing a tokenizer-specific estimator that would change output caps.
 
@@ -2946,6 +2988,10 @@ The OpenAI Codex flow demonstrates the difficult case:
 * extraction of provider-specific account data.
 
 See `packages/ai/src/auth/oauth/openai-codex.ts:120–520`.
+
+> Correction: Pinned Codex request execution also accepts a caller-supplied OAuth access token through the request `apiKey` option, derives `chatgpt_account_id` directly from that JWT, and does not require a stored refresh credential for that path. The Codex provider therefore registers a non-ambient direct-token `ApiKeyAuth` method alongside its OAuth method for both Send and Local resolvers; stored OAuth remains the provider-owned persistent credential (`packages/ai/src/api/openai-codex-responses.ts:252–283`; `packages/ai/src/auth/oauth/openai-codex.ts:97–112`).
+
+> Correction: Pinned Codex browser OAuth always advertises and exchanges the registered `http://localhost:1455/auth/callback` URI, even when a host-owned fixed-loopback receiver binds and reports the equivalent numeric `127.0.0.1` address. The receiver callback must include the exact generated state, while manually pasted raw authorization codes retain Pi's optional-state behavior and pasted redirect URLs validate state when present. Rust keeps callback reception host-owned but applies those provider validation and registered-URI rules in both Send and Local flows (`packages/ai/src/auth/oauth/openai-codex.ts:73–96,295–352,421–500`).
 
 ## 6.2 Native Rust host contract
 

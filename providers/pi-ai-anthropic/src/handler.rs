@@ -97,6 +97,7 @@ impl ErasedApiHandler for AnthropicMessagesHandler {
         model: &ModelDescriptor,
         context: &Context,
         options: &ErasedApiFullOptions,
+        _effective_base_url: &Url,
         request_options: &ApiRequestOptions,
         headers: &mut HeaderMap,
     ) -> Result<(), AiError> {
@@ -181,6 +182,7 @@ impl LocalErasedApiHandler for AnthropicMessagesHandler {
         model: &ModelDescriptor,
         context: &Context,
         options: &ErasedApiFullOptions,
+        _effective_base_url: &Url,
         request_options: &ApiRequestOptions,
         headers: &mut HeaderMap,
     ) -> Result<(), AiError> {
@@ -742,11 +744,18 @@ impl ChatApi for AnthropicMessagesApi {
         model: &ModelDescriptor,
         context: &Context,
         options: &ErasedApiFullOptions,
+        effective_base_url: &Url,
         request_options: &ApiRequestOptions,
         headers: &mut HeaderMap,
     ) -> Result<(), AiError> {
-        self.inner
-            .apply_full_options_headers(model, context, options, request_options, headers)
+        self.inner.apply_full_options_headers(
+            model,
+            context,
+            options,
+            effective_base_url,
+            request_options,
+            headers,
+        )
     }
 
     fn stream(
@@ -768,11 +777,18 @@ impl LocalChatApi for LocalAnthropicMessagesApi {
         model: &ModelDescriptor,
         context: &Context,
         options: &ErasedApiFullOptions,
+        effective_base_url: &Url,
         request_options: &ApiRequestOptions,
         headers: &mut HeaderMap,
     ) -> Result<(), AiError> {
-        self.inner
-            .apply_full_options_headers(model, context, options, request_options, headers)
+        self.inner.apply_full_options_headers(
+            model,
+            context,
+            options,
+            effective_base_url,
+            request_options,
+            headers,
+        )
     }
 
     fn stream(

@@ -258,7 +258,9 @@ pub struct ThinkingBudgetPlan {
 fn model_sampling_defaults(model: &ModelDescriptor) -> &OrderedJsonObject {
     match &model.api {
         ApiModelConfig::OpenAiCompletions(config) => &config.sampling_defaults,
-        ApiModelConfig::OpenAiResponses(config) => &config.sampling_defaults,
+        ApiModelConfig::OpenAiResponses(config) | ApiModelConfig::OpenAiCodexResponses(config) => {
+            &config.sampling_defaults
+        }
         ApiModelConfig::AnthropicMessages(_)
         | ApiModelConfig::GoogleGenerativeAi(_)
         | ApiModelConfig::GoogleVertex(_)
@@ -452,6 +454,12 @@ pub struct ApiRequestOptions {
     pub max_retry_delay_ms: Option<u64>,
     /// HTTP response-establishment timeout in milliseconds.
     pub timeout_ms: Option<u64>,
+    /// Preferred provider transport when an API family supports more than
+    /// one protocol.
+    pub transport: Option<StreamTransport>,
+    /// WebSocket connection/open timeout in milliseconds. Stream idleness is
+    /// governed separately by `timeout_ms`.
+    pub websocket_connect_timeout_ms: Option<u64>,
     /// Optional provider session-affinity identifier.
     pub session_id: Option<String>,
     /// Explicit logical request headers, including deletion markers.
@@ -464,6 +472,8 @@ impl From<&SimpleGenerationOptions> for ApiRequestOptions {
             max_retries: options.max_retries,
             max_retry_delay_ms: options.max_retry_delay_ms,
             timeout_ms: options.timeout_ms,
+            transport: options.transport,
+            websocket_connect_timeout_ms: options.websocket_connect_timeout_ms,
             session_id: options.session_id.clone(),
             headers: options.headers.clone(),
         }
@@ -477,6 +487,11 @@ impl fmt::Debug for ApiRequestOptions {
             .field("max_retries", &self.max_retries)
             .field("max_retry_delay_ms", &self.max_retry_delay_ms)
             .field("timeout_ms", &self.timeout_ms)
+            .field("transport", &self.transport)
+            .field(
+                "websocket_connect_timeout_ms",
+                &self.websocket_connect_timeout_ms,
+            )
             .field(
                 "session_id",
                 &self.session_id.as_ref().map(|_| "<redacted session id>"),
@@ -484,6 +499,24 @@ impl fmt::Debug for ApiRequestOptions {
             .field("headers", &"<redacted headers>")
             .finish()
     }
+}
+
+/// Common provider transport selection from pinned Pi's `StreamOptions`.
+///
+/// API families with a single transport ignore this value. OpenAI Codex
+/// Responses implements every variant.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StreamTransport {
+    /// Force HTTP Server-Sent Events.
+    Sse,
+    /// Force a WebSocket request carrying the full canonical context.
+    Websocket,
+    /// Force WebSocket context continuation when the cached prefix matches.
+    WebsocketCached,
+    /// Prefer cached WebSocket and fall back to SSE before semantic output.
+    #[default]
+    Auto,
 }
 
 /// Alternate typed and erased representations of one API-family patch
@@ -534,6 +567,10 @@ pub struct SimpleGenerationOptions {
     /// HTTP establishment timeout in milliseconds for transports that support
     /// it.
     pub timeout_ms: Option<u64>,
+    /// Preferred provider transport for multi-transport API families.
+    pub transport: Option<StreamTransport>,
+    /// WebSocket connection/open timeout in milliseconds.
+    pub websocket_connect_timeout_ms: Option<u64>,
     /// Requested maximum number of output tokens.
     pub max_output_tokens: Option<u32>,
     /// Requested sampling temperature.
@@ -573,6 +610,11 @@ impl fmt::Debug for SimpleGenerationOptions {
             .field("max_retries", &self.max_retries)
             .field("max_retry_delay_ms", &self.max_retry_delay_ms)
             .field("timeout_ms", &self.timeout_ms)
+            .field("transport", &self.transport)
+            .field(
+                "websocket_connect_timeout_ms",
+                &self.websocket_connect_timeout_ms,
+            )
             .field("max_output_tokens", &self.max_output_tokens)
             .field("temperature", &self.temperature)
             .field("top_p", &self.top_p)

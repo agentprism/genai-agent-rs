@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "method": "POST",
+  "path": "/codex/responses",
+  "headers": {
+    "accept": "text/event-stream",
+    "authorization": "[REDACTED]",
+    "chatgpt-account-id": "account-fixture",
+    "content-type": "application/json",
+    "openai-beta": "responses=experimental",
+    "originator": "pi",
+    "session-id": "session-m4-00000000",
+    "x-client-request-id": "session-m4-00000000"
+  },
+  "omittedRuntimeHeaders": [
+    "accept-encoding",
+    "connection",
+    "content-encoding",
+    "content-length",
+    "host",
+    "user-agent"
+  ]
+}

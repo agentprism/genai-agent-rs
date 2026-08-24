@@ -598,12 +598,15 @@ fn terminal_only_message(id: &str, reason: AssistantFinishReason) -> AssistantMe
         requested_model: model.clone(),
         response_model: None,
         response_id: None,
+        end_turn: None,
+        diagnostics: Vec::new(),
         content: vec![ContentBlock::Text {
             id: ContentBlockId::new(format!("{id}-text")),
             text: "terminal-only partial".into(),
         }],
         replay: ReplayEnvelope::new(ReplayScope::new(provider, api, model.clone(), model)),
         usage: Usage::zero(UsageSource::Unknown),
+        cost: None,
         finish: AssistantFinish {
             reason,
             raw_provider_reason: None,
@@ -655,9 +658,12 @@ fn incomplete_replay_terminal_stream() -> Vec<AssistantEvent> {
         requested_model: snapshot.requested_model,
         response_model: snapshot.response_model,
         response_id: snapshot.response_id,
+        end_turn: snapshot.end_turn,
+        diagnostics: snapshot.diagnostics,
         content: snapshot.content,
         replay: snapshot.replay,
         usage: snapshot.usage,
+        cost: snapshot.cost,
         finish: AssistantFinish {
             reason: AssistantFinishReason::Stop,
             raw_provider_reason: None,

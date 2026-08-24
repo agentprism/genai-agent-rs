@@ -264,6 +264,8 @@ fn assistant(calls: Vec<ToolCall>, finish: AssistantFinishReason) -> AssistantMe
         requested_model: model.clone(),
         response_model: None,
         response_id: None,
+        end_turn: None,
+        diagnostics: Vec::new(),
         content: calls
             .into_iter()
             .enumerate()
@@ -274,6 +276,7 @@ fn assistant(calls: Vec<ToolCall>, finish: AssistantFinishReason) -> AssistantMe
             .collect(),
         replay: ReplayEnvelope::new(ReplayScope::new(provider, api, model.clone(), model)),
         usage: Usage::zero(UsageSource::Unknown),
+        cost: None,
         finish: AssistantFinish {
             reason: finish,
             raw_provider_reason: None,

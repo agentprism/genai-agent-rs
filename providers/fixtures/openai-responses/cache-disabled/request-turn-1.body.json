@@ -1,0 +1,1 @@
+{"model":"fixture-openai-model","input":[{"role":"developer","content":"Cache fixture."},{"role":"user","content":[{"type":"input_text","text":"Return a concise fixture response."}]}],"stream":true,"store":false,"reasoning":{"effort":"none"}}

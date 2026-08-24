@@ -381,6 +381,7 @@ fn materialize(
             AssistantEvent::ResponseMetadata {
                 response_id: response.response_id,
                 response_model: response.response_model,
+                end_turn: None,
             },
         )?;
     }
