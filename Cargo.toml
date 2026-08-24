@@ -8,6 +8,7 @@ members = [
     "crates/pi-agent-env",
     "crates/pi-agent-runtime-tokio",
     "crates/pi-agent-compat-pi-jsonl",
+    "bindings/pi-ffi",
     "providers/pi-ai-openai",
     "providers/pi-ai-anthropic",
 ]

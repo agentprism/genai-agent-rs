@@ -4,6 +4,21 @@ upstream_repository = "earendil-works/pi"
 upstream_commit = "c49906ec77788625aacbdc53ebca6fbe65bd20f5"
 
 [[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part1-proposal.md#6-lossless-ffi-event-envelope"
+rust = ["ffi_c_abi_event_envelope_preserves_tool_arguments", "tests::ffi_event_envelope_preserves_opaque_details_custom_payloads_and_extensions"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#10.9-ffi-agent-conformance"
+rust = ["agent_cancelled_assistant_is_committed", "agent_handle_event_sinks_are_barriers", "agent_prompt_text_event_sequence", "agent_run_finished_is_final_event"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#6.5-ffi-auth-session"
+rust = ["auth_callback_and_manual_first_valid_wins", "auth_late_losing_response_is_superseded", "ffi_auth_open_url_challenge_exact_schema_and_capability", "ffi_auth_session_completes_scripted_device_code_flow", "ffi_auth_session_next_invalid_arguments_return_invalid_argument"]
+status = "semantic-parity"
+
+[[mapping]]
 source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#10.8"
 rust = [
   "fixture_corpus_anthropic_messages_cases_are_complete_and_canonical",

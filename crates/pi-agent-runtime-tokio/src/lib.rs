@@ -192,8 +192,29 @@ impl TokioAgentHandle {
 
     /// Starts a run from a text-and-image prompt.
     pub async fn prompt_text(&self, prompt: PromptText) -> Result<TokioAgentRun, TokioAgentError> {
-        self.request_run(|channels| AgentCommand::PromptText { prompt, channels })
-            .await
+        self.request_run(None, |channels| AgentCommand::PromptText {
+            prompt,
+            channels,
+        })
+        .await
+    }
+
+    /// Starts a run with an acknowledged sink scoped to that accepted run.
+    ///
+    /// The sink and prompt are submitted as one actor command. If another run
+    /// is active, the command is rejected without registering or invoking the
+    /// sink. An accepted sink observes only the events from the run created by
+    /// this command and is removed automatically when that run settles.
+    pub async fn prompt_text_with_sink(
+        &self,
+        prompt: PromptText,
+        sink: Arc<dyn AgentEventSink>,
+    ) -> Result<TokioAgentRun, TokioAgentError> {
+        self.request_run(Some(sink), |channels| AgentCommand::PromptText {
+            prompt,
+            channels,
+        })
+        .await
     }
 
     /// Starts a run from an already identified record batch.
@@ -202,19 +223,22 @@ impl TokioAgentHandle {
         records: impl IntoIterator<Item = AgentRecord>,
     ) -> Result<TokioAgentRun, TokioAgentError> {
         let records = records.into_iter().collect();
-        self.request_run(|channels| AgentCommand::PromptRecords { records, channels })
-            .await
+        self.request_run(None, |channels| AgentCommand::PromptRecords {
+            records,
+            channels,
+        })
+        .await
     }
 
     /// Continues from a user or tool-result tail, including Pi queue draining.
     pub async fn continue_run(&self) -> Result<TokioAgentRun, TokioAgentError> {
-        self.request_run(|channels| AgentCommand::Continue { channels })
+        self.request_run(None, |channels| AgentCommand::Continue { channels })
             .await
     }
 
     /// Retries the request boundary preceding an errored or aborted assistant.
     pub async fn retry_last_turn(&self) -> Result<TokioAgentRun, TokioAgentError> {
-        self.request_run(|channels| AgentCommand::Retry { channels })
+        self.request_run(None, |channels| AgentCommand::Retry { channels })
             .await
     }
 
@@ -318,6 +342,7 @@ impl TokioAgentHandle {
 
     async fn request_run(
         &self,
+        sink: Option<Arc<dyn AgentEventSink>>,
         command: impl FnOnce(RunChannels) -> AgentCommand,
     ) -> Result<TokioAgentRun, TokioAgentError> {
         let (events_tx, events) = mpsc::channel(self.event_capacity);
@@ -328,6 +353,7 @@ impl TokioAgentHandle {
                 events: events_tx,
                 completion,
                 accepted: Some(accepted),
+                sink,
             }))
             .await
             .map_err(|_| TokioAgentError::Closed)?;
@@ -343,6 +369,7 @@ struct RunChannels {
     events: mpsc::Sender<AgentEvent>,
     completion: oneshot::Sender<Result<RunOutcome, TokioAgentError>>,
     accepted: Option<oneshot::Sender<Result<(), TokioAgentError>>>,
+    sink: Option<Arc<dyn AgentEventSink>>,
 }
 
 enum AgentCommand {
@@ -395,6 +422,7 @@ struct DriveContext<'a> {
     sinks: &'a mut Vec<RegisteredSink>,
     next_sink_id: &'a mut u64,
     state_tx: &'a watch::Sender<AgentSnapshot>,
+    run_sink: Option<Arc<dyn AgentEventSink>>,
 }
 
 async fn actor_loop(
@@ -422,6 +450,7 @@ async fn actor_loop(
                     events,
                     completion,
                     accepted: _,
+                    sink,
                 } = channels;
                 let result = drive_run(
                     stream,
@@ -433,6 +462,7 @@ async fn actor_loop(
                         sinks: &mut sinks,
                         next_sink_id: &mut next_sink_id,
                         state_tx: &state_tx,
+                        run_sink: sink,
                     },
                 )
                 .await;
@@ -454,6 +484,7 @@ async fn actor_loop(
                     events,
                     completion,
                     accepted: _,
+                    sink,
                 } = channels;
                 let result = drive_run(
                     stream,
@@ -465,6 +496,7 @@ async fn actor_loop(
                         sinks: &mut sinks,
                         next_sink_id: &mut next_sink_id,
                         state_tx: &state_tx,
+                        run_sink: sink,
                     },
                 )
                 .await;
@@ -489,6 +521,7 @@ async fn actor_loop(
                     events,
                     completion,
                     accepted: _,
+                    sink,
                 } = channels;
                 let result = drive_run(
                     stream,
@@ -500,6 +533,7 @@ async fn actor_loop(
                         sinks: &mut sinks,
                         next_sink_id: &mut next_sink_id,
                         state_tx: &state_tx,
+                        run_sink: sink,
                     },
                 )
                 .await;
@@ -524,6 +558,7 @@ async fn actor_loop(
                     events,
                     completion,
                     accepted: _,
+                    sink,
                 } = channels;
                 let result = drive_run(
                     stream,
@@ -535,6 +570,7 @@ async fn actor_loop(
                         sinks: &mut sinks,
                         next_sink_id: &mut next_sink_id,
                         state_tx: &state_tx,
+                        run_sink: sink,
                     },
                 )
                 .await;
@@ -642,7 +678,14 @@ async fn drive_run<'a>(
                 if let AgentEvent::RunFinished { outcome: run_outcome } = &event {
                     outcome = Some(run_outcome.clone());
                 }
-                dispatch_event(&mut events, event, context.sinks, cancellation.clone()).await;
+                dispatch_event(
+                    &mut events,
+                    event,
+                    context.sinks,
+                    context.run_sink.as_ref(),
+                    cancellation.clone(),
+                )
+                .await;
             }
             command = context.commands.recv(), if commands_open => {
                 let Some(command) = command else {
@@ -692,6 +735,7 @@ async fn dispatch_event(
     events: &mut Option<mpsc::Sender<AgentEvent>>,
     event: AgentEvent,
     sinks: &[RegisteredSink],
+    run_sink: Option<&Arc<dyn AgentEventSink>>,
     cancellation: CancellationToken,
 ) {
     if let Some(sender) = events
@@ -704,6 +748,9 @@ async fn dispatch_event(
             .sink
             .on_event(event.clone(), cancellation.clone())
             .await;
+    }
+    if let Some(run_sink) = run_sink {
+        run_sink.on_event(event, cancellation).await;
     }
 }
 
