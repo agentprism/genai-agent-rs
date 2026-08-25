@@ -1,8 +1,9 @@
 use futures_util::stream;
 use pi_agent_core::{
-    Agent, AgentEvent, AgentRecord, AgentState, MessageRole, RunOutcome, ToolRegistry,
+    Agent, AgentError, AgentEvent, AgentRecord, AgentState, MessageRole, QueueKind, RunOutcome,
+    ToolRegistry,
 };
-use pi_agent_runtime_tokio::{AgentEventSink, TokioAgentHandle};
+use pi_agent_runtime_tokio::{AgentEventSink, TokioAgentError, TokioAgentHandle};
 use pi_ai::{
     ApiId, AssistantEvent, AssistantFinish, AssistantFinishReason, AssistantMessage,
     AssistantStream, CancellationToken, ContentBlock, ContentBlockId, Message, MessageId, ModelId,
@@ -49,6 +50,24 @@ fn sink(
 #[derive(Clone)]
 struct TerminalOnlyRuntime {
     events: Arc<Mutex<VecDeque<AssistantEvent>>>,
+}
+
+#[derive(Clone, Copy)]
+struct CancellationRuntime;
+
+impl ModelRuntime for CancellationRuntime {
+    fn stream(
+        &self,
+        _request: ModelRequest,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<AssistantStream, RequestStartError>> {
+        Box::pin(async move {
+            Ok(AssistantStream::new(stream::once(async move {
+                cancellation.cancelled().await;
+                terminal_event("actor-cancelled", AssistantFinishReason::Aborted)
+            })))
+        })
+    }
 }
 
 impl TerminalOnlyRuntime {
@@ -159,7 +178,7 @@ async fn assert_terminal_only_through_handle(
             | (AssistantFinishReason::Error, RunOutcome::Failed { .. })
             | (AssistantFinishReason::Aborted, RunOutcome::Cancelled { .. })
     ));
-    let snapshot = handle.snapshot();
+    let snapshot = handle.snapshot().await.unwrap();
     let AgentRecord::Llm(Message::Assistant(message)) = snapshot.state.transcript.last().unwrap()
     else {
         panic!("terminal-only run must commit an assistant");
@@ -181,7 +200,7 @@ async fn assert_malformed_terminal_only_through_handle(event: AssistantEvent) {
         run.outcome().await.unwrap(),
         RunOutcome::Failed { .. }
     ));
-    let snapshot = handle.snapshot();
+    let snapshot = handle.snapshot().await.unwrap();
     let AgentRecord::Llm(Message::Assistant(message)) = snapshot.state.transcript.last().unwrap()
     else {
         panic!("malformed terminal-only run must commit a protocol-failure assistant");
@@ -270,7 +289,7 @@ async fn agent_handle_event_sinks_are_barriers() {
                             ..
                         }
                     ) {
-                        *lock(&assistant_started_snapshot) = handle.snapshot().streaming;
+                        *lock(&assistant_started_snapshot) = handle.latest_snapshot().streaming;
                     }
                 })
             }
@@ -416,6 +435,64 @@ async fn agent_wait_for_idle_includes_run_finished_sinks() {
         pi_agent_core::RunOutcome::Completed { .. }
     ));
     idle.await.unwrap().unwrap();
+    handle.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn tokio_actor_processes_nine_commands_serially() {
+    // Architecture v2 part 2 §9.4: Prompt, Continue, Retry, Steer,
+    // FollowUp, Cancel, Reset, Snapshot, and Shutdown all cross the bounded
+    // owner-task mailbox. The queue receipts prove stable mailbox order.
+    let agent = Agent::new(Arc::new(CancellationRuntime), state(), ToolRegistry::new()).unwrap();
+    let handle = TokioAgentHandle::with_capacities(agent, 16, 32).unwrap();
+
+    // Prompt.
+    let mut run = handle
+        .prompt_records([user("actor-user", "prompt")])
+        .await
+        .unwrap();
+    let run_id = loop {
+        if let Some(AgentEvent::RunStarted { run_id }) = run.next_event().await {
+            break run_id;
+        }
+    };
+
+    // Steer, FollowUp, and Snapshot are accepted in caller submission order
+    // while the model stream remains active.
+    let steering = handle.steer(user("steer", "steer")).await.unwrap();
+    let follow_up = handle
+        .follow_up(user("follow-up", "follow-up"))
+        .await
+        .unwrap();
+    assert_eq!(steering.kind, QueueKind::Steering);
+    assert_eq!(follow_up.kind, QueueKind::FollowUp);
+    assert!(steering.sequence < follow_up.sequence);
+    let active_snapshot = handle.snapshot().await.unwrap();
+    assert!(!active_snapshot.state.transcript.is_empty());
+
+    // Cancel.
+    handle.cancel(run_id).await.unwrap();
+    assert!(matches!(
+        run.outcome().await.unwrap(),
+        RunOutcome::Cancelled { .. }
+    ));
+
+    // Reset, Continue, and Retry. The latter two are deliberately rejected by
+    // the core after reset, but only after reaching the serialized actor.
+    handle.reset_transcript().await.unwrap();
+    assert!(handle.snapshot().await.unwrap().state.transcript.is_empty());
+    assert!(matches!(
+        handle.continue_run().await,
+        Err(TokioAgentError::Agent(AgentError::ContinueWithoutMessages))
+    ));
+    assert!(matches!(
+        handle.retry_last_turn().await,
+        Err(TokioAgentError::Agent(
+            AgentError::RetryRequiresFailedAssistant
+        ))
+    ));
+
+    // Shutdown.
     handle.shutdown().await.unwrap();
 }
 

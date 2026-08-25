@@ -182,7 +182,8 @@ pub unsafe extern "C" fn pi_agent_run(
 /// Cancels the matching active run. A cancellation issued after
 /// [`pi_agent_run`] returns but before `run_started` is delivered is retained
 /// and applied as soon as the core run identity is published. Errors are
-/// available through [`pi_last_error_message`].
+/// available through [`pi_last_error_message`]. This operation is nonblocking
+/// and may be called from the run's event callback.
 ///
 /// # Safety
 ///

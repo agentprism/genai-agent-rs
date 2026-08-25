@@ -3490,6 +3490,8 @@ pub enum OperationRecord {
 }
 ```
 
+> Correction: Pinned Pi permits `usage` records with negative token and monetary adjustments, while its ordinary usage object also contains floating-point cost. Native Rust keeps canonical response `Usage` unsigned and keeps `Cost` separate, so `OperationRecord::Usage` additionally carries `cost: Option<Cost>` and an optional signed fixed-point adjustment; session statistics apply both without `f64` (`packages/agent/src/harness/session/types.ts:188–204`; `packages/agent/src/harness/session/state.ts:52–59,148–154`; `packages/agent/src/harness/session/testing/conformance.ts:551–644`).
+
 ## 7.3 Storage traits
 
 ```rust
@@ -3575,6 +3577,8 @@ Core invariants:
 8. A durable operation can be resumed or explicitly abandoned after recovery.
 ```
 
+> Correction: Pinned Pi retains an `operation_finished` record that has no matching currently open start, and that earlier finish does not close a later start. Its reducer can also retain multiple open starts so recovery can diagnose corruption, while live in-memory and JSONL writers reject appending a second open start on one lane. Rust follows that split: replay closes only an already-open matching operation and preserves multiple unresolved starts for `RecoveryDecision::Corrupt`; live storage enforces the one-open-operation rule (`packages/agent/src/harness/session/state.ts:126–142,229–234`; `packages/agent/src/harness/session/memory.ts:70–84`; `packages/agent/src/harness/session/testing/conformance.ts:482–533`).
+
 Snapshots may accelerate loading, but the mutation log remains authoritative.
 
 ## 7.5 Branching
@@ -3593,6 +3597,8 @@ pub enum ForkPosition {
     WholeTree,
 }
 ```
+
+> Correction: Pinned Pi accepts a branch-fork target only when it is a message entry; targeting a custom, compaction, or other entry is `invalid_fork_target`. Rust applies the same validation to `ForkPosition::Before` and `ForkPosition::At`; `WholeTree` remains unrestricted (`packages/agent/src/harness/session/state.ts:265–286`; `packages/agent/src/harness/session/testing/conformance.ts:999–1013`).
 
 Appending an entry:
 

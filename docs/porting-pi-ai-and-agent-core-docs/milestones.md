@@ -834,3 +834,93 @@ v2 Part 2.
 - M6.4 corrected Part 2 §6.6: GitHub Copilot credentials retain normalized
   `enterprise_url` independently of account identity for refresh and request
   authentication.
+## 2026-08-25 — M7: sessions, environment, and native runtime
+
+M7 established the native `pi-agent-session` protocol and reducer over an
+immutable entry tree, lanes, operation records, recovery, and branching. It also
+established the portable environment capability traits, their Tokio filesystem
+and process implementation, process-tree termination semantics, and the native
+Tokio actor facade. The session and environment/runtime crates remain outside
+`pi-agent-core` as required by Architecture v2 Part 2 §§7 and 9.
+
+### Approved packages
+
+- M7.1 — `pi-agent-session`: entry tree, lanes, operation records, Send and Local
+  storage traits, reducer, recovery, and branching —
+  `8c9f3c6c0859757c7c02c0481e4cfe04a803d5bf`
+- M7.2 — `pi-agent-env` and `pi-agent-runtime-tokio`: portable capability
+  traits, Tokio filesystem and process execution, termination behavior, and
+  actor facade — `aa3f90d635f7edac1a36c6084a1b3fcf4e281487`
+
+### Architecture v2 Part 2 §10 conformance now passing
+
+M7 adds 27 previously absent exact §10.10 conformance names. The final M7 tree
+contains 306 exact §10 conformance names in total.
+
+§10.10 reducer and session-tree conformance (16 new):
+
+```text
+session_sequence_starts_at_one
+session_sequence_is_global_across_mutation_kinds
+session_sequence_gap_is_corruption
+session_entry_parent_must_exist
+session_lane_head_moves_on_append
+session_lane_can_move_to_ancestor
+session_multiple_lanes_share_entry_tree
+session_branch_scan_leaf_to_root
+session_global_entry_query_sequence_order
+session_fact_latest_value_wins
+session_label_is_global_not_branch_scoped
+session_stats_derive_from_usage_records
+session_open_operation_detected
+session_multiple_open_operations_is_corruption
+session_operation_recovery_reconstructs_intent
+session_reducer_replay_equals_live_state
+```
+
+§10.10 environment conformance (11 new):
+
+```text
+env_read_file
+env_write_file
+env_atomic_replace
+env_process_stdout_stream
+env_process_stderr_stream
+env_process_exit_status
+env_process_graceful_termination
+env_process_forced_termination
+env_process_tree_termination
+env_stdio_grace_period
+env_cancellation
+```
+
+M7 additionally adds architecture-specific coverage for lane-scoped operation,
+queue, and tool identities; atomic storage rejection; repository branch/tree
+forks; Send and Local storage object safety; large bidirectional process I/O;
+non-tree termination; explicit unavailable process capability; and serial
+processing of all nine Tokio actor commands.
+
+### Parity manifest coverage
+
+- Pinned upstream test files mapped: 159/159 — 57 `semantic-parity`, 0
+  `deliberate-divergence`, and 102 `planned`.
+- Status-bearing mappings: 235 total — 123 `semantic-parity`, 10
+  `deliberate-divergence`, and 102 `planned`.
+- Future named conformance tests: 1 `planned_test` entry, assigned to M3.4.
+
+### Architecture correction notes
+
+M7 added three corrections, all from M7.1 to Architecture v2 Part 2:
+
+- §7.2 now records that Pi session usage records permit negative token and
+  monetary adjustments; native response `Usage` remains unsigned, while the
+  operation record carries separate cost and signed fixed-point adjustment
+  fields without `f64`.
+- §7.4 now records that replay retains unmatched operation-finished records and
+  multiple unresolved starts for corruption diagnosis, while live in-memory and
+  JSONL writers reject a second open operation on one lane.
+- §7.5 now records that Pi branch forks accept only message-entry targets;
+  custom, compaction, and other entry targets are rejected as
+  `invalid_fork_target`, while whole-tree forks remain unrestricted.
+
+M7.2 added no correction note.

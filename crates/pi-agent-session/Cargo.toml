@@ -9,3 +9,11 @@ description = "pi-agent-session: immutable session entry tree, lanes and operati
 publish = false
 
 [dependencies]
+pi-agent-core = { path = "../pi-agent-core" }
+pi-ai = { path = "../pi-ai" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.145", features = ["raw_value"] }
+
+[dev-dependencies]
+futures-executor = "0.3.31"
+static_assertions = "1.1.0"

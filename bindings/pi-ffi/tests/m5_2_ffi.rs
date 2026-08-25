@@ -107,6 +107,15 @@ struct ConcurrentCallbackState {
     delay_run_start: AtomicBool,
 }
 
+struct ReentrantCancellationState {
+    agent: *mut pi_ffi::c_api::pi_agent_handle,
+    run_id: u64,
+    envelopes: Mutex<Vec<Value>>,
+    terminal: Condvar,
+    cancel_issued: AtomicBool,
+    cancel_failed: AtomicBool,
+}
+
 unsafe extern "C" fn recording_callback(envelope_json: *const c_char, user_data: *mut c_void) {
     let state = unsafe { &*(user_data.cast::<BackToBackCallbackState>()) };
     let Ok(envelope_json) = unsafe { CStr::from_ptr(envelope_json) }.to_str() else {
@@ -435,6 +444,32 @@ unsafe extern "C" fn cancelling_callback(envelope_json: *const c_char, user_data
     }
 }
 
+unsafe extern "C" fn reentrant_cancelling_callback(
+    envelope_json: *const c_char,
+    user_data: *mut c_void,
+) {
+    let state = unsafe { &*(user_data.cast::<ReentrantCancellationState>()) };
+    let Ok(envelope_json) = unsafe { CStr::from_ptr(envelope_json) }.to_str() else {
+        return;
+    };
+    let Ok(envelope) = serde_json::from_str::<Value>(envelope_json) else {
+        return;
+    };
+    let event_type = envelope["type"].as_str().unwrap_or_default().to_owned();
+    if event_type == "run_started" && !state.cancel_issued.swap(true, Ordering::AcqRel) {
+        unsafe {
+            pi_agent_cancel(state.agent, state.run_id);
+        }
+        state
+            .cancel_failed
+            .store(!pi_last_error_message().is_null(), Ordering::Release);
+    }
+    lock_unpoisoned(&state.envelopes).push(envelope);
+    if event_type == "run_finished" {
+        state.terminal.notify_all();
+    }
+}
+
 /// Architecture v2 part 2 §10.9 `agent_cancelled_assistant_is_committed`.
 /// Pi basis: packages/agent/src/agent-loop.ts:281-352 and agent.ts:493-592.
 #[test]
@@ -489,6 +524,82 @@ fn agent_cancelled_assistant_is_committed() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert!(!timeout.timed_out(), "cancelled run did not finish");
     assert_eq!(guard.last().unwrap()["type"], "run_finished");
+    assert_eq!(
+        guard.last().unwrap()["data"]["outcome"]["type"],
+        "cancelled"
+    );
+    assert!(guard.iter().any(|envelope| {
+        envelope["type"] == "message_committed"
+            && envelope["data"]["message"]["role"] == "assistant"
+            && envelope["data"]["message"]["finish"]["reason"] == "aborted"
+    }));
+    drop(guard);
+
+    unsafe {
+        pi_agent_destroy(agent);
+        pi_models_destroy(models);
+        drop(Box::from_raw(state_pointer));
+    }
+}
+
+/// Architecture v2 part 2 §9.4 callback regression: synchronous foreign
+/// cancellation must not wait behind the actor sink currently invoking it.
+/// Pi basis: packages/agent/src/agent.ts:493-592 permits abort during active
+/// event delivery; the C API forbids only destruction from an event callback.
+#[test]
+fn ffi_callback_initiated_cancellation_is_nonblocking() {
+    let models_json = CString::new(models_config(json!([
+        { "type": "text", "text": "callback cancellation must win" }
+    ])))
+    .unwrap();
+    let agent_json = CString::new(agent_config()).unwrap();
+    let input_json = CString::new(json!({ "text": "cancel reentrantly" }).to_string()).unwrap();
+    let models = unsafe { pi_models_create(models_json.as_ptr()) };
+    assert!(!models.is_null());
+    let agent = unsafe { pi_agent_create(models, agent_json.as_ptr()) };
+    assert!(!agent.is_null());
+
+    // A fresh binding agent allocates external run identities from one. The
+    // callback can run before `pi_agent_run` returns, so the first identity is
+    // provisioned in the callback state up front.
+    let state = Box::new(ReentrantCancellationState {
+        agent,
+        run_id: 1,
+        envelopes: Mutex::new(Vec::new()),
+        terminal: Condvar::new(),
+        cancel_issued: AtomicBool::new(false),
+        cancel_failed: AtomicBool::new(false),
+    });
+    let state_pointer = Box::into_raw(state);
+    let run_id = unsafe {
+        pi_agent_run(
+            agent,
+            input_json.as_ptr(),
+            Some(reentrant_cancelling_callback),
+            state_pointer.cast(),
+        )
+    };
+    assert_eq!(run_id, 1);
+
+    let state = unsafe { &*state_pointer };
+    let guard = lock_unpoisoned(&state.envelopes);
+    let (guard, timeout) = state
+        .terminal
+        .wait_timeout_while(guard, Duration::from_secs(5), |envelopes| {
+            !envelopes
+                .iter()
+                .any(|envelope| envelope["type"] == "run_finished")
+        })
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(
+        !timeout.timed_out(),
+        "callback-initiated cancellation blocked actor progress"
+    );
+    assert!(state.cancel_issued.load(Ordering::Acquire));
+    assert!(
+        !state.cancel_failed.load(Ordering::Acquire),
+        "callback-initiated cancellation returned a binding error"
+    );
     assert_eq!(
         guard.last().unwrap()["data"]["outcome"]["type"],
         "cancelled"
