@@ -663,3 +663,174 @@ and invalid C-ABI argument handling.
 
 None. M5.1 and M5.2 added no `> Correction:` notes to either architecture
 document.
+
+## 2026-08-25 — M6: remaining API families and providers
+
+M6 completed the provider/API implementation milestone: OpenAI Responses,
+OpenAI Codex Responses, Google Generative AI, Google Vertex, Bedrock Converse
+Stream, Azure OpenAI Responses, Mistral Conversations, and pi-messages now join
+the OpenAI Completions and Anthropic Messages families from M4. It also added
+Cloudflare, Radius, the remaining pinned provider registrations,
+credential-scoped availability, the context-overflow classifier, and the
+`pi-ai-providers-all` aggregator.
+
+### Approved packages
+
+- M6.1 — OpenAI Responses and OpenAI Codex Responses families and providers —
+  `4366b970c9dac8e7ca168bdd4abcde387c8b214c`
+- M6.2 — Google Generative AI and Google Vertex families and providers —
+  `6253bde65be23b2de2c9f2d3cf75bbe89fede33a`
+- M6.3 — Bedrock Converse Stream family and provider —
+  `a24cf5bfe91c8cdf486895ebf2f61cb05194114f`
+- M6.4 — Azure OpenAI Responses, Mistral Conversations, and pi-messages
+  families; Cloudflare, Radius, and every remaining provider;
+  credential-scoped availability; context-overflow classification; and
+  `pi-ai-providers-all` — `0e10c1d86485ef5213fa02ed1f014fd104513377`
+
+### Architecture v2 Part 2 §10 conformance now passing
+
+21 new exact §10 conformance test names pass, bringing the cumulative exact
+§10 total to 282.
+
+§10.2 opaque replay conformance (9 new):
+
+```text
+responses_different_model_drops_paired_item_id
+responses_foreign_function_item_id_is_normalized
+responses_turn_two_input_items_match_pi_order
+bedrock_turn_two_replays_redacted_content_bytes
+bedrock_signed_reasoning_replays_text_and_signature
+bedrock_missing_required_signature_falls_back_to_text
+bedrock_non_anthropic_model_omits_reasoning_signature
+google_invalid_base64_signature_is_dropped
+google_signature_requires_same_provider_and_model
+```
+
+§10.8 golden provider request bodies (12 new):
+
+```text
+wire_openai_responses_pi_exact
+wire_openai_codex_responses_pi_exact
+wire_azure_openai_responses_pi_exact
+wire_google_generative_ai_pi_exact
+wire_google_vertex_pi_exact
+wire_bedrock_converse_stream_pi_exact
+wire_mistral_conversations_pi_exact
+wire_pi_messages_pi_exact
+openai_responses_encrypted_reasoning_turn_two_pi_exact
+bedrock_redacted_reasoning_turn_two_pi_exact
+google_tool_thought_signature_turn_two_pi_exact
+google_empty_signed_part_turn_two_pi_exact
+```
+
+Together with M4, all ten §10.8 API-family wire tests and all seven required
+two-turn replay goldens pass after event assembly and a persistence round-trip.
+
+### Parity manifest coverage
+
+- Pinned upstream test files mapped: 159/159 — 62 `semantic-parity`, 0
+  `deliberate-divergence`, and 97 `planned`.
+- Status-bearing mappings: 244 total — 137 `semantic-parity`, 10
+  `deliberate-divergence`, and 97 `planned`.
+- Future named conformance tests: 1 `planned_test` entry.
+- Rust test inventory discovered by the parity checker: 694 unique tests.
+
+### Architecture correction notes
+
+M6 added 34 corrections: one to Architecture v2 Part 1 and 33 to Architecture
+v2 Part 2.
+
+- M6.1 corrected Part 2 §1.2: assistant messages and snapshots retain calculated
+  monetary cost separately from token usage, and agent aggregation is limited
+  to same-currency, fully known costs.
+- M6.1 corrected Part 2 §1.3: Responses can replace streamed function arguments
+  with a non-prefix authoritative terminal value, requiring
+  `ToolArgumentsReplaced`.
+- M6.1 corrected Part 2 §1.6: Responses turn-two encoding walks canonical blocks
+  in order and consults surviving replay identities in place rather than
+  emitting all replay records first.
+- M6.1 corrected Part 2 §1.6: terminal Responses text and reasoning may replace
+  streamed values; Codex also retains `end_turn` and persisted transport-failure
+  diagnostics.
+- M6.1 corrected Part 2 §1.6: cached Codex WebSocket continuation is derived by
+  canonical re-encoding of the assembled assistant, not by copying terminal
+  `response.output`.
+- M6.1 corrected Part 2 §1.6: Codex maps `response.failed` and top-level `error`
+  through its family-specific nested-message behavior without retaining
+  `response.status` as the raw stop reason.
+- M6.1 corrected Part 2 §1.6: Responses finalization falls back to streamed
+  reasoning, tool arguments, and custom input under Pi's exact omission and
+  empty-value rules, and does not copy `response.model`.
+- M6.1 corrected Part 2 §1.6: deferred function/custom-tool namespaces survive
+  same-provider/API model changes while paired `fc_*` item IDs remain
+  model-sensitive.
+- M6.1 corrected Part 2 §1.6: any mapped Codex WebSocket event starts the stream,
+  nested missing-continuation retry remains special, and WebSocket exchanges do
+  not invoke the SSE response observer.
+- M6.1 corrected Part 2 §1.6: fallback `msg_pi_*` counters advance only after a
+  source message emits at least one wire item.
+- M6.1 corrected Part 2 §1.6: Codex alone normalizes unknown terminal status to
+  absent and discards an unterminated SSE EOF tail.
+- M6.1 corrected Part 2 §1.6: every typed-session Codex WebSocket transport
+  failure records sticky SSE fallback and clears cached continuation, including
+  failures after semantic stream start.
+- M6.1 corrected Part 2 §1.6: shared Responses accepts only `response.completed`
+  and `response.incomplete` as successful terminals and ignores deltas for an
+  output slot after its item-done event.
+- M6.1 corrected Part 2 §1.6: Responses service-tier costs use Pi's exact `flex`,
+  `priority`, and GPT-5.5 priority multipliers, including Codex's echoed-default
+  resolution.
+- M6.1 corrected Part 2 §2.4: Codex uses a distinct retry classifier and policy,
+  including its status/body allowlists, quota exclusions, delay handling,
+  terminal normalization, and unjittered one-second exponential backoff.
+- M6.1 corrected Part 2 §2.4: API execution context retains original call options
+  so Codex pricing can distinguish the requested service tier independently of
+  payload middleware.
+- M6.1 corrected Part 2 §2.6: Codex SSE auth, account, originator, user-agent,
+  and protocol headers are final transport invariants after model/caller
+  overlays.
+- M6.1 corrected Part 2 §2.6: Codex cache/continuation affinity derives only from
+  typed session options, while separately clamped protocol IDs are reasserted
+  at the transport boundary.
+- M6.1 corrected Part 2 §2.6: public Responses header-only authentication is
+  eligible only from explicit option headers and must remain nonempty after
+  final transforms.
+- M6.1 corrected Part 2 §2.6: public Responses session-affinity headers follow
+  model headers and precede explicit request headers for simple and full calls.
+- M6.1 corrected Part 2 §3.4: Responses retains the clamped reasoning-level name
+  and applies `thinkingLevelMap` exactly once in the full encoder, including the
+  summary-only exception.
+- M6.1 corrected Part 2 §6.1: Codex accepts a direct caller-supplied OAuth access
+  token, derives its account ID from the JWT, and does not require stored refresh
+  credentials on that path.
+- M6.1 corrected Part 2 §6.1: Codex browser OAuth advertises and exchanges the
+  registered localhost redirect URI while preserving Pi's callback/manual-code
+  state-validation distinctions.
+- M6.2 corrected Part 1 §3.9: usage retains provider `total_tokens`, and context
+  planning prefers it only when nonzero before falling back to normalized
+  components.
+- M6.2 corrected Part 2 §2.6: Google Vertex full `project` and `location` options
+  may establish request-scoped ADC/client scope before ordinary auth resolution.
+- M6.2 corrected Part 2 §3.6: simple options preserve whether
+  `thinking_budgets` was omitted because Gemini 2.5 defaults distinguish
+  omission from an explicit default-valued map.
+- M6.3 corrected Part 2 §1.7: a Bedrock redacted-content transition can discard
+  an earlier signature replay item, requiring `ReplayItemDiscarded`.
+- M6.3 corrected Part 2 §2.4: Bedrock encoding consumes request-scoped provider
+  environment decisions through credential-derived invariant context with Pi's
+  truthiness and precedence rules.
+- M6.3 corrected Part 2 §2.6: Bedrock resolves proxy variables before client
+  construction and selects an HTTP/1 proxy-capable handler when a proxy applies.
+- M6.3 corrected Part 2 §2.6: the private auth-to-signer carrier is suppressed
+  only while untouched; a logical-header overlay using its name is forwarded.
+- M6.3 corrected Part 2 §2.6: the earlier architecture clause requiring Bedrock
+  reserved-header suppression diagnostics is superseded; Pi suppresses those
+  names silently.
+- M6.4 corrected Part 2 §1.3: pi-messages `toolcall_end` authoritatively replaces
+  streamed tool-call identity and arguments, requiring
+  `ToolCallMetadataReplaced` as well as argument replacement.
+- M6.4 corrected Part 2 §6.6: GitHub Copilot credentials retain
+  `available_model_ids` for entitlement-scoped catalog filtering.
+- M6.4 corrected Part 2 §6.6: GitHub Copilot credentials retain normalized
+  `enterprise_url` independently of account identity for refresh and request
+  authentication.
