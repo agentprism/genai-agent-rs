@@ -45,8 +45,9 @@ pub enum AttemptFailure {
     Transport {
         /// Zero-based attempt number.
         attempt: u32,
-        /// Sanitized transport error.
-        source: TransportError,
+        /// Sanitized transport error, boxed to keep the failure enum small
+        /// (clippy::result_large_err on Rust 1.98).
+        source: Box<TransportError>,
     },
     /// A transport attempt exceeded its configured establishment timeout.
     Timeout {
@@ -61,8 +62,8 @@ pub enum AttemptFailure {
         attempt: u32,
         /// HTTP status.
         status: u16,
-        /// Raw response headers.
-        headers: HeaderMap,
+        /// Raw response headers, boxed to keep the failure enum small.
+        headers: Box<HeaderMap>,
         /// Time at which the response was classified, used for HTTP-date delay.
         observed_at: SystemTime,
         /// Sanitized provider failure text.
@@ -138,7 +139,10 @@ impl fmt::Debug for AttemptFailure {
 impl AttemptFailure {
     /// Creates a transport failure for an attempt.
     pub fn transport(attempt: u32, source: TransportError) -> Self {
-        Self::Transport { attempt, source }
+        Self::Transport {
+            attempt,
+            source: Box::new(source),
+        }
     }
 
     /// Creates an HTTP failure observed now.
@@ -157,7 +161,7 @@ impl AttemptFailure {
         Self::Http {
             attempt,
             status,
-            headers,
+            headers: Box::new(headers),
             observed_at,
             message: message.into(),
         }
@@ -750,7 +754,7 @@ fn without_provider_body(failure: AttemptFailure) -> AttemptFailure {
         } => AttemptFailure::http_at(
             attempt,
             status,
-            headers,
+            *headers,
             observed_at,
             "provider rejected request before streaming",
         ),

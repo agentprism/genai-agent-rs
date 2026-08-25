@@ -635,7 +635,7 @@ fn codex_retryable_failure(failure: &AttemptFailure) -> Option<AttemptFailure> {
             Some(AttemptFailure::http_at(
                 *attempt,
                 if retryable_status { *status } else { 429 },
-                headers,
+                *headers,
                 *observed_at,
                 classification_message,
             ))
@@ -658,7 +658,7 @@ fn normalize_codex_terminal_failure(failure: AttemptFailure) -> AttemptFailure {
         } => AttemptFailure::http_at(
             attempt,
             status,
-            headers,
+            *headers,
             observed_at,
             codex_public_error_message(status, &message, observed_at),
         ),
