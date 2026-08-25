@@ -65,6 +65,11 @@ rust = ["fixture_corpus_openai_responses_cases_are_complete_and_canonical", "ope
 status = "semantic-parity"
 
 [[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#10.8-azure-openai-responses"
+rust = ["azure_api_version_whitespace_truthiness_send_and_local", "azure_deployment_map_ecmascript_trim_send_and_local", "azure_deployment_map_truthiness_send_and_local", "azure_openai_base_url_ecmascript_trim_send_and_local", "azure_openai_whitespace_configuration_precedence_send_and_local", "wire_azure_openai_responses_pi_exact"]
+status = "semantic-parity"
+
+[[mapping]]
 source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#10.8-openai-codex-responses"
 rust = ["codex_cached_continuation_ignores_terminal_only_output_send_and_local", "codex_cached_continuation_is_connection_scoped_after_eviction_send_and_local", "codex_local_transport_auto_fallback_emits_diagnostic_and_sticks_to_sse", "codex_local_transport_cached_websocket_uses_canonical_tool_call_continuation", "codex_responses_base_url_resolution_matches_pi", "codex_transport_cached_websocket_reconstructs_turn_two_delta", "codex_transport_cached_websocket_uses_canonical_tool_call_continuation", "codex_transport_connection_limit_retries_once_then_falls_back", "codex_transport_explicit_websocket_is_selectable", "codex_transport_idle_fallback_is_limited_to_pre_stream", "codex_transport_one_shot_websocket_gets_request_identity_headers", "codex_transport_retries_missing_continuation_after_rate_limits_send_and_local", "codex_transport_retries_missing_continuation_before_stream_start", "fixture_corpus_openai_codex_responses_cases_are_complete_and_canonical", "openai_codex_explicit_access_token_auth_send_and_local", "openai_codex_retry_classification_pi_exact_local", "openai_codex_retry_classification_pi_exact_send", "openai_codex_sse_transport_reasserts_protocol_headers", "openai_codex_terminal_429_body_prevents_transport_retry", "responses_codex_created_end_turn_is_ignored_without_terminal_end_turn_pi_exact", "responses_codex_end_turn_metadata_survives_round_trip", "responses_codex_error_mapping_matches_pi", "responses_codex_full_reasoning_uses_model_map_pi_exact", "responses_codex_service_tier_cost_pi_exact", "responses_codex_session_affinity_headers_match_pi", "responses_codex_session_affinity_reasserted_send_and_local", "responses_fallback_diagnostic_survives_round_trip", "responses_reasoning_level_map_applies_once_pi_exact", "stream_cancellation_is_terminal_message", "stream_failure_is_terminal_message", "stream_missing_provider_terminal_fails", "wire_openai_codex_responses_pi_exact"]
 status = "semantic-parity"
@@ -80,6 +85,51 @@ rust = ["google_zero_total_tokens_fall_back_to_components_for_context_planning_p
 status = "semantic-parity"
 
 [[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#10.8-mistral-conversations"
+rust = ["mistral_bytewise_sse_utf8_send_and_local", "mistral_cancellation_while_waiting_for_sse_send_and_local", "mistral_content_block_switching_pi_order_send_and_local", "mistral_explicit_null_affinity_suppresses_auto_send_and_local", "mistral_http_error_body_ecmascript_trim_send_and_local_pi_exact", "mistral_http_status_and_error_body_survive_send_and_local", "mistral_payload_transform_camel_case_fields_remap_send_and_local", "mistral_sse_ecmascript_trim_pi_exact", "mistral_timeout_covers_error_body_send_and_local", "mistral_timeout_covers_sse_body_send_and_local", "mistral_tool_id_collision_uses_transcript_encounter_order_pi_exact", "mistral_transport_diagnostics_are_committed_send_and_local", "wire_mistral_conversations_ecmascript_trim_pi_exact", "wire_mistral_conversations_pi_exact"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#10.8-pi-messages"
+rust = ["local_response_failure::pi_messages_non_2xx_commits_response_failure_diagnostic", "pi_messages_rewrite_diagnostic_survives_round_trip", "pi_messages_sse_ecmascript_trim_pi_exact", "pi_messages_toolcall_end_authoritative_identity_send_and_local", "pi_messages_transport_diagnostics_are_committed_send_and_local", "send_response_failure::pi_messages_non_2xx_commits_response_failure_diagnostic", "wire_pi_messages_pi_exact"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/ai/src/providers/mistral.models.ts"
+rust = ["mistral_catalog_matches_pinned_pi"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/ai/src/providers/all.ts"
+rust = ["pi_ai_providers_all_catalogs_match_pinned_publication", "pi_ai_providers_all_registers_complete_pinned_order_send_and_local", "pi_ai_providers_all_registers_every_remaining_provider_send_and_local", "remaining_provider_auth_is_api_family_scoped_send_and_local_pi_exact", "remaining_provider_catalogs_preserve_pinned_compat_and_headers_pi_exact"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/ai/src/api/github-copilot-headers.ts"
+rust = ["github_copilot_explicit_headers_override_and_delete_dynamic_send_and_local_pi_exact", "github_copilot_header_transform_can_delete_dynamic_send_and_local_pi_exact", "github_copilot_request_context_headers_all_families_send_and_local_pi_exact"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/ai/src/auth/oauth/github-copilot.ts#fetchWithRateLimitRetry"
+rust = ["oauth::tests::github_copilot_request_deadline_covers_stalled_transport_and_body_send_and_local"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#5.7-radius"
+rust = ["radius_catalog_uses_credential_gateway_send_and_local", "radius_config_sanitizer_retains_valid_entries_pi_exact_send_and_local", "radius_configuration_check_skips_cache_retention_environment_send_and_local_pi_exact", "radius_dynamic_catalog_source_pi_exact_send_and_local", "radius_non_success_detail_is_bounded_pi_exact_send_and_local", "radius_non_success_detail_uses_ecmascript_trim_pi_exact_send_and_local", "radius_provider_uses_dynamic_catalog_and_pi_messages_send_and_local"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/ai/src/providers/radius.ts"
+rust = ["radius_catalog_uses_credential_gateway_send_and_local", "radius_dynamic_catalog_source_pi_exact_send_and_local", "radius_provider_uses_dynamic_catalog_and_pi_messages_send_and_local"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/ai/src/providers/radius-config.ts"
+rust = ["radius_config_sanitizer_retains_valid_entries_pi_exact_send_and_local", "radius_non_success_detail_is_bounded_pi_exact_send_and_local", "radius_non_success_detail_uses_ecmascript_trim_pi_exact_send_and_local"]
+status = "semantic-parity"
+
+[[mapping]]
 source = "packages/ai/src/types.ts"
 rust = ["all_api_model_config_variants_round_trip", "all_identifier_model_ref_and_timestamp_types_round_trip", "anthropic_compat_every_architecture_field_round_trips", "bedrock_body_stream_failure_sanitizes_secrets_send_and_local", "canonical_message_context_and_conversation_types_round_trip", "catalog_unknown_extensions_round_trip", "finish_and_public_error_types_round_trip", "local_provider_components_accept_rc_state", "model_descriptor_and_typed_compat_fields_round_trip", "model_runtime_is_a_narrow_arc_capability_and_local_runtime_accepts_rc_state", "openai_completions_compat_serialized_values_match_pi_contract", "openrouter_max_price_decimal_number_is_lossless_and_distinct_from_string", "pricing_types_round_trip_and_use_integer_arithmetic", "replay_helpers_reject_incomplete_and_cross_model_items", "replay_r1_complete_item_identity_is_stable", "replay_r2_success_rejects_incomplete_item", "replay_r3_failed_and_cancelled_items_are_incomplete_and_ignored", "replay_r4_same_provider_round_trip_is_deterministic_before_encoder", "replay_r5_cross_provider_projection_rejects_nonportable_item", "replay_r6_signature_target_is_exact_and_stable", "replay_r7_provider_order_is_independent_of_block_order", "replay_r8_scratch_state_is_not_in_persisted_schema", "replay_target_applicability_completeness_and_usage_sources_round_trip", "request_wide_pricing_uses_highest_strictly_exceeded_tier", "secret_types_are_not_serializable_and_redact_debug", "stream_error_sanitizes_secrets", "stream_error_sanitizes_secrets_bedrock_signing_start_and_body_send_and_local", "stream_error_sanitizes_secrets_http_pipeline_send_and_local", "tool_call_spec_and_every_result_content_variant_round_trip", "tool_spec_constrained_sampling_serialized_values_match_pi_contract"]
 status = "semantic-parity"
@@ -91,12 +141,17 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/models.ts#catalog-control-plane"
-rust = ["catalog_failed_persist_keeps_old_snapshot", "catalog_host_override_applies_after_dynamic_snapshot", "catalog_network_refresh_is_best_effort_per_provider", "catalog_persist_precedes_publish", "catalog_raw_snapshot_does_not_contain_flattened_override", "catalog_reader_never_sees_partial_candidate", "catalog_reads_last_published_snapshot_synchronously", "catalog_removed_override_reveals_provider_value", "catalog_restore_precedes_auth_resolution", "catalog_restore_precedes_network", "catalog_runtime_override_has_highest_precedence", "catalog_static_refresh_is_noop", "catalog_superseded_refresh_cannot_publish", "catalog_typed_compat_mismatch_is_rejected", "catalog_unknown_extensions_round_trip"]
+rust = ["catalog_failed_persist_keeps_old_snapshot", "catalog_host_override_applies_after_dynamic_snapshot", "catalog_network_refresh_is_best_effort_per_provider", "catalog_persist_precedes_publish", "catalog_raw_snapshot_does_not_contain_flattened_override", "catalog_reader_never_sees_partial_candidate", "catalog_reads_last_published_snapshot_synchronously", "catalog_refresh_candidate_with_unregistered_api_rejects_publication", "catalog_removed_override_reveals_provider_value", "catalog_restore_precedes_auth_resolution", "catalog_restore_precedes_network", "catalog_runtime_override_has_highest_precedence", "catalog_static_refresh_is_noop", "catalog_superseded_refresh_cannot_publish", "catalog_typed_compat_mismatch_is_rejected", "catalog_unknown_extensions_round_trip"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/ai/src/providers/github-copilot.ts#filterModels"
+rust = ["credential_scoped_availability_local_pi_exact", "credential_scoped_availability_send_pi_exact"]
 status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/types.ts#request-middleware"
-rust = ["anthropic_payload_transform_cannot_disable_stream_local", "anthropic_payload_transform_cannot_disable_stream_send", "attempt_middleware_cannot_replace_credential_header_snapshot", "attempt_middleware_runs_per_retry", "injected_http_transport_receives_final_request", "payload_in_place_mutation_is_retained", "payload_replacement_is_retained", "payload_transform_runs_once_per_logical_request", "payload_transforms_run_in_registration_order", "request_debug_redacts_secrets", "response_observer_runs_before_body_consumption", "response_observer_runs_for_retry_responses", "timeout_ms_is_enforced_per_transport_attempt", "timeout_ms_is_forwarded_by_models", "typed_payload_transform_is_adapted_by_models"]
+rust = ["anthropic_payload_transform_cannot_disable_stream_local", "anthropic_payload_transform_cannot_disable_stream_send", "attempt_middleware_cannot_replace_credential_header_snapshot", "attempt_middleware_runs_per_retry", "injected_http_transport_receives_final_request", "payload_in_place_mutation_is_retained", "payload_replacement_is_retained", "payload_transform_runs_once_per_logical_request", "payload_transforms_run_in_registration_order", "pi_messages_non_2xx_response_observer_runs_before_body_consumption_send_and_local", "request_debug_redacts_secrets", "response_observer_runs_before_body_consumption", "response_observer_runs_for_retry_responses", "timeout_ms_is_enforced_per_transport_attempt", "timeout_ms_is_forwarded_by_models", "typed_payload_transform_is_adapted_by_models"]
 status = "semantic-parity"
 
 [[mapping]]
@@ -266,7 +321,7 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/api/google-vertex.ts"
-rust = ["google_full_thinking_enabled_without_selector_pi_exact", "google_function_call_null_args_defaults_to_empty_object_pi_exact", "google_image_tool_result_routing_by_model_generation_pi_exact", "handler::tests::google_local_tool_call_fallback_ids_are_unique_across_equal_timestamp_decoders", "google_provider_total_tokens_drive_turn_two_context_planning_pi_exact", "google_raw_stop_reason_and_tool_precedence_pi_exact", "google_replay_ordinals_include_unsigned_provider_parts_pi_exact", "handler::tests::google_send_tool_call_fallback_ids_are_unique_across_equal_timestamp_decoders", "google_terminal_cost_is_calculated_pi_exact", "google_thinking_disable_wire_modes_pi_exact", "google_thinking_level_map_pi_exact", "google_vertex_adc_invalid_type_with_access_token_is_rejected_send_and_local", "google_vertex_adc_missing_scope_skips_token_exchange_send_and_local", "google_vertex_api_key_resolution_send_and_local", "google_vertex_authorized_user_ignores_token_uri_send_and_local", "google_vertex_authorized_user_quota_project_header_send_and_local", "google_vertex_custom_standard_host_preserves_collection_scope_send_and_local", "google_vertex_erased_tool_choice_patch_uses_pi_lowercase", "google_vertex_full_options_project_location_precedence_pi_exact_send_and_local", "google_vertex_non_user_adc_delegates_to_host_adapter_send_and_local", "google_vertex_service_account_quota_project_override_send_and_local", "google_zero_total_tokens_fall_back_to_components_for_context_planning_pi_exact", "wire_google_vertex_pi_exact"]
+rust = ["google_full_thinking_enabled_without_selector_pi_exact", "google_function_call_null_args_defaults_to_empty_object_pi_exact", "google_image_tool_result_routing_by_model_generation_pi_exact", "handler::tests::google_local_tool_call_fallback_ids_are_unique_across_equal_timestamp_decoders", "google_provider_total_tokens_drive_turn_two_context_planning_pi_exact", "google_raw_stop_reason_and_tool_precedence_pi_exact", "google_replay_ordinals_include_unsigned_provider_parts_pi_exact", "handler::tests::google_send_tool_call_fallback_ids_are_unique_across_equal_timestamp_decoders", "google_terminal_cost_is_calculated_pi_exact", "google_thinking_disable_wire_modes_pi_exact", "google_thinking_level_map_pi_exact", "google_vertex_adc_invalid_type_with_access_token_is_rejected_send_and_local", "google_vertex_adc_missing_scope_skips_token_exchange_send_and_local", "google_vertex_api_key_resolution_send_and_local", "google_vertex_authorized_user_ignores_token_uri_send_and_local", "google_vertex_authorized_user_quota_project_header_send_and_local", "google_vertex_check_auth_is_configuration_only_send_and_local", "google_vertex_custom_standard_host_preserves_collection_scope_send_and_local", "google_vertex_erased_tool_choice_patch_uses_pi_lowercase", "google_vertex_full_options_project_location_precedence_pi_exact_send_and_local", "google_vertex_non_user_adc_delegates_to_host_adapter_send_and_local", "google_vertex_service_account_quota_project_override_send_and_local", "google_zero_total_tokens_fall_back_to_components_for_context_planning_pi_exact", "wire_google_vertex_pi_exact"]
 status = "semantic-parity"
 
 [[mapping]]
@@ -276,12 +331,12 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/providers/google-vertex.ts"
-rust = ["google_provider_catalogs_and_registrations_match_pinned_families", "google_vertex_adc_invalid_type_with_access_token_is_rejected_send_and_local", "google_vertex_adc_missing_scope_skips_token_exchange_send_and_local", "google_vertex_api_key_resolution_send_and_local", "google_vertex_authorized_user_ignores_token_uri_send_and_local", "google_vertex_authorized_user_quota_project_header_send_and_local", "google_vertex_non_user_adc_delegates_to_host_adapter_send_and_local", "google_vertex_service_account_quota_project_override_send_and_local", "google_vertex_service_account_resolution_send_and_local"]
+rust = ["google_provider_catalogs_and_registrations_match_pinned_families", "google_vertex_adc_invalid_type_with_access_token_is_rejected_send_and_local", "google_vertex_adc_missing_scope_skips_token_exchange_send_and_local", "google_vertex_api_key_resolution_send_and_local", "google_vertex_authorized_user_ignores_token_uri_send_and_local", "google_vertex_authorized_user_quota_project_header_send_and_local", "google_vertex_check_auth_is_configuration_only_send_and_local", "google_vertex_non_user_adc_delegates_to_host_adapter_send_and_local", "google_vertex_service_account_quota_project_override_send_and_local", "google_vertex_service_account_resolution_send_and_local"]
 status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/auth/types.ts"
-rust = ["auth_file_store_round_trips_provider_extras", "auth_list_never_resolves_secrets", "auth_manual_code_can_be_cancelled_by_callback", "auth_provider_extra_fields_round_trip", "auth_secret_prompt", "auth_select_returns_option_id", "auth_text_prompt"]
+rust = ["auth_file_store_round_trips_github_copilot_enterprise_metadata", "auth_file_store_round_trips_provider_extras", "auth_list_never_resolves_secrets", "auth_manual_code_can_be_cancelled_by_callback", "auth_provider_extra_fields_round_trip", "auth_secret_prompt", "auth_select_returns_option_id", "auth_text_prompt"]
 status = "semantic-parity"
 
 [[mapping]]
@@ -291,7 +346,7 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/auth/resolve.ts"
-rust = ["auth_environment_used_only_without_stored_credential", "auth_explicit_request_value_wins", "auth_failed_oauth_refresh_never_falls_back_to_env", "auth_failed_oauth_refresh_never_falls_back_to_env_in_memory", "auth_local_oauth_rotation_persists_before_explicit_minimum_rejection", "auth_oauth_refresh_is_serialized", "auth_oauth_refresh_is_serialized_in_memory", "auth_oauth_rotation_persists_before_explicit_minimum_rejection", "auth_stored_credential_owns_provider"]
+rust = ["auth_environment_used_only_without_stored_credential", "auth_explicit_request_value_wins", "auth_failed_oauth_refresh_never_falls_back_to_env", "auth_failed_oauth_refresh_never_falls_back_to_env_in_memory", "auth_local_oauth_rotation_persists_before_explicit_minimum_rejection", "auth_oauth_refresh_is_serialized", "auth_oauth_refresh_is_serialized_in_memory", "auth_oauth_rotation_persists_before_explicit_minimum_rejection", "auth_stored_credential_owns_provider", "local::auth_explicit_request_value_wins", "local_precedence::auth_explicit_request_value_wins", "send::auth_explicit_request_value_wins", "send_precedence::auth_explicit_request_value_wins"]
 status = "semantic-parity"
 
 [[mapping]]
@@ -568,26 +623,26 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/azure-openai-base-url.test.ts"
-rust = []
+rust = ["azure_api_version_whitespace_truthiness_send_and_local", "azure_openai_auth_options_and_environment_pi_exact_send_and_local", "azure_openai_base_url_ecmascript_trim_send_and_local", "azure_openai_base_url_normalization_pi_exact", "azure_openai_whitespace_configuration_precedence_send_and_local"]
 status = "planned"
-milestone = "M6"
+milestone = "M7"
 
 [[mapping]]
 source = "packages/ai/test/azure-openai-responses-reasoning-replay.test.ts"
-rust = ["responses_terminal_backfills_encrypted_reasoning"]
+rust = ["responses_terminal_backfills_encrypted_reasoning", "wire_azure_openai_responses_pi_exact"]
 status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/azure-openai-tool-choice.test.ts"
-rust = []
+rust = ["azure_openai_tool_choice_pi_exact"]
 status = "planned"
-milestone = "M6"
+milestone = "M7"
 
 [[mapping]]
 source = "packages/ai/test/baseten-models.test.ts"
-rust = ["wire_openai_completions_pi_exact"]
+rust = ["openai_chat_template_budget_variable_uses_clamped_simple_budget", "openai_reasoning_format_matches_compat", "remaining_provider_catalogs_preserve_pinned_compat_and_headers_pi_exact", "wire_openai_completions_pi_exact"]
 status = "planned"
-milestone = "M6"
+milestone = "M7"
 
 [[mapping]]
 source = "packages/ai/test/bedrock-convert-messages.test.ts"
@@ -643,31 +698,31 @@ status = "semantic-parity"
 source = "packages/ai/test/cache-retention.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/cloudflare-gateway-binding.test.ts"
-rust = []
+rust = ["cloudflare_gateway_binding_pi_exact"]
 status = "planned"
-milestone = "M6"
+milestone = "M7"
 
 [[mapping]]
 source = "packages/ai/test/cloudflare-stream.test.ts"
-rust = []
+rust = ["cloudflare_auth_login_and_precedence_pi_exact", "cloudflare_stream_materializes_endpoint_and_auth_pi_exact"]
 status = "planned"
-milestone = "M6"
+milestone = "M7"
 
 [[mapping]]
 source = "packages/ai/test/compat-env.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/constrained-sampling.test.ts"
 rust = ["openai_grammar_constrained_tool_uses_custom_wire_shape", "openai_grammar_custom_input_escapes_json_string_deltas", "openai_grammar_custom_input_fragments_are_append_only_json", "openai_strict_schema_normalization_and_error_policy_match_pi", "responses_grammar_custom_input_fragments_are_append_only_json"]
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/context-estimate.test.ts"
@@ -676,27 +731,26 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/context-overflow.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["context_overflow_classifier_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/cross-provider-handoff.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/deferred-tools.test.ts"
 rust = ["openai_kimi_deferred_tools_are_filtered_then_reintroduced", "responses_deferred_tools_fall_back_to_tool_search", "responses_deferred_tools_use_additional_tools"]
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/empty.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/env-api-keys.test.ts"
@@ -708,43 +762,43 @@ milestone = "M4"
 source = "packages/ai/test/error-body.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/faux-provider.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/fetch-option.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/fireworks-models.test.ts"
-rust = []
+rust = ["remaining_provider_catalogs_preserve_pinned_compat_and_headers_pi_exact", "wire_anthropic_messages_pi_exact", "wire_openai_completions_pi_exact"]
 status = "planned"
-milestone = "M6"
+milestone = "M7"
 
 [[mapping]]
 source = "packages/ai/test/generate-models-strict.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/github-copilot-anthropic.test.ts"
-rust = []
+rust = ["github_copilot_request_context_headers_all_families_send_and_local_pi_exact"]
 status = "planned"
-milestone = "M4"
+milestone = "M7"
 
 [[mapping]]
 source = "packages/ai/test/github-copilot-oauth.test.ts"
-rust = []
+rust = ["auth_file_store_round_trips_github_copilot_enterprise_metadata", "github_copilot_enterprise_metadata_refresh_and_auth_send_and_local_pi_exact", "github_copilot_oauth_entitlements_pi_exact_send_and_local", "oauth::tests::github_copilot_request_deadline_covers_stalled_transport_and_body_send_and_local"]
 status = "planned"
-milestone = "M4"
+milestone = "M7"
 
 [[mapping]]
 source = "packages/ai/test/google-raw-stop-reason.test.ts"
@@ -793,7 +847,7 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/google-vertex-api-key-resolution.test.ts"
-rust = ["google_vertex_adc_invalid_type_with_access_token_is_rejected_send_and_local", "google_vertex_adc_missing_scope_skips_token_exchange_send_and_local", "google_vertex_api_key_resolution_send_and_local", "google_vertex_authorized_user_ignores_token_uri_send_and_local", "google_vertex_custom_standard_host_preserves_collection_scope_send_and_local", "google_vertex_full_options_project_location_precedence_pi_exact_send_and_local", "google_vertex_non_user_adc_delegates_to_host_adapter_send_and_local"]
+rust = ["google_vertex_adc_invalid_type_with_access_token_is_rejected_send_and_local", "google_vertex_adc_missing_scope_skips_token_exchange_send_and_local", "google_vertex_api_key_resolution_send_and_local", "google_vertex_authorized_user_ignores_token_uri_send_and_local", "google_vertex_check_auth_is_configuration_only_send_and_local", "google_vertex_custom_standard_host_preserves_collection_scope_send_and_local", "google_vertex_full_options_project_location_precedence_pi_exact_send_and_local", "google_vertex_non_user_adc_delegates_to_host_adapter_send_and_local"]
 status = "semantic-parity"
 
 [[mapping]]
@@ -806,43 +860,43 @@ milestone = "M3.2"
 source = "packages/ai/test/image-tool-result.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/images-models.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/images.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/interleaved-thinking.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/kimi-coding-oauth.test.ts"
-rust = []
+rust = ["kimi_coding_oauth_pi_exact_send_and_local", "kimi_device_poll_failures_pi_exact_send_and_local", "kimi_pending_oauth_body_is_cancellable_send_and_local"]
 status = "planned"
-milestone = "M4"
+milestone = "M7"
 
 [[mapping]]
 source = "packages/ai/test/lax-message-content.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/lazy-module-load.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/max-thinking.test.ts"
@@ -852,27 +906,23 @@ milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/mistral-http-transport.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["mistral_bytewise_sse_utf8_send_and_local", "mistral_cancellation_while_waiting_for_sse_send_and_local", "mistral_content_block_switching_pi_order_send_and_local", "mistral_explicit_null_affinity_suppresses_auto_send_and_local", "mistral_http_error_body_ecmascript_trim_send_and_local_pi_exact", "mistral_http_error_body_truncates_at_4000_chars_send_and_local", "mistral_http_status_and_error_body_survive_send_and_local", "mistral_payload_transform_camel_case_fields_remap_send_and_local", "mistral_sse_ecmascript_trim_pi_exact", "mistral_timeout_covers_error_body_send_and_local", "mistral_timeout_covers_sse_body_send_and_local", "mistral_transport_diagnostics_are_committed_send_and_local", "wire_mistral_conversations_basic_pi_exact", "wire_mistral_conversations_ecmascript_trim_pi_exact", "wire_mistral_conversations_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/mistral-raw-stop-reason.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["mistral_raw_stop_reason_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/mistral-reasoning-mode.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["mistral_reasoning_mode_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/mistral-tool-schema.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["mistral_strict_tool_schema_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/model-catalog-types.test.ts"
@@ -888,7 +938,7 @@ milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/models-runtime.test.ts"
-rust = ["auth_environment_used_only_without_stored_credential", "auth_explicit_request_value_wins", "auth_failed_oauth_refresh_never_falls_back_to_env", "auth_failed_oauth_refresh_never_falls_back_to_env_in_memory", "auth_list_never_resolves_secrets", "auth_local_oauth_rotation_persists_before_explicit_minimum_rejection", "auth_login_persists_under_modify", "auth_login_persists_under_modify_in_memory", "auth_oauth_refresh_is_serialized", "auth_oauth_refresh_is_serialized_in_memory", "auth_oauth_rotation_persists_before_explicit_minimum_rejection", "auth_stored_credential_owns_provider", "catalog_failed_persist_keeps_old_snapshot", "catalog_host_override_applies_after_dynamic_snapshot", "catalog_network_refresh_is_best_effort_per_provider", "catalog_persist_precedes_publish", "catalog_raw_snapshot_does_not_contain_flattened_override", "catalog_reader_never_sees_partial_candidate", "catalog_reads_last_published_snapshot_synchronously", "catalog_removed_override_reveals_provider_value", "catalog_restore_precedes_auth_resolution", "catalog_restore_precedes_network", "catalog_runtime_override_has_highest_precedence", "catalog_static_refresh_is_noop", "catalog_superseded_refresh_cannot_publish", "catalog_typed_compat_mismatch_is_rejected", "catalog_unknown_extensions_round_trip", "headers_auth_before_model", "headers_explicit_before_transform", "headers_merge_case_insensitively", "headers_model_before_explicit", "headers_transform_can_delete_default", "headers_transform_not_forwarded_to_provider_options", "headers_transform_runs_once", "models_provider_registration_is_atomic", "models_registry_lock_is_released_before_auth_await"]
+rust = ["auth_environment_used_only_without_stored_credential", "auth_explicit_request_value_wins", "auth_failed_oauth_refresh_never_falls_back_to_env", "auth_failed_oauth_refresh_never_falls_back_to_env_in_memory", "auth_list_never_resolves_secrets", "auth_local_oauth_rotation_persists_before_explicit_minimum_rejection", "auth_login_persists_under_modify", "auth_login_persists_under_modify_in_memory", "auth_oauth_refresh_is_serialized", "auth_oauth_refresh_is_serialized_in_memory", "auth_oauth_rotation_persists_before_explicit_minimum_rejection", "auth_stored_credential_owns_provider", "catalog_failed_persist_keeps_old_snapshot", "catalog_host_override_applies_after_dynamic_snapshot", "catalog_network_refresh_is_best_effort_per_provider", "catalog_persist_precedes_publish", "catalog_raw_snapshot_does_not_contain_flattened_override", "catalog_reader_never_sees_partial_candidate", "catalog_reads_last_published_snapshot_synchronously", "catalog_removed_override_reveals_provider_value", "catalog_restore_precedes_auth_resolution", "catalog_restore_precedes_network", "catalog_runtime_override_has_highest_precedence", "catalog_static_refresh_is_noop", "catalog_superseded_refresh_cannot_publish", "catalog_typed_compat_mismatch_is_rejected", "catalog_unknown_extensions_round_trip", "credential_scoped_availability_local_pi_exact", "credential_scoped_availability_send_pi_exact", "headers_auth_before_model", "headers_explicit_before_transform", "headers_merge_case_insensitively", "headers_model_before_explicit", "headers_transform_can_delete_default", "headers_transform_not_forwarded_to_provider_options", "headers_transform_runs_once", "models_provider_registration_is_atomic", "models_registry_lock_is_released_before_auth_await", "radius_configuration_check_skips_cache_retention_environment_send_and_local_pi_exact"]
 status = "semantic-parity"
 
 [[mapping]]
@@ -1038,19 +1088,19 @@ status = "semantic-parity"
 source = "packages/ai/test/openrouter-cache-control-models.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/openrouter-cache-write-repro.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/openrouter-images.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/openrouter-oauth.test.ts"
@@ -1060,27 +1110,26 @@ milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/overflow.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["overflow_patterns_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/pi-messages.test.ts"
-rust = []
+rust = ["local_response_failure::pi_messages_non_2xx_commits_response_failure_diagnostic", "pi_messages_debug_query_and_response_headers_send_and_local_pi_exact", "pi_messages_missing_terminal_commits_failure", "pi_messages_non_2xx_response_observer_runs_before_body_consumption_send_and_local", "pi_messages_oversized_non_2xx_body_is_bounded_send_and_local", "pi_messages_pending_non_2xx_body_is_cancellable_send_and_local", "pi_messages_rewrite_diagnostic_survives_round_trip", "pi_messages_sse_crlf_normalization_pi_exact", "pi_messages_sse_ecmascript_trim_pi_exact", "pi_messages_sse_first_data_line_and_done_trim_pi_exact", "pi_messages_sse_lone_carriage_returns_are_not_boundaries_pi_exact", "pi_messages_stream_and_terminal_pi_exact", "pi_messages_toolcall_end_authoritative_identity_send_and_local", "pi_messages_transport_diagnostics_are_committed_send_and_local", "radius_provider_uses_dynamic_catalog_and_pi_messages_send_and_local", "send_response_failure::pi_messages_non_2xx_commits_response_failure_diagnostic", "wire_pi_messages_basic_pi_exact", "wire_pi_messages_pi_exact"]
 status = "planned"
-milestone = "M6"
+milestone = "M7"
 
 [[mapping]]
 source = "packages/ai/test/provider-error-body-passthrough.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/provider-error-body-regression.test.ts"
 rust = ["bedrock_body_error_normalization_pi_exact_send_and_local", "bedrock_error_metadata_normalization_pi_exact", "stream_error_sanitizes_secrets_bedrock_signing_start_and_body_send_and_local"]
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/provider-retry.test.ts"
@@ -1095,15 +1144,15 @@ milestone = "M3.2"
 
 [[mapping]]
 source = "packages/ai/test/qwen-token-plan-models.test.ts"
-rust = []
+rust = ["remaining_provider_catalogs_preserve_pinned_compat_and_headers_pi_exact", "wire_openai_completions_pi_exact"]
 status = "planned"
-milestone = "M6"
+milestone = "M7"
 
 [[mapping]]
 source = "packages/ai/test/radius-oauth.test.ts"
-rust = []
+rust = ["radius_oauth_pi_exact_send_and_local"]
 status = "planned"
-milestone = "M4"
+milestone = "M7"
 
 [[mapping]]
 source = "packages/ai/test/reasoning-options.test.ts"
@@ -1115,13 +1164,13 @@ milestone = "M3.4"
 source = "packages/ai/test/responseid.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/retry.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/sampling-options.test.ts"
@@ -1137,7 +1186,7 @@ milestone = "M4"
 source = "packages/ai/test/stream.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/supports-xhigh.test.ts"
@@ -1149,43 +1198,43 @@ milestone = "M3.4"
 source = "packages/ai/test/telemetry-options.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/text.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/together-models.test.ts"
-rust = []
+rust = ["openai_reasoning_format_matches_compat", "remaining_provider_catalogs_preserve_pinned_compat_and_headers_pi_exact", "wire_openai_completions_pi_exact"]
 status = "planned"
-milestone = "M6"
+milestone = "M7"
 
 [[mapping]]
 source = "packages/ai/test/tokens.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/tool-call-id-normalization.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/tool-call-without-result.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/total-tokens.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/transform-messages-copilot-openai-to-anthropic.test.ts"
@@ -1204,13 +1253,13 @@ status = "semantic-parity"
 source = "packages/ai/test/unicode-surrogate.test.ts"
 rust = ["stream_unicode_matches_pi"]
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/uuid.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/validation.test.ts"
@@ -1225,15 +1274,15 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/xai-oauth.test.ts"
-rust = []
+rust = ["xai_oauth_pi_exact_send_and_local", "xai_pending_oauth_body_is_cancellable_send_and_local", "xai_unknown_device_poll_failure_pi_exact_send_and_local"]
 status = "planned"
-milestone = "M4"
+milestone = "M7"
 
 [[mapping]]
 source = "packages/ai/test/xai-responses.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/ai/test/xhigh.test.ts"
@@ -1243,9 +1292,9 @@ milestone = "M3.4"
 
 [[mapping]]
 source = "packages/ai/test/xiaomi-models.test.ts"
-rust = []
+rust = ["remaining_provider_catalogs_preserve_pinned_compat_and_headers_pi_exact"]
 status = "planned"
-milestone = "M6"
+milestone = "M7"
 
 [[mapping]]
 source = "packages/ai/test/xiaomi-token-plan-ams-anthropic-empty-signature-smoke.test.ts"
@@ -1255,15 +1304,15 @@ milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/zai-coding-plan-models.test.ts"
-rust = []
+rust = ["remaining_provider_catalogs_preserve_pinned_compat_and_headers_pi_exact", "wire_openai_completions_pi_exact"]
 status = "planned"
-milestone = "M6"
+milestone = "M7"
 
 [[mapping]]
 source = "packages/ai/test/zen.test.ts"
 rust = []
 status = "planned"
-milestone = "M6"
+milestone = "M8"
 
 [[mapping]]
 source = "packages/agent/test/agent-loop.test.ts"

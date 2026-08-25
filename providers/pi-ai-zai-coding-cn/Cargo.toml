@@ -1,0 +1,14 @@
+[package]
+name = "pi-ai-zai-coding-cn"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/agentprism/genai-agent-rs"
+description = "Zai Coding Cn provider registration for pi-ai."
+publish = false
+
+[dependencies]
+pi-ai = { path = "../../crates/pi-ai" }
+pi-ai-openai = { path = "../pi-ai-openai" }
+pi-ai-provider-common = { path = "../pi-ai-provider-common" }

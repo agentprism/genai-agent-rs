@@ -689,6 +689,7 @@ impl BedrockSignerResponse {
             headers: self.headers,
             diagnostics: self.diagnostics,
             notify_observers: self.notify_observers,
+            decode_non_success: false,
             body: Box::pin(self.body.map(move |item| {
                 item.map_err(|error| {
                     normalize_bedrock_signer_error(error).sanitized(&secret_values)
@@ -742,6 +743,7 @@ impl LocalBedrockSignerResponse {
             headers: self.headers,
             diagnostics: self.diagnostics,
             notify_observers: self.notify_observers,
+            decode_non_success: false,
             body: Box::pin(self.body.map(move |item| {
                 item.map_err(|error| {
                     normalize_bedrock_signer_error(error).sanitized(&secret_values)

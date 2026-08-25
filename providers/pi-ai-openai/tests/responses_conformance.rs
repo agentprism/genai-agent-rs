@@ -1,29 +1,32 @@
 use http::HeaderMap;
 use pi_ai::{
-    ASSISTANT_MESSAGE_DIAGNOSTIC_SCHEMA_VERSION, ApiFamily, ApiModelConfig, ApiRequestOptions,
-    AssistantEvent, AssistantFinish, AssistantFinishReason, AssistantMessage,
+    ASSISTANT_MESSAGE_DIAGNOSTIC_SCHEMA_VERSION, ApiFamily, ApiId, ApiModelConfig,
+    ApiRequestOptions, AssistantEvent, AssistantFinish, AssistantFinishReason, AssistantMessage,
     AssistantMessageDiagnostic, CONTEXT_SAFETY_TOKENS, CacheRetention, CacheWriteRetentionPricing,
     CommonModelDescriptor, ConstrainedSampling, ConstrainedSamplingConfig, ContentBlock,
-    ContentBlockId, Context, DiagnosticErrorCode, DiagnosticErrorInfo, EncodeContext,
-    ErasedApiFullOptions, ErasedApiHandler, HeaderMapSpec, JsonSchemaStrictMode, LevelSupport,
-    Message, MessageId, Modality, ModalityCapabilities, ModelDescriptor, ModelLimits, ModelPricing,
-    OPENAI_RESPONSES_FUNCTION_CALL_IDENTITY_KIND, OPENAI_RESPONSES_MESSAGE_IDENTITY_KIND,
-    OPENAI_RESPONSES_REASONING_ITEM_KIND, OpenAiCodexReasoningSummary, OpenAiCodexResponses,
-    OpenAiCodexResponsesOptions, OpenAiCodexResponsesSimplePatch, OpenAiCodexToolChoice,
-    OpenAiResponses, OpenAiResponsesCompat, OpenAiResponsesHandoff, OpenAiResponsesModelConfig,
-    OpenAiResponsesOptions, OpenAiResponsesReasoningSummary, OpenAiResponsesSimplePatch,
-    OpenAiTextVerbosity, OpenAiThinkingValue, OrderedJsonObject, OrderedJsonValue,
-    OrderedJsonWriter, ReasoningLevel, ReplayCompleteness, ReplayEnvelope, ReplayItem, ReplayScope,
-    SessionAffinityFormat, SimpleGenerationOptions, SimpleLoweringContext, ThinkingLevelMap,
-    Timestamp, TokenPriceRates, ToolCall, ToolCallId, ToolChoice, ToolResultContent,
-    ToolResultMessage, ToolSpec, TypedModelDescriptor, Usage, UsageSource, UserMessage,
-    estimate_context_tokens, responses_grammar_tool_input_properties, transform_context_for_model,
+    ContentBlockId, Context, CustomApiModelConfig, DiagnosticErrorCode, DiagnosticErrorInfo,
+    EncodeContext, ErasedApiFullOptions, ErasedApiHandler, HeaderMapSpec, JsonSchemaStrictMode,
+    LevelSupport, Message, MessageId, Modality, ModalityCapabilities, ModelDescriptor, ModelLimits,
+    ModelPricing, OPENAI_RESPONSES_FUNCTION_CALL_IDENTITY_KIND,
+    OPENAI_RESPONSES_MESSAGE_IDENTITY_KIND, OPENAI_RESPONSES_REASONING_ITEM_KIND,
+    OpenAiCodexReasoningSummary, OpenAiCodexResponses, OpenAiCodexResponsesOptions,
+    OpenAiCodexResponsesSimplePatch, OpenAiCodexToolChoice, OpenAiResponses, OpenAiResponsesCompat,
+    OpenAiResponsesHandoff, OpenAiResponsesModelConfig, OpenAiResponsesOptions,
+    OpenAiResponsesReasoningSummary, OpenAiResponsesSimplePatch, OpenAiTextVerbosity,
+    OpenAiThinkingValue, OrderedJsonObject, OrderedJsonValue, OrderedJsonWriter, ReasoningLevel,
+    ReplayCompleteness, ReplayEnvelope, ReplayItem, ReplayScope, SessionAffinityFormat,
+    SimpleGenerationOptions, SimpleLoweringContext, ThinkingLevelMap, Timestamp, TokenPriceRates,
+    ToolCall, ToolCallId, ToolChoice, ToolResultContent, ToolResultMessage, ToolSpec,
+    TypedModelDescriptor, Usage, UsageSource, UserMessage, estimate_context_tokens,
+    responses_grammar_tool_input_properties, transform_context_for_model,
 };
 use pi_ai_openai::{
+    AzureOpenAiResponses, AzureOpenAiResponsesModelConfig, AzureOpenAiResponsesOptions,
     OpenAiResponsesDecodeContext, OpenAiResponsesHandler, OpenAiResponsesSseDecoder,
-    decode_openai_responses_sse,
+    decode_openai_responses_sse, normalize_azure_openai_base_url,
 };
 use serde_json::Value;
+use serde_json::value::RawValue;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs;
@@ -77,6 +80,162 @@ fn wire_openai_responses_pi_exact() {
         ),
         captured_request("openai-responses", "text-only", 1)
     );
+}
+
+/// Architecture v2 part 2 §10.8; pinned Pi basis:
+/// `packages/ai/src/api/azure-openai-responses.ts:buildParams`.
+#[test]
+fn wire_azure_openai_responses_pi_exact() {
+    assert_captured_responses_family("azure-openai-responses");
+    let shared_model = responses_model("azure-openai-responses", "openai-responses", "gpt-5.4");
+    let shared = typed_responses(&shared_model);
+    let custom = AzureOpenAiResponsesModelConfig {
+        responses: shared.config.clone(),
+    };
+    let typed = TypedModelDescriptor::<AzureOpenAiResponses> {
+        common: shared.common,
+        config: CustomApiModelConfig {
+            api: ApiId::new("azure-openai-responses"),
+            schema_version: 1,
+            value: RawValue::from_string(serde_json::to_string(&custom).unwrap()).unwrap(),
+        },
+        extensions: shared.extensions,
+    };
+    let compat =
+        AzureOpenAiResponses::resolve_compat(&typed.common.base_url, &custom.responses.compat)
+            .unwrap();
+    let wire = AzureOpenAiResponses::encode(
+        EncodeContext {
+            model: &typed,
+            context: &user_context(Some("system")),
+            compat: &compat,
+            effective_base_url: &typed.common.base_url,
+        },
+        &AzureOpenAiResponsesOptions {
+            responses: OpenAiResponsesOptions {
+                max_output_tokens: Some(8),
+                temperature: Some(0.25),
+                sampling: OrderedJsonObject::new(),
+                reasoning_effort: Some("low".into()),
+                reasoning_summary: Some(Some(OpenAiResponsesReasoningSummary::Auto)),
+                service_tier: None,
+                tool_choice: None,
+                cache_retention: CacheRetention::Short,
+                session_id: Some("session-1".into()),
+            },
+            azure_base_url: None,
+            azure_resource_name: None,
+            deployment_name: "production-gpt".into(),
+            api_version: "v1".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        OrderedJsonWriter::stringify(&wire.into()).unwrap(),
+        r#"{"model":"production-gpt","input":[{"role":"developer","content":"system"},{"role":"user","content":[{"type":"input_text","text":"hello"}]}],"stream":true,"prompt_cache_key":"session-1","store":false,"max_output_tokens":16,"temperature":0.25,"reasoning":{"effort":"low","summary":"auto"},"include":["reasoning.encrypted_content"]}"#
+    );
+}
+
+#[test]
+fn azure_openai_base_url_normalization_pi_exact() {
+    // Pi basis: packages/ai/test/azure-openai-base-url.test.ts.
+    for (source, expected) in [
+        (
+            "https://a.cognitiveservices.azure.com",
+            "https://a.cognitiveservices.azure.com/openai/v1",
+        ),
+        (
+            "https://a.ai.azure.com/openai/v1/responses",
+            "https://a.ai.azure.com/openai/v1",
+        ),
+        (
+            "https://proxy.example/v1?custom=true",
+            "https://proxy.example/v1?custom=true",
+        ),
+    ] {
+        assert_eq!(
+            normalize_azure_openai_base_url(source)
+                .unwrap()
+                .as_str()
+                .trim_end_matches('/'),
+            expected
+        );
+    }
+    assert_eq!(
+        normalize_azure_openai_base_url(
+            "\u{feff}https://a.openai.azure.com/openai/v1/responses\u{feff}"
+        )
+        .unwrap()
+        .as_str()
+        .trim_end_matches('/'),
+        "https://a.openai.azure.com/openai/v1"
+    );
+    assert!(
+        normalize_azure_openai_base_url(
+            "\u{0085}https://a.openai.azure.com/openai/v1/responses\u{0085}"
+        )
+        .is_err()
+    );
+    assert!(normalize_azure_openai_base_url("not-a-url").is_err());
+}
+
+#[test]
+fn azure_openai_tool_choice_pi_exact() {
+    // Pi basis: packages/ai/test/azure-openai-tool-choice.test.ts.
+    let mut shared_model = responses_model(
+        "azure-openai-responses",
+        "openai-responses",
+        "test-deployment",
+    );
+    shared_model.common.reasoning = false;
+    let shared = typed_responses(&shared_model);
+    let custom = AzureOpenAiResponsesModelConfig {
+        responses: shared.config.clone(),
+    };
+    let typed = TypedModelDescriptor::<AzureOpenAiResponses> {
+        common: shared.common,
+        config: CustomApiModelConfig {
+            api: ApiId::new("azure-openai-responses"),
+            schema_version: 1,
+            value: RawValue::from_string(serde_json::to_string(&custom).unwrap()).unwrap(),
+        },
+        extensions: shared.extensions,
+    };
+    let compat =
+        AzureOpenAiResponses::resolve_compat(&typed.common.base_url, &custom.responses.compat)
+            .unwrap();
+    let mut context = user_context(None);
+    context.tools = vec![tool_spec("read")];
+    let options = AzureOpenAiResponses::lower_simple(
+        SimpleLoweringContext {
+            model: &typed,
+            compat: &compat,
+            effective_base_url: &typed.common.base_url,
+            estimated_input_tokens: 1,
+            available_context_tokens: 1_000,
+        },
+        &SimpleGenerationOptions {
+            tool_choice: Some(ToolChoice::None),
+            ..Default::default()
+        },
+        &Default::default(),
+    )
+    .unwrap();
+    let wire = AzureOpenAiResponses::encode(
+        EncodeContext {
+            model: &typed,
+            context: &context,
+            compat: &compat,
+            effective_base_url: &typed.common.base_url,
+        },
+        &options,
+    )
+    .unwrap();
+    assert_eq!(
+        wire.get("tool_choice"),
+        Some(&OrderedJsonValue::from("none"))
+    );
+    assert!(wire.get("tools").is_some());
 }
 
 /// Architecture v2 part 2 §10.8; pinned Pi basis:
@@ -2032,7 +2191,8 @@ fn assert_captured_responses_case(family: &str, case: &Path) {
     .expect("terminal fixture assistant")
     .clone();
     let persisted = serde_json::to_vec(&assistant).expect("persist fixture assistant");
-    let assistant = serde_json::from_slice(&persisted).expect("restore fixture assistant");
+    let assistant: AssistantMessage =
+        serde_json::from_slice(&persisted).expect("restore fixture assistant");
     context.messages.push(Message::Assistant(assistant));
     let first_index = context.messages.len();
     for (offset, message) in canonical["turnTwoAppend"]
@@ -2109,10 +2269,17 @@ fn captured_responses_model(value: &Value, family: &str) -> ModelDescriptor {
             reasoning: value["reasoning"].as_bool().unwrap_or(false),
             headers: model_headers,
         },
-        api: if family == "openai-codex-responses" {
-            ApiModelConfig::OpenAiCodexResponses(config)
-        } else {
-            ApiModelConfig::OpenAiResponses(config)
+        api: match family {
+            "openai-codex-responses" => ApiModelConfig::OpenAiCodexResponses(config),
+            "azure-openai-responses" => {
+                let azure = AzureOpenAiResponsesModelConfig { responses: config };
+                ApiModelConfig::Custom(CustomApiModelConfig {
+                    api: ApiId::new("azure-openai-responses"),
+                    schema_version: 1,
+                    value: RawValue::from_string(serde_json::to_string(&azure).unwrap()).unwrap(),
+                })
+            }
+            _ => ApiModelConfig::OpenAiResponses(config),
         },
         extensions: Default::default(),
     }
@@ -2407,6 +2574,85 @@ fn encode_captured_responses(
         )
         .expect("encode Codex fixture");
         OrderedJsonWriter::to_vec(&wire.into()).expect("Codex fixture wire")
+    } else if canonical["family"] == "azure-openai-responses" {
+        let typed = typed_azure(model);
+        let config = pi_ai_openai::azure_model_config(&typed.config).expect("Azure fixture config");
+        let compat =
+            AzureOpenAiResponses::resolve_compat(&model.common.base_url, &config.responses.compat)
+                .expect("Azure fixture compat");
+        let values = &canonical["options"];
+        let options = if simple {
+            let simple = captured_simple_options(values);
+            let estimate = estimate_context_tokens(&projected).expect("fixture estimate");
+            AzureOpenAiResponses::lower_simple(
+                SimpleLoweringContext {
+                    model: &typed,
+                    compat: &compat,
+                    effective_base_url: &model.common.base_url,
+                    estimated_input_tokens: estimate.tokens,
+                    available_context_tokens: model
+                        .common
+                        .limits
+                        .context_window
+                        .saturating_sub(estimate.tokens)
+                        .saturating_sub(CONTEXT_SAFETY_TOKENS),
+                },
+                &simple,
+                &pi_ai_openai::AzureOpenAiResponsesSimplePatch {
+                    reasoning_summary: None,
+                    azure_base_url: values
+                        .get("azureBaseUrl")
+                        .and_then(Value::as_str)
+                        .map(|value| Url::parse(value).unwrap()),
+                    azure_resource_name: values
+                        .get("azureResourceName")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    azure_deployment_name: values
+                        .get("azureDeploymentName")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    azure_api_version: values
+                        .get("azureApiVersion")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                },
+            )
+            .expect("lower Azure fixture")
+        } else {
+            AzureOpenAiResponsesOptions {
+                responses: captured_public_full_options(values),
+                azure_base_url: values
+                    .get("azureBaseUrl")
+                    .and_then(Value::as_str)
+                    .map(|value| Url::parse(value).unwrap()),
+                azure_resource_name: values
+                    .get("azureResourceName")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                deployment_name: values
+                    .get("azureDeploymentName")
+                    .and_then(Value::as_str)
+                    .unwrap_or(model.common.model_ref.model.as_str())
+                    .to_owned(),
+                api_version: values
+                    .get("azureApiVersion")
+                    .and_then(Value::as_str)
+                    .unwrap_or("v1")
+                    .to_owned(),
+            }
+        };
+        let wire = AzureOpenAiResponses::encode(
+            EncodeContext {
+                model: &typed,
+                context: &projected,
+                compat: &compat,
+                effective_base_url: &model.common.base_url,
+            },
+            &options,
+        )
+        .expect("encode Azure fixture");
+        OrderedJsonWriter::to_vec(&wire.into()).expect("Azure fixture wire")
     } else {
         let typed = typed_responses(model);
         let compat = OpenAiResponses::resolve_compat(&model.common.base_url, &typed.config.compat)
@@ -2639,6 +2885,17 @@ fn typed_responses(model: &ModelDescriptor) -> TypedModelDescriptor<OpenAiRespon
 
 fn typed_codex(model: &ModelDescriptor) -> TypedModelDescriptor<OpenAiCodexResponses> {
     let ApiModelConfig::OpenAiCodexResponses(config) = &model.api else {
+        unreachable!()
+    };
+    TypedModelDescriptor {
+        common: model.common.clone(),
+        config: config.clone(),
+        extensions: Default::default(),
+    }
+}
+
+fn typed_azure(model: &ModelDescriptor) -> TypedModelDescriptor<AzureOpenAiResponses> {
+    let ApiModelConfig::Custom(config) = &model.api else {
         unreachable!()
     };
     TypedModelDescriptor {

@@ -17,9 +17,10 @@ use pi_ai_openai::{
     OpenAiCodexResponsesTransport, OpenAiCodexRetryClassifier, OpenAiCodexWebSocketConnection,
     OpenAiCodexWebSocketRequest, OpenAiCodexWebSocketResponse, OpenAiCodexWebSocketTransport,
     local_openai_codex_responses_api, local_openai_codex_responses_api_with_websocket,
-    openai_codex_models, openai_codex_responses_api, openai_codex_responses_api_with_websocket,
+    openai_codex_responses_api, openai_codex_responses_api_with_websocket,
     openai_codex_retry_policy,
 };
+use pi_ai_openai_codex::openai_codex_models;
 use std::cell::RefCell;
 use std::collections::{BTreeSet, VecDeque};
 use std::rc::Rc;

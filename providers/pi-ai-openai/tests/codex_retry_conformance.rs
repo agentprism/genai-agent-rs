@@ -10,8 +10,9 @@ use pi_ai::{
 use pi_ai_openai::{
     LocalOpenAiCodexResponsesTransport, LocalOpenAiCodexRetryClassifier,
     OpenAiCodexResponsesHandler, OpenAiCodexResponsesTransport, OpenAiCodexRetryClassifier,
-    openai_codex_models, openai_codex_responses_api, openai_codex_retry_policy,
+    openai_codex_responses_api, openai_codex_retry_policy,
 };
+use pi_ai_openai_codex::openai_codex_models;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};

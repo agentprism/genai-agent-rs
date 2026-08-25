@@ -1,0 +1,1 @@
+{"model":"fixture-mistral-model","stream":true,"messages":[{"role":"user","content":"Read Cargo.toml."}],"tools":[{"type":"function","function":{"name":"read_file","description":"Read one UTF-8 file.","parameters":{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative path."}},"required":["path"],"additionalProperties":false},"strict":false}}]}

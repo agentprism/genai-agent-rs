@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "captureMode": "hermetic-local-server",
+  "credentialsUsed": false,
+  "secretsRedacted": true,
+  "requestTurnOneSha256": "f24edfe684716cb3c468c9d930eeae81fe667933e47ff4b7a624c3bc22dbf9a4",
+  "responseTurnOneSha256": "87709b8755fd817addced321df5f6604670104bfe49909af349b62d29e4c88d5",
+  "requestTurnTwoSha256": "54e17e8a8869b09813967282062586dcf0fb1867f35d4d82f5688d2d7e8815b9"
+}

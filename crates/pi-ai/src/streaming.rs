@@ -16,6 +16,14 @@ use std::{fmt, pin::Pin, task::Context, task::Poll};
 
 const ANTHROPIC_REDACTED_THINKING_KIND: &str = "anthropic.messages.redacted-thinking";
 const BEDROCK_REDACTED_REASONING_KIND: &str = "bedrock.converse.redacted-reasoning";
+/// pi-messages replay artifact carrying a completed text signature.
+pub const PI_MESSAGES_TEXT_SIGNATURE_KIND: &str = "pi.messages.text-signature";
+/// pi-messages replay artifact carrying a completed thinking signature.
+pub const PI_MESSAGES_THINKING_SIGNATURE_KIND: &str = "pi.messages.thinking-signature";
+/// pi-messages marker retaining the server's redacted-thinking flag.
+pub const PI_MESSAGES_REDACTED_THINKING_KIND: &str = "pi.messages.redacted-thinking";
+/// pi-messages marker retaining an explicitly false redacted-thinking field.
+pub const PI_MESSAGES_VISIBLE_THINKING_KIND: &str = "pi.messages.visible-thinking";
 
 /// Parse the useful semantic prefix of streamed tool arguments.
 ///
@@ -429,6 +437,17 @@ pub enum AssistantEvent {
         call_id: ToolCallId,
         /// Tool name when available in this provider event.
         name: Option<String>,
+    },
+
+    /// Replaces tool-call identity and name with a provider-authoritative
+    /// completed value.
+    ToolCallMetadataReplaced {
+        /// Stable canonical block.
+        block_id: ContentBlockId,
+        /// Complete authoritative tool-call identifier.
+        call_id: ToolCallId,
+        /// Complete authoritative tool name.
+        name: String,
     },
 
     /// Appends an exact raw tool-argument JSON fragment.
@@ -999,6 +1018,34 @@ impl AssistantAssembler {
                     }
                 }
             }
+            AssistantEvent::ToolCallMetadataReplaced {
+                block_id,
+                call_id,
+                name,
+            } => {
+                self.require_started()?;
+                match self.block_mut(block_id)? {
+                    BlockBuilder::ToolCall {
+                        call_id: existing_call_id,
+                        name: existing_name,
+                        finished,
+                        ..
+                    } if !*finished => {
+                        *existing_call_id = Some(call_id.clone());
+                        *existing_name = Some(name.clone());
+                    }
+                    block if block.is_finished() => {
+                        return Err(AssemblyError::ContentBlockAlreadyFinished(block_id.clone()));
+                    }
+                    block => {
+                        return Err(AssemblyError::WrongContentBlockKind {
+                            block_id: block_id.clone(),
+                            expected: ContentBlockKind::ToolCall,
+                            actual: block.kind(),
+                        });
+                    }
+                }
+            }
             AssistantEvent::ToolArgumentsDelta { block_id, delta } => {
                 self.require_started()?;
                 match self.block_mut(block_id)? {
@@ -1340,7 +1387,9 @@ impl AssistantAssembler {
                 let redacted = replay_item.is_some_and(|item| {
                     matches!(
                         item.kind.as_str(),
-                        ANTHROPIC_REDACTED_THINKING_KIND | BEDROCK_REDACTED_REASONING_KIND
+                        ANTHROPIC_REDACTED_THINKING_KIND
+                            | BEDROCK_REDACTED_REASONING_KIND
+                            | PI_MESSAGES_REDACTED_THINKING_KIND
                     )
                 });
                 Some(ContentBlock::Thinking {

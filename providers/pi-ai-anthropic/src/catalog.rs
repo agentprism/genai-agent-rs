@@ -3,8 +3,8 @@
 use pi_ai::{
     AnthropicEffort, AnthropicFallbackModel, AnthropicMessagesCompat, AnthropicMessagesModelConfig,
     AnthropicThinkingValue, ApiModelConfig, CacheWriteRetentionPricing, CommonModelDescriptor,
-    LevelSupport, Modality, ModalityCapabilities, ModelDescriptor, ModelId, ModelLimits,
-    ModelPricing, ModelRef, MoneyRate, ProviderId, ThinkingLevelMap, TokenPriceRates,
+    HeaderMapSpec, LevelSupport, Modality, ModalityCapabilities, ModelDescriptor, ModelId,
+    ModelLimits, ModelPricing, ModelRef, MoneyRate, ProviderId, ThinkingLevelMap, TokenPriceRates,
 };
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
@@ -15,7 +15,14 @@ const ANTHROPIC_CATALOG: &str = include_str!("../data/anthropic.json");
 
 /// Parses the pinned generated Anthropic catalog.
 pub fn anthropic_models() -> Result<Vec<ModelDescriptor>, AnthropicCatalogError> {
-    let root: Value = serde_json::from_str(ANTHROPIC_CATALOG)
+    parse_anthropic_published_catalog(ANTHROPIC_CATALOG)
+}
+
+/// Parses the Anthropic Messages family from Pi's generated provider data.
+pub fn parse_anthropic_published_catalog(
+    source: &str,
+) -> Result<Vec<ModelDescriptor>, AnthropicCatalogError> {
+    let root: Value = serde_json::from_str(source)
         .map_err(|error| AnthropicCatalogError::new(format!("invalid catalog JSON: {error}")))?;
     let families = object(&root, "catalog root")?;
     let models = families
@@ -75,7 +82,7 @@ fn parse_model(value: &Value) -> Result<ModelDescriptor, AnthropicCatalogError> 
             },
             pricing,
             reasoning: boolean(model, "reasoning")?,
-            headers: Default::default(),
+            headers: parse_headers(model.get("headers"), id)?,
         },
         api: ApiModelConfig::AnthropicMessages(AnthropicMessagesModelConfig {
             compat: compatibility,
@@ -83,6 +90,26 @@ fn parse_model(value: &Value) -> Result<ModelDescriptor, AnthropicCatalogError> 
         }),
         extensions: Default::default(),
     })
+}
+
+fn parse_headers(
+    value: Option<&Value>,
+    model_id: &str,
+) -> Result<HeaderMapSpec, AnthropicCatalogError> {
+    let Some(value) = value else {
+        return Ok(HeaderMapSpec::new());
+    };
+    object(value, "model headers")?
+        .iter()
+        .map(|(name, value)| {
+            let value = value.as_str().ok_or_else(|| {
+                AnthropicCatalogError::new(format!(
+                    "model {model_id} header {name} is not a string"
+                ))
+            })?;
+            Ok((name.clone(), Some(value.to_owned())))
+        })
+        .collect()
 }
 
 fn parse_pricing(cost: &Map<String, Value>) -> Result<ModelPricing, AnthropicCatalogError> {

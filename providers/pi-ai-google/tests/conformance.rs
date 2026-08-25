@@ -19,8 +19,10 @@ use pi_ai::{
 };
 use pi_ai_google::{
     GoogleDecodeContext, decode_google_sse, google_models, google_provider, google_user_agent,
-    google_vertex_models, google_vertex_provider, local_google_provider,
-    local_google_vertex_provider,
+    local_google_provider,
+};
+use pi_ai_google_vertex::{
+    google_vertex_models, google_vertex_provider, local_google_vertex_provider,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -1056,7 +1058,7 @@ fn google_vertex_api_key_resolution_send_and_local() {
         CancellationToken, LocalAuthResolver, LocalModels, LocalResolveAuthRequest, MapAuthContext,
         ProviderDescriptor, ResolveAuthRequest, SecretString,
     };
-    use pi_ai_google::{
+    use pi_ai_google_vertex::{
         GCP_VERTEX_CREDENTIALS_MARKER, google_vertex_auth_resolver,
         local_google_vertex_auth_resolver,
     };
@@ -1114,7 +1116,7 @@ fn google_vertex_api_key_resolution_send_and_local() {
         "quota_project_id":"fixture-quota-project"
     }"#;
     let adc_context = MapAuthContext::new(adc, Vec::<String>::new()).with_file(
-        pi_ai_google::VERTEX_ADC_PATH,
+        pi_ai_google_vertex::VERTEX_ADC_PATH,
         SecretString::new(adc_document),
     );
     let mut request = ResolveAuthRequest::isolated(ProviderDescriptor::new("google-vertex"), None);
@@ -1152,7 +1154,7 @@ fn google_vertex_api_key_resolution_send_and_local() {
         Vec::<String>::new(),
     )
     .with_file(
-        pi_ai_google::VERTEX_ADC_PATH,
+        pi_ai_google_vertex::VERTEX_ADC_PATH,
         SecretString::new(adc_document),
     );
     let mut request = ResolveAuthRequest::isolated(ProviderDescriptor::new("google-vertex"), None);
@@ -1360,6 +1362,71 @@ fn google_vertex_api_key_resolution_send_and_local() {
     );
 }
 
+/// Architecture v2 part 2 §5.3, §6, §9.2, and §10.7; pinned Pi basis:
+/// `providers/google-vertex.ts:55-94` checks only API-key or ADC
+/// file/project/location configuration.
+#[test]
+fn google_vertex_check_auth_is_configuration_only_send_and_local() {
+    use pi_ai::{
+        AuthCheck, AuthSource, CancellationToken, CredentialType, LocalModels, MapAuthContext,
+        Models,
+    };
+    use std::collections::BTreeMap;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    let context = MapAuthContext::new(
+        BTreeMap::from([
+            (
+                "GOOGLE_CLOUD_PROJECT".to_owned(),
+                "configured-project".to_owned(),
+            ),
+            ("GOOGLE_CLOUD_LOCATION".to_owned(), "us-central1".to_owned()),
+        ]),
+        [pi_ai_google_vertex::VERTEX_ADC_PATH.to_owned()],
+    );
+    let models = Models::builder()
+        .auth_context(Arc::new(context.clone()))
+        .provider(
+            google_vertex_provider(Arc::new(NeverTransport)).expect("Send Vertex registration"),
+        )
+        .build()
+        .expect("Send Vertex Models");
+    let check = futures_executor::block_on(
+        models.check_auth(ProviderId::new("google-vertex"), CancellationToken::new()),
+    )
+    .expect("Send Vertex auth check")
+    .expect("Send ADC configuration");
+    assert_eq!(
+        check,
+        AuthCheck {
+            source: Some(AuthSource::new("gcloud application default credentials")),
+            credential_type: CredentialType::ApiKey,
+        }
+    );
+
+    let models = LocalModels::builder()
+        .auth_context(Rc::new(context))
+        .provider(
+            local_google_vertex_provider(Rc::new(NeverTransport))
+                .expect("Local Vertex registration"),
+        )
+        .build()
+        .expect("Local Vertex Models");
+    let check = futures_executor::block_on(
+        models.check_auth(ProviderId::new("google-vertex"), CancellationToken::new()),
+    )
+    .expect("Local Vertex auth check")
+    .expect("Local ADC configuration");
+    assert_eq!(
+        check,
+        AuthCheck {
+            source: Some(AuthSource::new("gcloud application default credentials")),
+            credential_type: CredentialType::ApiKey,
+        }
+    );
+}
+
 /// Architecture v2 part 2 §6 and §9.2; pinned Pi basis:
 /// `providers/google-vertex.ts:74-88`.
 #[test]
@@ -1368,7 +1435,7 @@ fn google_vertex_adc_missing_scope_skips_token_exchange_send_and_local() {
         AuthResolver, CancellationToken, LocalAuthResolver, LocalResolveAuthRequest,
         MapAuthContext, ProviderDescriptor, ResolveAuthRequest, SecretString,
     };
-    use pi_ai_google::{google_vertex_auth_resolver, local_google_vertex_auth_resolver};
+    use pi_ai_google_vertex::{google_vertex_auth_resolver, local_google_vertex_auth_resolver};
     use std::collections::BTreeMap;
     use std::rc::Rc;
     use std::sync::Arc;
@@ -1391,7 +1458,7 @@ fn google_vertex_adc_missing_scope_skips_token_exchange_send_and_local() {
         ),
     ] {
         let context = MapAuthContext::new(environment, Vec::<String>::new()).with_file(
-            pi_ai_google::VERTEX_ADC_PATH,
+            pi_ai_google_vertex::VERTEX_ADC_PATH,
             SecretString::new(adc_document),
         );
 
@@ -1440,7 +1507,7 @@ fn google_vertex_adc_invalid_type_with_access_token_is_rejected_send_and_local()
         AuthResolver, CancellationToken, LocalAuthResolver, LocalResolveAuthRequest,
         MapAuthContext, ProviderDescriptor, ResolveAuthRequest, SecretString,
     };
-    use pi_ai_google::{google_vertex_auth_resolver, local_google_vertex_auth_resolver};
+    use pi_ai_google_vertex::{google_vertex_auth_resolver, local_google_vertex_auth_resolver};
     use std::collections::BTreeMap;
     use std::rc::Rc;
     use std::sync::Arc;
@@ -1453,7 +1520,7 @@ fn google_vertex_adc_invalid_type_with_access_token_is_rejected_send_and_local()
         Vec::<String>::new(),
     )
     .with_file(
-        pi_ai_google::VERTEX_ADC_PATH,
+        pi_ai_google_vertex::VERTEX_ADC_PATH,
         SecretString::new(r#"{"type":"not_google_adc","access_token":"must-not-be-trusted"}"#),
     );
 
@@ -1494,7 +1561,7 @@ fn google_vertex_authorized_user_ignores_token_uri_send_and_local() {
         AuthResolver, CancellationToken, LocalAuthResolver, LocalResolveAuthRequest,
         MapAuthContext, ProviderDescriptor, ResolveAuthRequest, SecretString,
     };
-    use pi_ai_google::{google_vertex_auth_resolver, local_google_vertex_auth_resolver};
+    use pi_ai_google_vertex::{google_vertex_auth_resolver, local_google_vertex_auth_resolver};
     use std::collections::BTreeMap;
     use std::rc::Rc;
     use std::sync::Arc;
@@ -1507,7 +1574,7 @@ fn google_vertex_authorized_user_ignores_token_uri_send_and_local() {
         Vec::<String>::new(),
     )
     .with_file(
-        pi_ai_google::VERTEX_ADC_PATH,
+        pi_ai_google_vertex::VERTEX_ADC_PATH,
         SecretString::new(
             r#"{
                 "type":"authorized_user",
@@ -1563,7 +1630,7 @@ fn google_vertex_authorized_user_quota_project_header_send_and_local() {
         AuthResolver, CancellationToken, LocalAuthResolver, LocalResolveAuthRequest,
         MapAuthContext, ProviderDescriptor, ResolveAuthRequest, SecretString,
     };
-    use pi_ai_google::{google_vertex_auth_resolver, local_google_vertex_auth_resolver};
+    use pi_ai_google_vertex::{google_vertex_auth_resolver, local_google_vertex_auth_resolver};
     use std::collections::BTreeMap;
     use std::rc::Rc;
     use std::sync::Arc;
@@ -1576,7 +1643,7 @@ fn google_vertex_authorized_user_quota_project_header_send_and_local() {
         Vec::<String>::new(),
     )
     .with_file(
-        pi_ai_google::VERTEX_ADC_PATH,
+        pi_ai_google_vertex::VERTEX_ADC_PATH,
         SecretString::new(
             r#"{
                 "type":"authorized_user",
@@ -1629,7 +1696,7 @@ fn google_vertex_non_user_adc_delegates_to_host_adapter_send_and_local() {
         AuthResolver, CancellationToken, LocalAuthResolver, LocalResolveAuthRequest,
         MapAuthContext, ProviderDescriptor, ResolveAuthRequest, SecretString,
     };
-    use pi_ai_google::{
+    use pi_ai_google_vertex::{
         VertexAdcCredentialType, google_vertex_auth_resolver_with_adc_adapter,
         local_google_vertex_auth_resolver_with_adc_adapter,
     };
@@ -1694,7 +1761,7 @@ fn google_vertex_non_user_adc_delegates_to_host_adapter_send_and_local() {
     );
     assert_eq!(
         requests[0].scopes,
-        [pi_ai_google::VERTEX_CLOUD_PLATFORM_SCOPE]
+        [pi_ai_google_vertex::VERTEX_CLOUD_PLATFORM_SCOPE]
     );
     assert_eq!(
         requests[0].credential_json.expose_secret(),
@@ -1752,7 +1819,7 @@ fn google_vertex_service_account_resolution_send_and_local() {
         AuthResolver, CancellationToken, LocalAuthResolver, LocalResolveAuthRequest,
         MapAuthContext, ProviderDescriptor, ResolveAuthRequest, SecretString,
     };
-    use pi_ai_google::{google_vertex_auth_resolver, local_google_vertex_auth_resolver};
+    use pi_ai_google_vertex::{google_vertex_auth_resolver, local_google_vertex_auth_resolver};
     use std::collections::BTreeMap;
     use std::rc::Rc;
     use std::sync::Arc;
@@ -1870,7 +1937,7 @@ fn google_vertex_service_account_quota_project_override_send_and_local() {
         AuthResolver, CancellationToken, LocalAuthResolver, LocalResolveAuthRequest,
         MapAuthContext, ProviderDescriptor, ResolveAuthRequest, SecretString,
     };
-    use pi_ai_google::{google_vertex_auth_resolver, local_google_vertex_auth_resolver};
+    use pi_ai_google_vertex::{google_vertex_auth_resolver, local_google_vertex_auth_resolver};
     use std::collections::BTreeMap;
     use std::rc::Rc;
     use std::sync::Arc;
@@ -2673,6 +2740,16 @@ impl pi_ai::HttpTransport for NeverTransport {
     }
 }
 
+impl pi_ai::LocalHttpTransport for NeverTransport {
+    fn execute(
+        &self,
+        _request: pi_ai::HttpRequest,
+        _cancellation: pi_ai::CancellationToken,
+    ) -> pi_ai::LocalBoxFuture<'_, Result<pi_ai::LocalHttpResponse, pi_ai::TransportError>> {
+        Box::pin(async { Err(pi_ai::TransportError::new("unexpected", "not executed")) })
+    }
+}
+
 #[derive(Debug, Default)]
 struct AdcTransport {
     requests: std::sync::Mutex<Vec<pi_ai::HttpRequest>>,
@@ -2740,11 +2817,11 @@ impl pi_ai::LocalHttpTransport for AdcTransport {
 
 #[derive(Debug, Default)]
 struct RecordingVertexAdcAdapter {
-    requests: std::sync::Mutex<Vec<pi_ai_google::VertexAdcTokenRequest>>,
+    requests: std::sync::Mutex<Vec<pi_ai_google_vertex::VertexAdcTokenRequest>>,
 }
 
 impl RecordingVertexAdcAdapter {
-    fn requests(&self) -> Vec<pi_ai_google::VertexAdcTokenRequest> {
+    fn requests(&self) -> Vec<pi_ai_google_vertex::VertexAdcTokenRequest> {
         self.requests
             .lock()
             .expect("Vertex ADC adapter request lock")
@@ -2752,10 +2829,10 @@ impl RecordingVertexAdcAdapter {
     }
 }
 
-impl pi_ai_google::VertexAdcCredentialAdapter for RecordingVertexAdcAdapter {
+impl pi_ai_google_vertex::VertexAdcCredentialAdapter for RecordingVertexAdcAdapter {
     fn resolve_access_token(
         &self,
-        request: pi_ai_google::VertexAdcTokenRequest,
+        request: pi_ai_google_vertex::VertexAdcTokenRequest,
         cancellation: pi_ai::CancellationToken,
     ) -> pi_ai::SendBoxFuture<'_, Result<pi_ai::SecretString, pi_ai::AuthError>> {
         Box::pin(async move {
@@ -2771,10 +2848,10 @@ impl pi_ai_google::VertexAdcCredentialAdapter for RecordingVertexAdcAdapter {
     }
 }
 
-impl pi_ai_google::LocalVertexAdcCredentialAdapter for RecordingVertexAdcAdapter {
+impl pi_ai_google_vertex::LocalVertexAdcCredentialAdapter for RecordingVertexAdcAdapter {
     fn resolve_access_token(
         &self,
-        request: pi_ai_google::VertexAdcTokenRequest,
+        request: pi_ai_google_vertex::VertexAdcTokenRequest,
         cancellation: pi_ai::CancellationToken,
     ) -> pi_ai::LocalBoxFuture<'_, Result<pi_ai::SecretString, pi_ai::AuthError>> {
         Box::pin(async move {
@@ -3967,7 +4044,7 @@ fn google_vertex_full_options_project_location_precedence_pi_exact_send_and_loca
     let auth_context =
         pi_ai::MapAuthContext::new(std::collections::BTreeMap::new(), Vec::<String>::new())
             .with_file(
-                pi_ai_google::VERTEX_ADC_PATH,
+                pi_ai_google_vertex::VERTEX_ADC_PATH,
                 pi_ai::SecretString::new(adc_document),
             );
 

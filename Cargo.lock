@@ -1160,6 +1160,7 @@ dependencies = [
  "http",
  "httpdate",
  "indexmap",
+ "regex",
  "ryu-js",
  "serde",
  "serde_json",
@@ -1168,6 +1169,15 @@ dependencies = [
  "tempfile",
  "url",
  "wasm-bindgen-test",
+]
+
+[[package]]
+name = "pi-ai-ant-ling"
+version = "0.1.0"
+dependencies = [
+ "pi-ai",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
 ]
 
 [[package]]
@@ -1186,6 +1196,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-ai-azure-openai-responses"
+version = "0.1.0"
+dependencies = [
+ "futures-executor",
+ "http",
+ "pi-ai",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "pi-ai-baseten"
+version = "0.1.0"
+dependencies = [
+ "pi-ai",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+]
+
+[[package]]
 name = "pi-ai-bedrock"
 version = "0.1.0"
 dependencies = [
@@ -1200,6 +1232,77 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-ai-cerebras"
+version = "0.1.0"
+dependencies = [
+ "pi-ai",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+]
+
+[[package]]
+name = "pi-ai-cloudflare-ai-gateway"
+version = "0.1.0"
+dependencies = [
+ "futures-executor",
+ "http",
+ "pi-ai",
+ "pi-ai-anthropic",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "pi-ai-cloudflare-workers-ai"
+version = "0.1.0"
+dependencies = [
+ "futures-executor",
+ "http",
+ "pi-ai",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+ "url",
+]
+
+[[package]]
+name = "pi-ai-deepseek"
+version = "0.1.0"
+dependencies = [
+ "pi-ai",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+]
+
+[[package]]
+name = "pi-ai-fireworks"
+version = "0.1.0"
+dependencies = [
+ "pi-ai",
+ "pi-ai-anthropic",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+]
+
+[[package]]
+name = "pi-ai-github-copilot"
+version = "0.1.0"
+dependencies = [
+ "futures-executor",
+ "futures-timer",
+ "futures-util",
+ "http",
+ "httpdate",
+ "pi-ai",
+ "pi-ai-anthropic",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "pi-ai-google"
 version = "0.1.0"
 dependencies = [
@@ -1208,13 +1311,119 @@ dependencies = [
  "futures-util",
  "http",
  "pi-ai",
- "rsa",
+ "pi-ai-google-vertex",
  "rustix",
+ "serde",
+ "serde_json",
+ "url",
+ "windows-sys",
+]
+
+[[package]]
+name = "pi-ai-google-vertex"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "futures-util",
+ "http",
+ "pi-ai",
+ "pi-ai-google",
+ "pi-ai-provider-common",
+ "rsa",
  "serde",
  "serde_json",
  "sha2",
  "url",
- "windows-sys",
+]
+
+[[package]]
+name = "pi-ai-groq"
+version = "0.1.0"
+dependencies = [
+ "pi-ai",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+]
+
+[[package]]
+name = "pi-ai-huggingface"
+version = "0.1.0"
+dependencies = [
+ "pi-ai",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+]
+
+[[package]]
+name = "pi-ai-kimi-coding"
+version = "0.1.0"
+dependencies = [
+ "futures-executor",
+ "futures-util",
+ "http",
+ "pi-ai",
+ "pi-ai-anthropic",
+ "pi-ai-provider-common",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "pi-ai-minimax"
+version = "0.1.0"
+dependencies = [
+ "pi-ai",
+ "pi-ai-anthropic",
+ "pi-ai-provider-common",
+]
+
+[[package]]
+name = "pi-ai-minimax-cn"
+version = "0.1.0"
+dependencies = [
+ "pi-ai",
+ "pi-ai-anthropic",
+ "pi-ai-provider-common",
+]
+
+[[package]]
+name = "pi-ai-mistral"
+version = "0.1.0"
+dependencies = [
+ "futures-executor",
+ "futures-timer",
+ "futures-util",
+ "http",
+ "pi-ai",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "pi-ai-moonshotai"
+version = "0.1.0"
+dependencies = [
+ "pi-ai",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+]
+
+[[package]]
+name = "pi-ai-moonshotai-cn"
+version = "0.1.0"
+dependencies = [
+ "pi-ai",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+]
+
+[[package]]
+name = "pi-ai-nvidia"
+version = "0.1.0"
+dependencies = [
+ "pi-ai",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
 ]
 
 [[package]]
@@ -1227,10 +1436,265 @@ dependencies = [
  "futures-util",
  "http",
  "pi-ai",
+ "pi-ai-deepseek",
+ "pi-ai-openai-codex",
+ "pi-ai-openrouter",
  "serde",
  "serde_json",
  "url",
  "zstd",
+]
+
+[[package]]
+name = "pi-ai-openai-codex"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "futures-util",
+ "http",
+ "pi-ai",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "pi-ai-opencode"
+version = "0.1.0"
+dependencies = [
+ "pi-ai",
+ "pi-ai-anthropic",
+ "pi-ai-google",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+]
+
+[[package]]
+name = "pi-ai-opencode-go"
+version = "0.1.0"
+dependencies = [
+ "pi-ai",
+ "pi-ai-anthropic",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+]
+
+[[package]]
+name = "pi-ai-openrouter"
+version = "0.1.0"
+dependencies = [
+ "futures-timer",
+ "futures-util",
+ "http",
+ "pi-ai",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "pi-ai-pi-messages"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "futures-executor",
+ "futures-util",
+ "http",
+ "pi-ai",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "pi-ai-provider-common"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "http",
+ "pi-ai",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "pi-ai-providers-all"
+version = "0.1.0"
+dependencies = [
+ "futures-executor",
+ "pi-ai",
+ "pi-ai-ant-ling",
+ "pi-ai-anthropic",
+ "pi-ai-azure-openai-responses",
+ "pi-ai-baseten",
+ "pi-ai-bedrock",
+ "pi-ai-cerebras",
+ "pi-ai-cloudflare-ai-gateway",
+ "pi-ai-cloudflare-workers-ai",
+ "pi-ai-deepseek",
+ "pi-ai-fireworks",
+ "pi-ai-github-copilot",
+ "pi-ai-google",
+ "pi-ai-google-vertex",
+ "pi-ai-groq",
+ "pi-ai-huggingface",
+ "pi-ai-kimi-coding",
+ "pi-ai-minimax",
+ "pi-ai-minimax-cn",
+ "pi-ai-mistral",
+ "pi-ai-moonshotai",
+ "pi-ai-moonshotai-cn",
+ "pi-ai-nvidia",
+ "pi-ai-openai",
+ "pi-ai-openai-codex",
+ "pi-ai-opencode",
+ "pi-ai-opencode-go",
+ "pi-ai-openrouter",
+ "pi-ai-provider-common",
+ "pi-ai-qwen-token-plan",
+ "pi-ai-qwen-token-plan-cn",
+ "pi-ai-qwen-token-plan-individual",
+ "pi-ai-radius",
+ "pi-ai-together",
+ "pi-ai-vercel-ai-gateway",
+ "pi-ai-xai",
+ "pi-ai-xiaomi",
+ "pi-ai-xiaomi-token-plan-ams",
+ "pi-ai-xiaomi-token-plan-cn",
+ "pi-ai-xiaomi-token-plan-sgp",
+ "pi-ai-zai",
+ "pi-ai-zai-coding-cn",
+ "serde_json",
+]
+
+[[package]]
+name = "pi-ai-qwen-token-plan"
+version = "0.1.0"
+dependencies = [
+ "pi-ai",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+]
+
+[[package]]
+name = "pi-ai-qwen-token-plan-cn"
+version = "0.1.0"
+dependencies = [
+ "pi-ai",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+]
+
+[[package]]
+name = "pi-ai-qwen-token-plan-individual"
+version = "0.1.0"
+dependencies = [
+ "pi-ai",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+]
+
+[[package]]
+name = "pi-ai-radius"
+version = "0.1.0"
+dependencies = [
+ "futures-executor",
+ "futures-util",
+ "http",
+ "pi-ai",
+ "pi-ai-pi-messages",
+ "pi-ai-provider-common",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "pi-ai-together"
+version = "0.1.0"
+dependencies = [
+ "pi-ai",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+]
+
+[[package]]
+name = "pi-ai-vercel-ai-gateway"
+version = "0.1.0"
+dependencies = [
+ "pi-ai",
+ "pi-ai-anthropic",
+ "pi-ai-provider-common",
+]
+
+[[package]]
+name = "pi-ai-xai"
+version = "0.1.0"
+dependencies = [
+ "futures-executor",
+ "futures-util",
+ "http",
+ "pi-ai",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "pi-ai-xiaomi"
+version = "0.1.0"
+dependencies = [
+ "pi-ai",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+]
+
+[[package]]
+name = "pi-ai-xiaomi-token-plan-ams"
+version = "0.1.0"
+dependencies = [
+ "pi-ai",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+]
+
+[[package]]
+name = "pi-ai-xiaomi-token-plan-cn"
+version = "0.1.0"
+dependencies = [
+ "pi-ai",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+]
+
+[[package]]
+name = "pi-ai-xiaomi-token-plan-sgp"
+version = "0.1.0"
+dependencies = [
+ "pi-ai",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+]
+
+[[package]]
+name = "pi-ai-zai"
+version = "0.1.0"
+dependencies = [
+ "pi-ai",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
+]
+
+[[package]]
+name = "pi-ai-zai-coding-cn"
+version = "0.1.0"
+dependencies = [
+ "pi-ai",
+ "pi-ai-openai",
+ "pi-ai-provider-common",
 ]
 
 [[package]]

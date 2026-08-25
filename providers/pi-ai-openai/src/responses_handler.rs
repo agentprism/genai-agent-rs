@@ -5,21 +5,25 @@
     reason = "ErasedApiHandler requires the architecture-specified AiError by value"
 )]
 
-use crate::{OpenAiResponsesDecodeContext, OpenAiResponsesSseDecoder};
+use crate::{
+    AzureOpenAiResponses, AzureOpenAiResponsesOptions, AzureOpenAiResponsesSimplePatch,
+    OpenAiResponsesDecodeContext, OpenAiResponsesSseDecoder, azure_model_config,
+};
 use futures_util::{FutureExt, StreamExt, future, stream};
 use http::{HeaderMap, HeaderValue, Method, header};
 use pi_ai::{
     ASSISTANT_MESSAGE_DIAGNOSTIC_SCHEMA_VERSION, AiError, AiErrorKind, ApiCallOptions,
     ApiExecutionContext, ApiFamily, ApiId, ApiModelConfig, ApiRequestOptions,
-    AssistantMessageDiagnostic, AssistantStream, CONTEXT_SAFETY_TOKENS, CancellationToken, ChatApi,
-    Context, DiagnosticErrorCode, DiagnosticErrorInfo, EncodeContext, ErasedApiFullOptions,
-    ErasedApiHandler, ErasedApiOptionsPatch, HttpBody, HttpChatApi, HttpRequest, HttpResponse,
-    HttpTransport, LocalApiExecutionContext, LocalAssistantStream, LocalBoxFuture, LocalChatApi,
-    LocalErasedApiHandler, LocalHttpBody, LocalHttpChatApi, LocalHttpResponse, LocalHttpTransport,
-    LocalProviderResponseStream, MessageId, MiddlewareError, ModelDescriptor, OpenAiCodexResponses,
-    OpenAiCodexResponsesOptions, OpenAiCodexResponsesSimplePatch, OpenAiResponses,
-    OpenAiResponsesHandoff, OpenAiResponsesOptions, OpenAiResponsesSimplePatch, OrderedJsonObject,
-    OrderedJsonValue, OrderedJsonWriter, ProviderPayload, ProviderResponseStream, SendBoxFuture,
+    AssistantMessageDiagnostic, AssistantStream, AuthResolutionOverrides, CONTEXT_SAFETY_TOKENS,
+    CancellationToken, ChatApi, Context, DiagnosticErrorCode, DiagnosticErrorInfo, EncodeContext,
+    ErasedApiFullOptions, ErasedApiHandler, ErasedApiOptionsPatch, HttpBody, HttpChatApi,
+    HttpRequest, HttpResponse, HttpTransport, LocalApiExecutionContext, LocalAssistantStream,
+    LocalBoxFuture, LocalChatApi, LocalErasedApiHandler, LocalHttpBody, LocalHttpChatApi,
+    LocalHttpResponse, LocalHttpTransport, LocalProviderResponseStream, MessageId, MiddlewareError,
+    ModelDescriptor, OpenAiCodexResponses, OpenAiCodexResponsesOptions,
+    OpenAiCodexResponsesSimplePatch, OpenAiResponses, OpenAiResponsesHandoff,
+    OpenAiResponsesOptions, OpenAiResponsesSimplePatch, OrderedJsonObject, OrderedJsonValue,
+    OrderedJsonWriter, ProviderPayload, ProviderResponseStream, SendBoxFuture,
     SimpleGenerationOptions, SimpleLoweringContext, StreamTransport, Timestamp,
     TypedModelDescriptor, apply_openai_codex_responses_full_headers,
     apply_openai_responses_full_headers, estimate_context_tokens,
@@ -40,6 +44,10 @@ static NEXT_RESPONSES_MESSAGE_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_CODEX_WEBSOCKET_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 const PI_AI_RUST_USER_AGENT: &str = concat!("pi-ai-rs/", env!("CARGO_PKG_VERSION"));
 const CODEX_WEBSOCKET_BETA: &str = "responses_websockets=2026-02-06";
+/// Private auth-to-API carrier for `AZURE_OPENAI_API_VERSION`.
+pub const AZURE_API_VERSION_AUTH_HEADER: &str = "x-pi-azure-api-version-environment";
+/// Private auth-to-API carrier for `AZURE_OPENAI_DEPLOYMENT_NAME_MAP`.
+pub const AZURE_DEPLOYMENT_MAP_AUTH_HEADER: &str = "x-pi-azure-deployment-map-environment";
 const CODEX_WEBSOCKET_CONNECTION_LIMIT: &str = "websocket_connection_limit_reached";
 const CODEX_PREVIOUS_RESPONSE_NOT_FOUND: &str = "previous_response_not_found";
 
@@ -47,6 +55,20 @@ const CODEX_PREVIOUS_RESPONSE_NOT_FOUND: &str = "previous_response_not_found";
 #[derive(Clone, Debug)]
 pub struct OpenAiResponsesHandler {
     api: ApiId,
+}
+
+/// Erased handler for Azure OpenAI Responses.
+#[derive(Clone, Debug)]
+pub struct AzureOpenAiResponsesHandler {
+    api: ApiId,
+}
+
+impl Default for AzureOpenAiResponsesHandler {
+    fn default() -> Self {
+        Self {
+            api: ApiId::new(AzureOpenAiResponses::API_ID),
+        }
+    }
 }
 
 impl Default for OpenAiResponsesHandler {
@@ -72,7 +94,7 @@ impl Default for OpenAiCodexResponsesHandler {
 }
 
 macro_rules! impl_send_handler {
-    ($handler:ty, $lower:ident, $full:ident, $headers:ident) => {
+    ($handler:ty, $lower:ident, $full:ident, $headers:ident, $auth:ident) => {
         impl ErasedApiHandler for $handler {
             fn api_id(&self) -> &ApiId {
                 &self.api
@@ -86,7 +108,14 @@ macro_rules! impl_send_handler {
                 patch: Option<&ErasedApiOptionsPatch>,
                 execution: &ApiExecutionContext<'_>,
             ) -> Result<ProviderPayload, AiError> {
-                $lower(model, context, simple, patch, execution.endpoint)
+                $lower(
+                    model,
+                    context,
+                    simple,
+                    patch,
+                    execution.endpoint,
+                    execution.auth_headers,
+                )
             }
 
             fn encode_full(
@@ -96,7 +125,22 @@ macro_rules! impl_send_handler {
                 options: &ErasedApiFullOptions,
                 execution: &ApiExecutionContext<'_>,
             ) -> Result<ProviderPayload, AiError> {
-                $full(model, context, options, execution.endpoint)
+                $full(
+                    model,
+                    context,
+                    options,
+                    execution.endpoint,
+                    execution.auth_headers,
+                )
+            }
+
+            fn apply_full_options_auth_overrides(
+                &self,
+                model: &ModelDescriptor,
+                options: &ErasedApiFullOptions,
+                overrides: &mut AuthResolutionOverrides,
+            ) -> Result<(), AiError> {
+                $auth(model, options, overrides)
             }
 
             fn apply_full_options_headers(
@@ -151,7 +195,7 @@ macro_rules! impl_send_handler {
 }
 
 macro_rules! impl_local_handler {
-    ($handler:ty, $lower:ident, $full:ident, $headers:ident) => {
+    ($handler:ty, $lower:ident, $full:ident, $headers:ident, $auth:ident) => {
         impl LocalErasedApiHandler for $handler {
             fn api_id(&self) -> &ApiId {
                 &self.api
@@ -165,7 +209,14 @@ macro_rules! impl_local_handler {
                 patch: Option<&ErasedApiOptionsPatch>,
                 execution: &LocalApiExecutionContext<'_>,
             ) -> Result<ProviderPayload, AiError> {
-                $lower(model, context, simple, patch, execution.endpoint)
+                $lower(
+                    model,
+                    context,
+                    simple,
+                    patch,
+                    execution.endpoint,
+                    execution.auth_headers,
+                )
             }
 
             fn encode_full(
@@ -175,7 +226,22 @@ macro_rules! impl_local_handler {
                 options: &ErasedApiFullOptions,
                 execution: &LocalApiExecutionContext<'_>,
             ) -> Result<ProviderPayload, AiError> {
-                $full(model, context, options, execution.endpoint)
+                $full(
+                    model,
+                    context,
+                    options,
+                    execution.endpoint,
+                    execution.auth_headers,
+                )
+            }
+
+            fn apply_full_options_auth_overrides(
+                &self,
+                model: &ModelDescriptor,
+                options: &ErasedApiFullOptions,
+                overrides: &mut AuthResolutionOverrides,
+            ) -> Result<(), AiError> {
+                $auth(model, options, overrides)
             }
 
             fn apply_full_options_headers(
@@ -233,26 +299,83 @@ impl_send_handler!(
     OpenAiResponsesHandler,
     lower_openai_responses,
     encode_openai_responses_full,
-    apply_openai_responses_full_option_headers
+    apply_openai_responses_full_option_headers,
+    no_full_option_auth_overrides
 );
 impl_local_handler!(
     OpenAiResponsesHandler,
     lower_openai_responses,
     encode_openai_responses_full,
-    apply_openai_responses_full_option_headers
+    apply_openai_responses_full_option_headers,
+    no_full_option_auth_overrides
+);
+impl_send_handler!(
+    AzureOpenAiResponsesHandler,
+    lower_azure_openai_responses,
+    encode_azure_openai_responses_full,
+    apply_azure_openai_responses_full_option_headers,
+    apply_azure_full_option_auth_overrides
+);
+impl_local_handler!(
+    AzureOpenAiResponsesHandler,
+    lower_azure_openai_responses,
+    encode_azure_openai_responses_full,
+    apply_azure_openai_responses_full_option_headers,
+    apply_azure_full_option_auth_overrides
 );
 impl_send_handler!(
     OpenAiCodexResponsesHandler,
     lower_openai_codex_responses,
     encode_openai_codex_responses_full,
-    apply_openai_codex_responses_full_option_headers
+    apply_openai_codex_responses_full_option_headers,
+    no_full_option_auth_overrides
 );
 impl_local_handler!(
     OpenAiCodexResponsesHandler,
     lower_openai_codex_responses,
     encode_openai_codex_responses_full,
-    apply_openai_codex_responses_full_option_headers
+    apply_openai_codex_responses_full_option_headers,
+    no_full_option_auth_overrides
 );
+
+fn no_full_option_auth_overrides(
+    _model: &ModelDescriptor,
+    _options: &ErasedApiFullOptions,
+    _overrides: &mut AuthResolutionOverrides,
+) -> Result<(), AiError> {
+    Ok(())
+}
+
+fn private_auth_header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(name)
+        .and_then(|value| std::str::from_utf8(value.as_bytes()).ok())
+}
+
+fn apply_azure_full_option_auth_overrides(
+    model: &ModelDescriptor,
+    options: &ErasedApiFullOptions,
+    overrides: &mut AuthResolutionOverrides,
+) -> Result<(), AiError> {
+    let options: &AzureOpenAiResponsesOptions = options
+        .downcast_ref::<AzureOpenAiResponses>()
+        .ok_or_else(|| invalid_request(model, "invalid Azure Responses full options type"))?;
+    if let Some(base_url) = &options.azure_base_url {
+        overrides
+            .environment
+            .insert("AZURE_OPENAI_BASE_URL".into(), base_url.to_string());
+    }
+    if let Some(resource_name) = options
+        .azure_resource_name
+        .as_ref()
+        .filter(|resource_name| !resource_name.is_empty())
+    {
+        overrides
+            .environment
+            .insert("AZURE_OPENAI_RESOURCE_NAME".into(), resource_name.clone());
+    }
+    Ok(())
+}
 
 struct SendResponsesDecodeState {
     body: HttpBody,
@@ -395,6 +518,7 @@ fn lower_openai_responses(
     simple: &SimpleGenerationOptions,
     patch: Option<&ErasedApiOptionsPatch>,
     endpoint: &Url,
+    _auth_headers: &HeaderMap,
 ) -> Result<ProviderPayload, AiError> {
     let ApiModelConfig::OpenAiResponses(config) = &model.api else {
         return Err(wrong_family(model, OpenAiResponses::API_ID));
@@ -436,12 +560,84 @@ fn lower_openai_responses(
     payload::<OpenAiResponses>(typed, wire)
 }
 
+fn lower_azure_openai_responses(
+    model: &ModelDescriptor,
+    context: &Context,
+    simple: &SimpleGenerationOptions,
+    patch: Option<&ErasedApiOptionsPatch>,
+    endpoint: &Url,
+    auth_headers: &HeaderMap,
+) -> Result<ProviderPayload, AiError> {
+    let ApiModelConfig::Custom(custom) = &model.api else {
+        return Err(wrong_family(model, AzureOpenAiResponses::API_ID));
+    };
+    let config = azure_model_config(custom).map_err(|error| invalid_request(model, error))?;
+    let typed = TypedModelDescriptor::<AzureOpenAiResponses> {
+        common: model.common.clone(),
+        config: custom.clone(),
+        extensions: model.extensions.clone(),
+    };
+    let compat = AzureOpenAiResponses::resolve_compat(endpoint, &config.responses.compat)
+        .map_err(|error| invalid_request(model, error.to_string()))?;
+    let projected = projected_context(model, context)?;
+    let estimate = estimate_context_tokens(&projected)
+        .map_err(|error| invalid_request(model, error.to_string()))?;
+    let patch =
+        parse_patch::<AzureOpenAiResponsesSimplePatch>(model, patch, AzureOpenAiResponses::API_ID)?;
+    let mut options = AzureOpenAiResponses::lower_simple(
+        SimpleLoweringContext {
+            model: &typed,
+            compat: &compat,
+            effective_base_url: endpoint,
+            estimated_input_tokens: estimate.tokens,
+            available_context_tokens: available_context(model, estimate.tokens),
+        },
+        simple,
+        &patch,
+    )
+    .map_err(|error| invalid_request(model, error.to_string()))?;
+    if patch
+        .azure_deployment_name
+        .as_deref()
+        .is_none_or(str::is_empty)
+        && let Some(map) = private_auth_header(auth_headers, AZURE_DEPLOYMENT_MAP_AUTH_HEADER)
+        && let Some((_, deployment)) = crate::parse_azure_deployment_name_map(map)
+            .into_iter()
+            .rev()
+            .find(|(model_id, deployment)| {
+                model_id == model.common.model_ref.model.as_str() && !deployment.is_empty()
+            })
+    {
+        options.deployment_name = deployment;
+    }
+    if patch.azure_api_version.as_deref().is_none_or(str::is_empty)
+        && let Some(version) = private_auth_header(auth_headers, AZURE_API_VERSION_AUTH_HEADER)
+    {
+        options.api_version = version.to_owned();
+    }
+    let wire = AzureOpenAiResponses::encode(
+        EncodeContext {
+            model: &typed,
+            context: &projected,
+            compat: &compat,
+            effective_base_url: endpoint,
+        },
+        &options,
+    )
+    .map_err(|error| invalid_request(model, error.to_string()))?;
+    payload::<AzureOpenAiResponses>(typed, wire).map(|payload| {
+        payload
+            .with_transport_session_id(Some(format!("azure-api-version={}", options.api_version)))
+    })
+}
+
 fn lower_openai_codex_responses(
     model: &ModelDescriptor,
     context: &Context,
     simple: &SimpleGenerationOptions,
     patch: Option<&ErasedApiOptionsPatch>,
     endpoint: &Url,
+    _auth_headers: &HeaderMap,
 ) -> Result<ProviderPayload, AiError> {
     let ApiModelConfig::OpenAiCodexResponses(config) = &model.api else {
         return Err(wrong_family(model, OpenAiCodexResponses::API_ID));
@@ -494,6 +690,7 @@ fn encode_openai_responses_full(
     context: &Context,
     options: &ErasedApiFullOptions,
     endpoint: &Url,
+    _auth_headers: &HeaderMap,
 ) -> Result<ProviderPayload, AiError> {
     let ApiModelConfig::OpenAiResponses(config) = &model.api else {
         return Err(wrong_family(model, OpenAiResponses::API_ID));
@@ -522,11 +719,50 @@ fn encode_openai_responses_full(
     payload::<OpenAiResponses>(typed, wire)
 }
 
+fn encode_azure_openai_responses_full(
+    model: &ModelDescriptor,
+    context: &Context,
+    options: &ErasedApiFullOptions,
+    endpoint: &Url,
+    _auth_headers: &HeaderMap,
+) -> Result<ProviderPayload, AiError> {
+    let ApiModelConfig::Custom(custom) = &model.api else {
+        return Err(wrong_family(model, AzureOpenAiResponses::API_ID));
+    };
+    let config = azure_model_config(custom).map_err(|error| invalid_request(model, error))?;
+    let options = options
+        .downcast_ref::<AzureOpenAiResponses>()
+        .ok_or_else(|| invalid_request(model, "invalid Azure Responses full options type"))?;
+    let typed = TypedModelDescriptor::<AzureOpenAiResponses> {
+        common: model.common.clone(),
+        config: custom.clone(),
+        extensions: model.extensions.clone(),
+    };
+    let compat = AzureOpenAiResponses::resolve_compat(endpoint, &config.responses.compat)
+        .map_err(|error| invalid_request(model, error.to_string()))?;
+    let projected = projected_context(model, context)?;
+    let wire = AzureOpenAiResponses::encode(
+        EncodeContext {
+            model: &typed,
+            context: &projected,
+            compat: &compat,
+            effective_base_url: endpoint,
+        },
+        options,
+    )
+    .map_err(|error| invalid_request(model, error.to_string()))?;
+    payload::<AzureOpenAiResponses>(typed, wire).map(|payload| {
+        payload
+            .with_transport_session_id(Some(format!("azure-api-version={}", options.api_version)))
+    })
+}
+
 fn encode_openai_codex_responses_full(
     model: &ModelDescriptor,
     context: &Context,
     options: &ErasedApiFullOptions,
     endpoint: &Url,
+    _auth_headers: &HeaderMap,
 ) -> Result<ProviderPayload, AiError> {
     let ApiModelConfig::OpenAiCodexResponses(config) = &model.api else {
         return Err(wrong_family(model, OpenAiCodexResponses::API_ID));
@@ -579,6 +815,27 @@ fn apply_openai_responses_full_option_headers(
     let compat = OpenAiResponses::resolve_compat(effective_base_url, &config.compat)
         .map_err(|error| invalid_request(model, error.to_string()))?;
     apply_openai_responses_full_headers(&compat, options, headers)
+        .map_err(|error| invalid_request(model, error.message))
+}
+
+fn apply_azure_openai_responses_full_option_headers(
+    model: &ModelDescriptor,
+    _context: &Context,
+    options: &ErasedApiFullOptions,
+    effective_base_url: &Url,
+    _request_options: &ApiRequestOptions,
+    headers: &mut HeaderMap,
+) -> Result<(), AiError> {
+    let ApiModelConfig::Custom(custom) = &model.api else {
+        return Err(wrong_family(model, AzureOpenAiResponses::API_ID));
+    };
+    let config = azure_model_config(custom).map_err(|error| invalid_request(model, error))?;
+    let options: &AzureOpenAiResponsesOptions = options
+        .downcast_ref::<AzureOpenAiResponses>()
+        .ok_or_else(|| invalid_request(model, "invalid Azure Responses full options type"))?;
+    let compat = AzureOpenAiResponses::resolve_compat(effective_base_url, &config.responses.compat)
+        .map_err(|error| invalid_request(model, error.to_string()))?;
+    apply_openai_responses_full_headers(&compat, &options.responses, headers)
         .map_err(|error| invalid_request(model, error.message))
 }
 
@@ -681,6 +938,15 @@ fn responses_decode_context(
             ApiId::new(OpenAiCodexResponses::API_ID),
             OpenAiCodexResponses::resolve_compat(endpoint, &config.compat)
                 .expect("compat resolved during lowering"),
+        ),
+        ApiModelConfig::Custom(config) if config.api.as_str() == AzureOpenAiResponses::API_ID => (
+            ApiId::new(AzureOpenAiResponses::API_ID),
+            azure_model_config(config)
+                .and_then(|config| {
+                    AzureOpenAiResponses::resolve_compat(endpoint, &config.responses.compat)
+                        .map_err(|error| error.to_string())
+                })
+                .expect("Azure compat resolved during lowering"),
         ),
         _ => (model.api.api_id(), Default::default()),
     };
@@ -888,6 +1154,24 @@ pub fn local_openai_responses_api(transport: Rc<dyn LocalHttpTransport>) -> Rc<d
     ))
 }
 
+/// Creates the Send Azure OpenAI Responses API.
+pub fn azure_openai_responses_api(transport: Arc<dyn HttpTransport>) -> Arc<dyn ChatApi> {
+    Arc::new(HttpChatApi::new(
+        Arc::new(AzureOpenAiResponsesHandler::default()),
+        Arc::new(AzureOpenAiResponsesTransport { inner: transport }),
+    ))
+}
+
+/// Creates the local Azure OpenAI Responses API.
+pub fn local_azure_openai_responses_api(
+    transport: Rc<dyn LocalHttpTransport>,
+) -> Rc<dyn LocalChatApi> {
+    Rc::new(LocalHttpChatApi::new(
+        Rc::new(AzureOpenAiResponsesHandler::default()),
+        Rc::new(LocalAzureOpenAiResponsesTransport { inner: transport }),
+    ))
+}
+
 /// Creates the Send OpenAI Codex Responses SSE API.
 pub fn openai_codex_responses_api(transport: Arc<dyn HttpTransport>) -> Arc<dyn ChatApi> {
     Arc::new(HttpChatApi::new(
@@ -938,6 +1222,40 @@ pub fn local_openai_codex_responses_api_with_websocket(
 #[derive(Clone)]
 pub struct OpenAiResponsesTransport {
     inner: Arc<dyn HttpTransport>,
+}
+
+#[derive(Clone)]
+struct AzureOpenAiResponsesTransport {
+    inner: Arc<dyn HttpTransport>,
+}
+
+impl HttpTransport for AzureOpenAiResponsesTransport {
+    fn execute(
+        &self,
+        mut request: HttpRequest,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<HttpResponse, pi_ai::TransportError>> {
+        request.url = azure_responses_url(&request.url, request.session_id.as_deref());
+        ensure_responses_headers(&mut request.headers, false);
+        self.inner.execute(request, cancellation)
+    }
+}
+
+#[derive(Clone)]
+struct LocalAzureOpenAiResponsesTransport {
+    inner: Rc<dyn LocalHttpTransport>,
+}
+
+impl LocalHttpTransport for LocalAzureOpenAiResponsesTransport {
+    fn execute(
+        &self,
+        mut request: HttpRequest,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<LocalHttpResponse, pi_ai::TransportError>> {
+        request.url = azure_responses_url(&request.url, request.session_id.as_deref());
+        ensure_responses_headers(&mut request.headers, false);
+        self.inner.execute(request, cancellation)
+    }
 }
 
 impl OpenAiResponsesTransport {
@@ -2129,6 +2447,7 @@ async fn execute_codex_websocket_send(
                     headers: HeaderMap::new(),
                     diagnostics: Vec::new(),
                     notify_observers: false,
+                    decode_non_success: false,
                     body: adapt_send_websocket_body(
                         body,
                         Arc::clone(state),
@@ -2253,6 +2572,7 @@ async fn execute_codex_websocket_local(
                     headers: HeaderMap::new(),
                     diagnostics: Vec::new(),
                     notify_observers: false,
+                    decode_non_success: false,
                     body: adapt_local_websocket_body(
                         body,
                         Rc::clone(state),
@@ -2584,6 +2904,15 @@ fn responses_url(base: &Url) -> Url {
     if !path.ends_with("/responses") {
         url.set_path(&format!("{path}/responses"));
     }
+    url
+}
+
+fn azure_responses_url(base: &Url, session_id: Option<&str>) -> Url {
+    let mut url = responses_url(base);
+    let version = session_id
+        .and_then(|value| value.strip_prefix("azure-api-version="))
+        .unwrap_or("v1");
+    url.query_pairs_mut().append_pair("api-version", version);
     url
 }
 

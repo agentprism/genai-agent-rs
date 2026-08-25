@@ -6,10 +6,8 @@
 )]
 
 use crate::{
-    GoogleDecodeContext, GoogleSseDecoder, LocalVertexAdcCredentialAdapter,
-    VertexAdcCredentialAdapter, google_auth_resolver, google_models, google_vertex_auth_resolver,
-    google_vertex_auth_resolver_with_adc_adapter, google_vertex_models, local_google_auth_resolver,
-    local_google_vertex_auth_resolver, local_google_vertex_auth_resolver_with_adc_adapter,
+    GoogleDecodeContext, GoogleSseDecoder, google_auth_resolver, google_models,
+    local_google_auth_resolver,
 };
 use futures_util::{FutureExt, StreamExt, stream};
 use http::{HeaderMap, Method, header};
@@ -1077,39 +1075,6 @@ pub fn google_provider(
         .map_err(GoogleProviderError::Registration)
 }
 
-/// Builds the built-in Vertex provider registration.
-pub fn google_vertex_provider(
-    transport: Arc<dyn HttpTransport>,
-) -> Result<ProviderRegistration, GoogleProviderError> {
-    ProviderRegistration::builder("google-vertex")
-        .display_name("Google Vertex AI")
-        .headers(google_default_headers())
-        .auth(google_vertex_auth_resolver(Arc::clone(&transport)))
-        .models(google_vertex_models().map_err(GoogleProviderError::Catalog)?)
-        .api(GoogleVertex::API_ID, google_vertex_api(transport))
-        .build()
-        .map_err(GoogleProviderError::Registration)
-}
-
-/// Builds the built-in Vertex provider registration with a host GoogleAuth
-/// adapter for external-account, impersonated, and other delegated ADC types.
-pub fn google_vertex_provider_with_adc_adapter(
-    transport: Arc<dyn HttpTransport>,
-    adc_adapter: Arc<dyn VertexAdcCredentialAdapter>,
-) -> Result<ProviderRegistration, GoogleProviderError> {
-    ProviderRegistration::builder("google-vertex")
-        .display_name("Google Vertex AI")
-        .headers(google_default_headers())
-        .auth(google_vertex_auth_resolver_with_adc_adapter(
-            Arc::clone(&transport),
-            adc_adapter,
-        ))
-        .models(google_vertex_models().map_err(GoogleProviderError::Catalog)?)
-        .api(GoogleVertex::API_ID, google_vertex_api(transport))
-        .build()
-        .map_err(GoogleProviderError::Registration)
-}
-
 /// Builds the local Google provider registration.
 pub fn local_google_provider(
     transport: Rc<dyn LocalHttpTransport>,
@@ -1127,39 +1092,6 @@ pub fn local_google_provider(
             GoogleGenerativeAi::API_ID,
             local_google_generative_ai_api(transport),
         )
-        .build()
-        .map_err(GoogleProviderError::Registration)
-}
-
-/// Builds the local Vertex provider registration.
-pub fn local_google_vertex_provider(
-    transport: Rc<dyn LocalHttpTransport>,
-) -> Result<LocalProviderRegistration, GoogleProviderError> {
-    LocalProviderRegistration::builder("google-vertex")
-        .display_name("Google Vertex AI")
-        .headers(google_default_headers())
-        .auth(local_google_vertex_auth_resolver(Rc::clone(&transport)))
-        .models(google_vertex_models().map_err(GoogleProviderError::Catalog)?)
-        .api(GoogleVertex::API_ID, local_google_vertex_api(transport))
-        .build()
-        .map_err(GoogleProviderError::Registration)
-}
-
-/// Builds the local Vertex provider registration with a host GoogleAuth
-/// adapter for external-account, impersonated, and other delegated ADC types.
-pub fn local_google_vertex_provider_with_adc_adapter(
-    transport: Rc<dyn LocalHttpTransport>,
-    adc_adapter: Rc<dyn LocalVertexAdcCredentialAdapter>,
-) -> Result<LocalProviderRegistration, GoogleProviderError> {
-    LocalProviderRegistration::builder("google-vertex")
-        .display_name("Google Vertex AI")
-        .headers(google_default_headers())
-        .auth(local_google_vertex_auth_resolver_with_adc_adapter(
-            Rc::clone(&transport),
-            adc_adapter,
-        ))
-        .models(google_vertex_models().map_err(GoogleProviderError::Catalog)?)
-        .api(GoogleVertex::API_ID, local_google_vertex_api(transport))
         .build()
         .map_err(GoogleProviderError::Registration)
 }

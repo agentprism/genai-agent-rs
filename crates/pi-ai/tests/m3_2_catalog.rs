@@ -799,6 +799,52 @@ fn catalog_reads_last_published_snapshot_synchronously() {
 }
 
 #[test]
+fn catalog_refresh_candidate_with_unregistered_api_rejects_publication() {
+    // §10.7 catalog publish contract; Pi basis:
+    // packages/ai/src/models.ts createProvider API dispatch and refresh
+    // transaction, as tightened by architecture v2 part 2 §5.4–§5.5.
+    let mut invalid = test_model(PROVIDER, "invalid", "Invalid");
+    invalid.api = ApiModelConfig::Custom(CustomApiModelConfig {
+        api: ApiId::new("unregistered-api"),
+        schema_version: 1,
+        value: RawValue::from_string("{}".into()).unwrap(),
+    });
+    let source = Arc::new(QueueSource::new(
+        vec![test_model(PROVIDER, "baseline", "Baseline")],
+        vec![Ok(candidate(vec![invalid], "invalid"))],
+    ));
+    let store = Arc::new(InMemoryModelsStore::default());
+    let models = Models::builder()
+        .models_store(store.clone())
+        .provider(dynamic_provider(
+            PROVIDER,
+            source,
+            Arc::new(AnonymousAuthResolver),
+        ))
+        .build()
+        .unwrap();
+
+    let report = block_on(models.refresh(selected(PROVIDER), CancellationToken::new()));
+    assert!(matches!(
+        report.providers.get(&ProviderId::new(PROVIDER)),
+        Some(ProviderRefreshResult::Failed { .. })
+    ));
+    assert_eq!(
+        model_name(&models, PROVIDER, "baseline").as_deref(),
+        Some("Baseline")
+    );
+    assert!(
+        block_on(ModelsStore::read(
+            store.as_ref(),
+            &ProviderId::new(PROVIDER),
+            CancellationToken::new(),
+        ))
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[test]
 fn catalog_static_refresh_is_noop() {
     let _basis =
         "architecture v2 part 1 §3.7; part 2 §5.7, §10.7; packages/ai/src/models.ts:306-361";

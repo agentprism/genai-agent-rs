@@ -10,10 +10,10 @@ use pi_ai::{
     RedirectReceiverRequest, SecretString, SendBoxFuture, SimpleGenerationOptions, StreamTransport,
     Timestamp, TransportError,
 };
-use pi_ai_openai::{
-    LocalOpenAiCodexOAuth, OpenAiCodexOAuth, OpenAiCodexResponsesTransport, account_id_from_jwt,
-    local_openai_codex_provider, openai_codex_models, openai_codex_provider, openai_models,
-    openai_provider,
+use pi_ai_openai::{OpenAiCodexResponsesTransport, openai_models, openai_provider};
+use pi_ai_openai_codex::{
+    LocalOpenAiCodexOAuth, OpenAiCodexOAuth, account_id_from_jwt, local_openai_codex_provider,
+    openai_codex_models, openai_codex_provider,
 };
 use std::cell::RefCell;
 use std::collections::VecDeque;

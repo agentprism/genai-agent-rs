@@ -1320,6 +1320,8 @@ fn auth_provider_extra_fields_round_trip() {
         ProviderOAuthExtra::GitHubCopilot {
             api_endpoint: Url::parse("https://copilot.example/api").unwrap(),
             account_id: Some("account-1".into()),
+            enterprise_url: Some("enterprise.example".into()),
+            available_model_ids: Some(vec![ModelId::new("entitled-model")]),
         },
         ProviderOAuthExtra::OpenAiCodex {
             account_id: "account-2".into(),

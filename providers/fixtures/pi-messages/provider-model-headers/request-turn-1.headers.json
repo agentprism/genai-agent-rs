@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "method": "POST",
+  "path": "/messages",
+  "headers": {
+    "accept": "text/event-stream",
+    "authorization": "[REDACTED]",
+    "content-type": "application/json",
+    "x-fixture-request": "request-value"
+  },
+  "omittedRuntimeHeaders": [
+    "accept-encoding",
+    "connection",
+    "content-length",
+    "host",
+    "user-agent"
+  ]
+}

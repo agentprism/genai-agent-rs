@@ -389,6 +389,43 @@ fn auth_file_store_round_trips_provider_extras() {
 }
 
 #[test]
+fn auth_file_store_round_trips_github_copilot_enterprise_metadata() {
+    // Architecture v2 part 2 §6.6 and §10.7; Pi basis:
+    // packages/ai/src/auth/oauth/github-copilot.ts:341-347,487-505.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("credentials.json");
+    let store = FileCredentialStore::new(path.clone());
+    let credential = Credential::OAuth(OAuthCredential {
+        access: SecretString::new("copilot-access"),
+        refresh: SecretString::new("github-refresh"),
+        expires_at: Timestamp::from_unix_millis(42),
+        extra: ProviderOAuthExtra::GitHubCopilot {
+            api_endpoint: url::Url::parse("https://copilot-api.enterprise.example").unwrap(),
+            account_id: Some("account-identity".into()),
+            enterprise_url: Some("enterprise.example".into()),
+            available_model_ids: Some(vec![ModelId::new("entitled-model")]),
+        },
+    });
+    put(&store, "github-copilot", credential.clone());
+
+    let document: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        document["credentials"]["github-copilot"]["extra"]["value"]["enterprise_url"],
+        "enterprise.example"
+    );
+    assert_eq!(
+        document["credentials"]["github-copilot"]["extra"]["value"]["account_id"],
+        "account-identity"
+    );
+    let reopened = FileCredentialStore::new(path);
+    assert_eq!(
+        block_on(reopened.read(ProviderId::new("github-copilot"), CancellationToken::new()))
+            .unwrap(),
+        Some(credential)
+    );
+}
+
+#[test]
 fn auth_file_store_local_adapter_round_trip() {
     let _basis = FILE_AUTH_BASIS;
     let directory = tempfile::tempdir().unwrap();

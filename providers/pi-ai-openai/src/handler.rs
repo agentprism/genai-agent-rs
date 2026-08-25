@@ -5,9 +5,7 @@
     reason = "ErasedApiHandler requires the architecture-specified AiError by value"
 )]
 
-use crate::{
-    OpenAiCompletionsDecodeContext, OpenAiCompletionsSseDecoder, deepseek_models, openrouter_models,
-};
+use crate::{OpenAiCompletionsDecodeContext, OpenAiCompletionsSseDecoder};
 use futures_util::{FutureExt, StreamExt, stream};
 use http::{HeaderMap, HeaderValue, Method, header};
 use pi_ai::{
@@ -485,53 +483,6 @@ fn ensure_json_headers(headers: &mut HeaderMap) {
     }
 }
 
-/// Builds the DeepSeek registration around a caller-shared API object.
-pub fn deepseek_provider_with_api(
-    api: Arc<dyn ChatApi>,
-) -> Result<ProviderRegistration, OpenAiProviderError> {
-    provider_registration(
-        "deepseek",
-        "DeepSeek",
-        "https://api.deepseek.com",
-        "DEEPSEEK_API_KEY",
-        deepseek_models()?,
-        api,
-        None,
-    )
-}
-
-/// Builds the OpenRouter registration around the same API object.
-pub fn openrouter_provider_with_api(
-    api: Arc<dyn ChatApi>,
-    oauth_transport: Arc<dyn HttpTransport>,
-) -> Result<ProviderRegistration, OpenAiProviderError> {
-    provider_registration(
-        "openrouter",
-        "OpenRouter",
-        "https://openrouter.ai/api/v1",
-        "OPENROUTER_API_KEY",
-        openrouter_models()?,
-        api,
-        Some(Arc::new(crate::OpenRouterOAuth::new(oauth_transport))),
-    )
-}
-
-/// Builds a complete DeepSeek registration from one raw transport.
-pub fn deepseek_provider(
-    transport: Arc<dyn HttpTransport>,
-) -> Result<ProviderRegistration, OpenAiProviderError> {
-    deepseek_provider_with_api(openai_completions_api(transport))
-}
-
-/// Builds a complete OpenRouter registration whose API and OAuth flow share
-/// one injected raw transport.
-pub fn openrouter_provider(
-    transport: Arc<dyn HttpTransport>,
-) -> Result<ProviderRegistration, OpenAiProviderError> {
-    let api = openai_completions_api(Arc::clone(&transport));
-    openrouter_provider_with_api(api, transport)
-}
-
 /// Builds the pinned OpenAI Responses provider.
 pub fn openai_provider(
     transport: Arc<dyn HttpTransport>,
@@ -770,91 +721,6 @@ fn contains_optional_separator(message: &str, prefix: &str, suffix: &str) -> boo
     })
 }
 
-/// Builds ChatGPT Codex Responses with its provider-owned OAuth flow.
-pub fn openai_codex_provider(
-    transport: Arc<dyn HttpTransport>,
-) -> Result<ProviderRegistration, OpenAiProviderError> {
-    let api = crate::openai_codex_responses_api(Arc::clone(&transport));
-    let oauth: Arc<dyn OAuthAuth> = Arc::new(crate::OpenAiCodexOAuth::new(transport));
-    ProviderRegistration::builder("openai-codex")
-        .display_name("OpenAI Codex")
-        .base_url(Url::parse("https://chatgpt.com/backend-api").map_err(OpenAiProviderError::Url)?)
-        .auth(Arc::new(CodexAuthResolver::new(oauth)))
-        .models(crate::openai_codex_models()?)
-        .api(pi_ai::OpenAiCodexResponses::API_ID, api)
-        .retry_policy(openai_codex_retry_policy())
-        .retry_classifier(Arc::new(OpenAiCodexRetryClassifier::default()))
-        .build()
-        .map_err(OpenAiProviderError::Registration)
-}
-
-/// Builds ChatGPT Codex Responses with selectable SSE, WebSocket,
-/// cached-WebSocket, and automatic-fallback transports.
-pub fn openai_codex_provider_with_websocket(
-    transport: Arc<dyn HttpTransport>,
-    websocket: Arc<dyn crate::OpenAiCodexWebSocketTransport>,
-) -> Result<ProviderRegistration, OpenAiProviderError> {
-    let api = crate::openai_codex_responses_api_with_websocket(Arc::clone(&transport), websocket);
-    let oauth: Arc<dyn OAuthAuth> = Arc::new(crate::OpenAiCodexOAuth::new(transport));
-    ProviderRegistration::builder("openai-codex")
-        .display_name("OpenAI Codex")
-        .base_url(Url::parse("https://chatgpt.com/backend-api").map_err(OpenAiProviderError::Url)?)
-        .auth(Arc::new(CodexAuthResolver::new(oauth)))
-        .models(crate::openai_codex_models()?)
-        .api(pi_ai::OpenAiCodexResponses::API_ID, api)
-        .retry_policy(openai_codex_retry_policy())
-        .retry_classifier(Arc::new(OpenAiCodexRetryClassifier::default()))
-        .build()
-        .map_err(OpenAiProviderError::Registration)
-}
-
-/// Builds a local DeepSeek registration around a caller-shared API object.
-pub fn local_deepseek_provider_with_api(
-    api: Rc<dyn LocalChatApi>,
-) -> Result<LocalProviderRegistration, OpenAiProviderError> {
-    local_provider_registration(
-        "deepseek",
-        "DeepSeek",
-        "https://api.deepseek.com",
-        "DEEPSEEK_API_KEY",
-        deepseek_models()?,
-        api,
-        None,
-    )
-}
-
-/// Builds a local OpenRouter registration around a caller-shared API object.
-pub fn local_openrouter_provider_with_api(
-    api: Rc<dyn LocalChatApi>,
-    oauth_transport: Rc<dyn LocalHttpTransport>,
-) -> Result<LocalProviderRegistration, OpenAiProviderError> {
-    local_provider_registration(
-        "openrouter",
-        "OpenRouter",
-        "https://openrouter.ai/api/v1",
-        "OPENROUTER_API_KEY",
-        openrouter_models()?,
-        api,
-        Some(Rc::new(crate::LocalOpenRouterOAuth::new(oauth_transport))),
-    )
-}
-
-/// Builds a complete local DeepSeek registration from one raw transport.
-pub fn local_deepseek_provider(
-    transport: Rc<dyn LocalHttpTransport>,
-) -> Result<LocalProviderRegistration, OpenAiProviderError> {
-    local_deepseek_provider_with_api(local_openai_completions_api(transport))
-}
-
-/// Builds a complete local OpenRouter registration whose API and OAuth flow
-/// share one injected local raw transport.
-pub fn local_openrouter_provider(
-    transport: Rc<dyn LocalHttpTransport>,
-) -> Result<LocalProviderRegistration, OpenAiProviderError> {
-    let api = local_openai_completions_api(Rc::clone(&transport));
-    local_openrouter_provider_with_api(api, transport)
-}
-
 /// Builds the local-executor OpenAI Responses provider.
 pub fn local_openai_provider(
     transport: Rc<dyn LocalHttpTransport>,
@@ -875,85 +741,6 @@ pub fn local_openai_provider_with_api(
         )))
         .models(crate::openai_models()?)
         .api(pi_ai::OpenAiResponses::API_ID, responses_api)
-        .build()
-        .map_err(OpenAiProviderError::Registration)
-}
-
-/// Builds the local-executor ChatGPT Codex provider and OAuth flow.
-pub fn local_openai_codex_provider(
-    transport: Rc<dyn LocalHttpTransport>,
-) -> Result<LocalProviderRegistration, OpenAiProviderError> {
-    let api = crate::local_openai_codex_responses_api(Rc::clone(&transport));
-    let oauth: Rc<dyn LocalOAuthAuth> = Rc::new(crate::LocalOpenAiCodexOAuth::new(transport));
-    LocalProviderRegistration::builder("openai-codex")
-        .display_name("OpenAI Codex")
-        .base_url(Url::parse("https://chatgpt.com/backend-api").map_err(OpenAiProviderError::Url)?)
-        .auth(Rc::new(LocalCodexAuthResolver::new(oauth)))
-        .models(crate::openai_codex_models()?)
-        .api(pi_ai::OpenAiCodexResponses::API_ID, api)
-        .retry_policy(openai_codex_retry_policy())
-        .retry_classifier(Rc::new(LocalOpenAiCodexRetryClassifier::default()))
-        .build()
-        .map_err(OpenAiProviderError::Registration)
-}
-
-/// Builds the local-executor ChatGPT Codex provider with selectable SSE,
-/// WebSocket, cached-WebSocket, and automatic-fallback transports.
-pub fn local_openai_codex_provider_with_websocket(
-    transport: Rc<dyn LocalHttpTransport>,
-    websocket: Rc<dyn crate::LocalOpenAiCodexWebSocketTransport>,
-) -> Result<LocalProviderRegistration, OpenAiProviderError> {
-    let api =
-        crate::local_openai_codex_responses_api_with_websocket(Rc::clone(&transport), websocket);
-    let oauth: Rc<dyn LocalOAuthAuth> = Rc::new(crate::LocalOpenAiCodexOAuth::new(transport));
-    LocalProviderRegistration::builder("openai-codex")
-        .display_name("OpenAI Codex")
-        .base_url(Url::parse("https://chatgpt.com/backend-api").map_err(OpenAiProviderError::Url)?)
-        .auth(Rc::new(LocalCodexAuthResolver::new(oauth)))
-        .models(crate::openai_codex_models()?)
-        .api(pi_ai::OpenAiCodexResponses::API_ID, api)
-        .retry_policy(openai_codex_retry_policy())
-        .retry_classifier(Rc::new(LocalOpenAiCodexRetryClassifier::default()))
-        .build()
-        .map_err(OpenAiProviderError::Registration)
-}
-
-fn provider_registration(
-    id: &str,
-    display_name: &str,
-    base_url: &str,
-    environment_variable: &str,
-    models: Vec<ModelDescriptor>,
-    api: Arc<dyn ChatApi>,
-    oauth: Option<Arc<dyn OAuthAuth>>,
-) -> Result<ProviderRegistration, OpenAiProviderError> {
-    let auth = Arc::new(BearerAuthResolver::new(environment_variable, oauth));
-    ProviderRegistration::builder(id)
-        .display_name(display_name)
-        .base_url(Url::parse(base_url).map_err(OpenAiProviderError::Url)?)
-        .auth(auth)
-        .models(models)
-        .api(OpenAiCompletions::API_ID, api)
-        .build()
-        .map_err(OpenAiProviderError::Registration)
-}
-
-fn local_provider_registration(
-    id: &str,
-    display_name: &str,
-    base_url: &str,
-    environment_variable: &str,
-    models: Vec<ModelDescriptor>,
-    api: Rc<dyn LocalChatApi>,
-    oauth: Option<Rc<dyn LocalOAuthAuth>>,
-) -> Result<LocalProviderRegistration, OpenAiProviderError> {
-    let auth = Rc::new(LocalBearerAuthResolver::new(environment_variable, oauth));
-    LocalProviderRegistration::builder(id)
-        .display_name(display_name)
-        .base_url(Url::parse(base_url).map_err(OpenAiProviderError::Url)?)
-        .auth(auth)
-        .models(models)
-        .api(OpenAiCompletions::API_ID, api)
         .build()
         .map_err(OpenAiProviderError::Registration)
 }
@@ -984,108 +771,6 @@ impl std::error::Error for OpenAiProviderError {}
 impl From<crate::OpenAiCatalogError> for OpenAiProviderError {
     fn from(value: crate::OpenAiCatalogError) -> Self {
         Self::Catalog(value)
-    }
-}
-
-struct CodexAuthResolver {
-    access_token: crate::OpenAiCodexAccessTokenAuth,
-    inner: ProviderAuthResolver,
-}
-
-impl CodexAuthResolver {
-    fn new(oauth: Arc<dyn OAuthAuth>) -> Self {
-        Self {
-            access_token: crate::OpenAiCodexAccessTokenAuth,
-            inner: ProviderAuthResolver::new(None, Some(oauth)),
-        }
-    }
-}
-
-impl AuthResolver for CodexAuthResolver {
-    fn resolve(
-        &self,
-        request: ResolveAuthRequest,
-        cancellation: CancellationToken,
-    ) -> SendBoxFuture<'_, Result<Option<ResolvedAuth>, AuthError>> {
-        if let Some(key) = request.overrides.api_key.clone() {
-            return pi_ai::ApiKeyAuth::resolve(
-                &self.access_token,
-                pi_ai::ApiKeyResolveRequest {
-                    provider: request.provider,
-                    credential: Some(pi_ai::ApiKeyCredential {
-                        key: Some(key),
-                        environment: request.overrides.environment.clone(),
-                    }),
-                    context: request.auth_context,
-                    environment: request.overrides.environment,
-                },
-                cancellation,
-            );
-        }
-        self.inner.resolve(request, cancellation)
-    }
-
-    fn login(
-        &self,
-        interaction: Arc<dyn AuthInteraction>,
-        cancellation: CancellationToken,
-    ) -> SendBoxFuture<'_, Result<pi_ai::Credential, AuthError>> {
-        self.inner.login(interaction, cancellation)
-    }
-
-    fn logout(&self, cancellation: CancellationToken) -> SendBoxFuture<'_, Result<(), AuthError>> {
-        self.inner.logout(cancellation)
-    }
-}
-
-struct LocalCodexAuthResolver {
-    access_token: crate::OpenAiCodexAccessTokenAuth,
-    inner: LocalProviderAuthResolver,
-}
-
-impl LocalCodexAuthResolver {
-    fn new(oauth: Rc<dyn LocalOAuthAuth>) -> Self {
-        Self {
-            access_token: crate::OpenAiCodexAccessTokenAuth,
-            inner: LocalProviderAuthResolver::new(None, Some(oauth)),
-        }
-    }
-}
-
-impl LocalAuthResolver for LocalCodexAuthResolver {
-    fn resolve(
-        &self,
-        request: LocalResolveAuthRequest,
-        cancellation: CancellationToken,
-    ) -> LocalBoxFuture<'_, Result<Option<ResolvedAuth>, AuthError>> {
-        if let Some(key) = request.overrides.api_key.clone() {
-            return pi_ai::LocalApiKeyAuth::resolve(
-                &self.access_token,
-                pi_ai::LocalApiKeyResolveRequest {
-                    provider: request.provider,
-                    credential: Some(pi_ai::ApiKeyCredential {
-                        key: Some(key),
-                        environment: request.overrides.environment.clone(),
-                    }),
-                    context: request.auth_context,
-                    environment: request.overrides.environment,
-                },
-                cancellation,
-            );
-        }
-        self.inner.resolve(request, cancellation)
-    }
-
-    fn login(
-        &self,
-        interaction: Rc<dyn LocalAuthInteraction>,
-        cancellation: CancellationToken,
-    ) -> LocalBoxFuture<'_, Result<pi_ai::Credential, AuthError>> {
-        self.inner.login(interaction, cancellation)
-    }
-
-    fn logout(&self, cancellation: CancellationToken) -> LocalBoxFuture<'_, Result<(), AuthError>> {
-        self.inner.logout(cancellation)
     }
 }
 

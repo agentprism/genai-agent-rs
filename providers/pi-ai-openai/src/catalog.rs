@@ -1,29 +1,22 @@
-//! Pinned published model catalogs for the two shared-family providers.
+//! Pinned OpenAI catalog conversion and shared family parser.
 
 use pi_ai::{
-    ApiModelConfig, CacheControlFormat, CacheWriteRetentionPricing, CommonModelDescriptor,
-    HeaderMapSpec, LevelSupport, MaxTokensField, Modality, ModalityCapabilities, ModelDescriptor,
-    ModelLimits, ModelPricing, ModelRef, MoneyRate, OpenAiCompletionsCompat,
-    OpenAiCompletionsModelConfig, OpenAiResponsesCompat, OpenAiResponsesModelConfig,
-    OpenAiThinkingFormat, OpenAiThinkingValue, RequestWidePriceTier, SessionAffinityFormat,
-    ThinkingLevelMap, TokenPriceRates,
+    ApiId, ApiModelConfig, CacheControlFormat, CacheWriteRetentionPricing, ChatTemplateValues,
+    CommonModelDescriptor, CustomApiModelConfig, DeferredToolsMode, HeaderMapSpec, LevelSupport,
+    MaxTokensField, Modality, ModalityCapabilities, ModelDescriptor, ModelLimits, ModelPricing,
+    ModelRef, MoneyRate, OpenAiCompletionsCompat, OpenAiCompletionsModelConfig,
+    OpenAiResponsesCompat, OpenAiResponsesModelConfig, OpenAiThinkingFormat, OpenAiThinkingValue,
+    RequestWidePriceTier, SessionAffinityFormat, ThinkingLevelMap, TokenPriceRates,
 };
+use serde::de::DeserializeOwned;
+use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 use std::fmt;
 use url::Url;
 
-/// Pinned DeepSeek catalog bytes published by `@earendil-works/pi-ai@0.84.2`.
-pub const DEEPSEEK_CATALOG_JSON: &str = include_str!("../data/deepseek.json");
-
-/// Pinned OpenRouter catalog bytes published by `@earendil-works/pi-ai@0.84.2`.
-pub const OPENROUTER_CATALOG_JSON: &str = include_str!("../data/openrouter.json");
-
 /// Pinned OpenAI Responses catalog bytes.
 pub const OPENAI_CATALOG_JSON: &str = include_str!("../data/openai.json");
-
-/// Pinned ChatGPT Codex Responses catalog bytes.
-pub const OPENAI_CODEX_CATALOG_JSON: &str = include_str!("../data/openai-codex.json");
 
 /// Failure while converting Pi's published catalog into typed Rust models.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -47,31 +40,13 @@ impl fmt::Display for OpenAiCatalogError {
 
 impl std::error::Error for OpenAiCatalogError {}
 
-/// Loads the exact DeepSeek model set published by pinned Pi.
-pub fn deepseek_models() -> Result<Vec<ModelDescriptor>, OpenAiCatalogError> {
-    parse_published_catalog(DEEPSEEK_CATALOG_JSON, "deepseek", "openai-completions")
-}
-
-/// Loads the exact OpenRouter model set published by pinned Pi.
-pub fn openrouter_models() -> Result<Vec<ModelDescriptor>, OpenAiCatalogError> {
-    parse_published_catalog(OPENROUTER_CATALOG_JSON, "openrouter", "openai-completions")
-}
-
 /// Loads the exact OpenAI Responses model set published by pinned Pi.
 pub fn openai_models() -> Result<Vec<ModelDescriptor>, OpenAiCatalogError> {
-    parse_published_catalog(OPENAI_CATALOG_JSON, "openai", "openai-responses")
+    parse_openai_published_catalog(OPENAI_CATALOG_JSON, "openai", "openai-responses")
 }
 
-/// Loads the exact ChatGPT Codex model set published by pinned Pi.
-pub fn openai_codex_models() -> Result<Vec<ModelDescriptor>, OpenAiCatalogError> {
-    parse_published_catalog(
-        OPENAI_CODEX_CATALOG_JSON,
-        "openai-codex",
-        "openai-codex-responses",
-    )
-}
-
-fn parse_published_catalog(
+/// Parses one OpenAI-compatible family from Pi's generated provider data.
+pub fn parse_openai_published_catalog(
     source: &str,
     expected_provider: &str,
     expected_api: &str,
@@ -132,7 +107,11 @@ fn parse_model(
         common: CommonModelDescriptor {
             model_ref: ModelRef::new(provider, id),
             display_name: string(model, "name")?.to_owned(),
-            base_url: Url::parse(string(model, "baseUrl")?).map_err(|error| {
+            base_url: Url::parse(match string(model, "baseUrl")? {
+                "" if expected_api == "azure-openai-responses" => "https://azure.invalid/openai/v1",
+                value => value,
+            })
+            .map_err(|error| {
                 OpenAiCatalogError::new(format!("invalid base URL for {id}: {error}"))
             })?,
             modalities: ModalityCapabilities { input, output },
@@ -153,7 +132,7 @@ fn parse_model(
                 cache_write_retention: CacheWriteRetentionPricing::default(),
             },
             reasoning: boolean(model, "reasoning")?,
-            headers: HeaderMapSpec::new(),
+            headers: parse_headers(model.get("headers"), id)?,
         },
         api: match expected_api {
             "openai-completions" => {
@@ -173,6 +152,31 @@ fn parse_model(
                     compat: parse_responses_compat(model.get("compat"), id)?,
                     thinking_levels: parse_thinking_levels(model.get("thinkingLevelMap"), id)?,
                     sampling_defaults: Default::default(),
+                })
+            }
+            "azure-openai-responses" => {
+                let config = crate::AzureOpenAiResponsesModelConfig {
+                    responses: OpenAiResponsesModelConfig {
+                        compat: parse_responses_compat(model.get("compat"), id)?,
+                        thinking_levels: parse_thinking_levels(model.get("thinkingLevelMap"), id)?,
+                        sampling_defaults: Default::default(),
+                    },
+                };
+                ApiModelConfig::Custom(CustomApiModelConfig {
+                    api: ApiId::new("azure-openai-responses"),
+                    schema_version: 1,
+                    value: RawValue::from_string(serde_json::to_string(&config).map_err(
+                        |error| {
+                            OpenAiCatalogError::new(format!(
+                                "could not encode Azure config for {id}: {error}"
+                            ))
+                        },
+                    )?)
+                    .map_err(|error| {
+                        OpenAiCatalogError::new(format!(
+                            "could not retain Azure config for {id}: {error}"
+                        ))
+                    })?,
                 })
             }
             _ => {
@@ -265,6 +269,8 @@ fn parse_compat(
                 .then_some(true)
             },
         ),
+        supports_reasoning_effort: optional_bool(compat, "supportsReasoningEffort", model_id)?,
+        supports_usage_in_streaming: optional_bool(compat, "supportsUsageInStreaming", model_id)?,
         requires_reasoning_content_on_assistant_messages: optional_bool(
             compat,
             "requiresReasoningContentOnAssistantMessages",
@@ -290,6 +296,28 @@ fn parse_compat(
                 })
             })
             .transpose()?,
+        chat_template_args: optional_typed::<ChatTemplateValues>(
+            compat,
+            "chatTemplateArgs",
+            model_id,
+        )?,
+        zai_tool_stream: optional_bool(compat, "zaiToolStream", model_id)?,
+        supports_strict_mode: optional_bool(compat, "supportsStrictMode", model_id)?,
+        send_session_affinity_headers: optional_bool(
+            compat,
+            "sendSessionAffinityHeaders",
+            model_id,
+        )?,
+        deferred_tools_mode: optional_typed::<DeferredToolsMode>(
+            compat,
+            "deferredToolsMode",
+            model_id,
+        )?,
+        supports_long_cache_retention: optional_bool(
+            compat,
+            "supportsLongCacheRetention",
+            model_id,
+        )?,
         cache_control_format: compat
             .get("cacheControlFormat")
             .map(|value| {
@@ -306,6 +334,39 @@ fn parse_compat(
             }),
         ..Default::default()
     })
+}
+
+fn optional_typed<T: DeserializeOwned>(
+    object: &Map<String, Value>,
+    name: &str,
+    model_id: &str,
+) -> Result<Option<T>, OpenAiCatalogError> {
+    object
+        .get(name)
+        .map(|value| {
+            serde_json::from_value(value.clone()).map_err(|error| {
+                OpenAiCatalogError::new(format!("invalid {name} for model {model_id}: {error}"))
+            })
+        })
+        .transpose()
+}
+
+fn parse_headers(
+    value: Option<&Value>,
+    model_id: &str,
+) -> Result<HeaderMapSpec, OpenAiCatalogError> {
+    let Some(value) = value else {
+        return Ok(HeaderMapSpec::new());
+    };
+    object(value, "model headers")?
+        .iter()
+        .map(|(name, value)| {
+            let value = value.as_str().ok_or_else(|| {
+                OpenAiCatalogError::new(format!("model {model_id} header {name} is not a string"))
+            })?;
+            Ok((name.clone(), Some(value.to_owned())))
+        })
+        .collect()
 }
 
 fn parse_thinking_levels(

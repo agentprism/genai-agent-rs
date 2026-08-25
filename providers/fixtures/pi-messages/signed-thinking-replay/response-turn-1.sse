@@ -1,0 +1,16 @@
+data: {"type":"start"}
+
+data: {"type":"thinking_start","contentIndex":0}
+
+data: {"type":"thinking_delta","contentIndex":0,"delta":"Inspect the requested fixture."}
+
+data: {"type":"thinking_end","contentIndex":0,"content":"Inspect the requested fixture.","contentSignature":"signed-fixture-reasoning","redacted":false}
+
+data: {"type":"toolcall_start","contentIndex":1,"id":"call_fixture_0001","toolName":"read_file"}
+
+data: {"type":"toolcall_delta","contentIndex":1,"delta":"{\"path\":\"Cargo.toml\"}"}
+
+data: {"type":"toolcall_end","contentIndex":1,"toolCall":{"type":"toolCall","id":"call_fixture_0001","name":"read_file","arguments":{"path":"Cargo.toml"}}}
+
+data: {"type":"done","reason":"toolUse","usage":{"input":12,"output":8,"cacheRead":0,"cacheWrite":0,"totalTokens":20,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"responseId":"pi-fixture-1"}
+

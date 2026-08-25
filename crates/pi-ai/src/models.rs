@@ -26,7 +26,7 @@ use crate::{
     merge_header_map, provider_default_headers, publish_candidate, publish_local_candidate,
     restore_local_persisted_candidate, restore_persisted_candidate,
 };
-use futures_util::future::{Either, select};
+use futures_util::future::{Either, join_all, select};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use indexmap::IndexMap;
 use std::cell::RefCell;
@@ -126,6 +126,105 @@ impl Models {
             })
             .collect::<Vec<_>>();
         Arc::from(models)
+    }
+
+    /// Applies one provider's credential-scoped availability policy without
+    /// changing its complete synchronous catalog.
+    pub fn filter_models(
+        &self,
+        provider_id: &crate::ProviderId,
+        credential: Option<&Credential>,
+    ) -> ModelSnapshot {
+        let Some(provider) = self.provider(provider_id) else {
+            return Arc::from(Vec::new());
+        };
+        let models = provider.catalog.snapshot();
+        Arc::from(provider.filter_models.as_ref().map_or_else(
+            || models.iter().cloned().collect(),
+            |filter| filter(models.as_ref(), credential),
+        ))
+    }
+
+    /// Checks whether one provider has complete authentication configuration
+    /// without refreshing OAuth or issuing a provider request.
+    pub fn check_auth(
+        &self,
+        provider_id: crate::ProviderId,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<Option<crate::AuthCheck>, crate::AuthError>> {
+        Box::pin(async move {
+            cancellation
+                .check()
+                .map_err(|_| crate::AuthError::Cancelled)?;
+            let Some(provider) = self.provider(&provider_id) else {
+                return Ok(None);
+            };
+            let credential = self
+                .inner
+                .credentials
+                .read(provider_id, cancellation.clone())
+                .await
+                .map_err(crate::AuthError::from)?;
+            check_provider_auth(
+                provider.as_ref(),
+                credential,
+                Arc::clone(&self.inner.auth_context),
+                cancellation,
+            )
+            .await
+        })
+    }
+
+    /// Returns models whose providers have complete auth configuration,
+    /// narrowed by any credential-scoped provider policy.
+    pub fn get_available(
+        &self,
+        provider_id: Option<crate::ProviderId>,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<ModelSnapshot, crate::AuthError>> {
+        Box::pin(async move {
+            cancellation
+                .check()
+                .map_err(|_| crate::AuthError::Cancelled)?;
+            let providers = provider_id.map_or_else(
+                || self.providers().iter().cloned().collect::<Vec<_>>(),
+                |id| self.provider(&id).into_iter().collect(),
+            );
+            let checked = join_all(providers.iter().map(|provider| {
+                let cancellation = cancellation.clone();
+                async move {
+                    let credential = self
+                        .inner
+                        .credentials
+                        .read(provider.descriptor.id.clone(), cancellation.clone())
+                        .await
+                        .map_err(crate::AuthError::from)?;
+                    let auth = check_provider_auth(
+                        provider.as_ref(),
+                        credential.clone(),
+                        Arc::clone(&self.inner.auth_context),
+                        cancellation,
+                    )
+                    .await?;
+                    Ok::<_, crate::AuthError>((provider, credential, auth))
+                }
+            }))
+            .await;
+
+            let mut available = Vec::new();
+            for result in checked {
+                let (provider, credential, auth) = result?;
+                if auth.is_none() {
+                    continue;
+                }
+                let models = provider.catalog.snapshot();
+                available.extend(provider.filter_models.as_ref().map_or_else(
+                    || models.iter().cloned().collect(),
+                    |filter| filter(models.as_ref(), credential.as_ref()),
+                ));
+            }
+            Ok(Arc::from(available))
+        })
     }
 
     /// Resolves a model synchronously against the latest provider snapshot.
@@ -862,6 +961,9 @@ impl Models {
                 RequestStartError::new(RequestStartErrorKind::InvalidRequest, error.message)
                     .with_model(request.model.clone())
             })?;
+            implementation
+                .apply_contextual_headers(&model, &request.context, &endpoint, &mut headers)
+                .map_err(AiError::into_request_start)?;
             if let Some(options) = full_options.as_ref()
                 && matches!(
                     &model.api,
@@ -1258,6 +1360,102 @@ impl LocalModels {
                 })
                 .collect::<Vec<_>>(),
         )
+    }
+
+    /// Applies one local provider's credential-scoped availability policy.
+    pub fn filter_models(
+        &self,
+        provider_id: &crate::ProviderId,
+        credential: Option<&Credential>,
+    ) -> LocalModelSnapshot {
+        let Some(provider) = self.provider(provider_id) else {
+            return Rc::from(Vec::new());
+        };
+        let models = provider.catalog.snapshot();
+        Rc::from(provider.filter_models.as_ref().map_or_else(
+            || models.iter().cloned().collect(),
+            |filter| filter(models.as_ref(), credential),
+        ))
+    }
+
+    /// Local configuration-only provider-auth check.
+    pub fn check_auth(
+        &self,
+        provider_id: crate::ProviderId,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<Option<crate::AuthCheck>, crate::AuthError>> {
+        Box::pin(async move {
+            cancellation
+                .check()
+                .map_err(|_| crate::AuthError::Cancelled)?;
+            let Some(provider) = self.provider(&provider_id) else {
+                return Ok(None);
+            };
+            let credential = self
+                .inner
+                .credentials
+                .read(provider_id, cancellation.clone())
+                .await
+                .map_err(crate::AuthError::from)?;
+            check_local_provider_auth(
+                provider.as_ref(),
+                credential,
+                Rc::clone(&self.inner.auth_context),
+                cancellation,
+            )
+            .await
+        })
+    }
+
+    /// Returns locally available models in provider registration order.
+    pub fn get_available(
+        &self,
+        provider_id: Option<crate::ProviderId>,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<LocalModelSnapshot, crate::AuthError>> {
+        Box::pin(async move {
+            cancellation
+                .check()
+                .map_err(|_| crate::AuthError::Cancelled)?;
+            let providers = provider_id.map_or_else(
+                || self.providers().iter().cloned().collect::<Vec<_>>(),
+                |id| self.provider(&id).into_iter().collect(),
+            );
+            let checked = join_all(providers.iter().map(|provider| {
+                let cancellation = cancellation.clone();
+                async move {
+                    let credential = self
+                        .inner
+                        .credentials
+                        .read(provider.descriptor.id.clone(), cancellation.clone())
+                        .await
+                        .map_err(crate::AuthError::from)?;
+                    let auth = check_local_provider_auth(
+                        provider.as_ref(),
+                        credential.clone(),
+                        Rc::clone(&self.inner.auth_context),
+                        cancellation,
+                    )
+                    .await?;
+                    Ok::<_, crate::AuthError>((provider, credential, auth))
+                }
+            }))
+            .await;
+
+            let mut available = Vec::new();
+            for result in checked {
+                let (provider, credential, auth) = result?;
+                if auth.is_none() {
+                    continue;
+                }
+                let models = provider.catalog.snapshot();
+                available.extend(provider.filter_models.as_ref().map_or_else(
+                    || models.iter().cloned().collect(),
+                    |filter| filter(models.as_ref(), credential.as_ref()),
+                ));
+            }
+            Ok(Rc::from(available))
+        })
     }
 
     /// Resolves a model synchronously against the latest local snapshot.
@@ -1967,6 +2165,9 @@ impl LocalModels {
                 RequestStartError::new(RequestStartErrorKind::InvalidRequest, error.message)
                     .with_model(request.model.clone())
             })?;
+            implementation
+                .apply_contextual_headers(&model, &request.context, &endpoint, &mut headers)
+                .map_err(AiError::into_request_start)?;
             if let Some(options) = full_options.as_ref()
                 && matches!(
                     &model.api,
@@ -2293,6 +2494,82 @@ fn has_responses_auth_header_spec(headers: &crate::HeaderMapSpec) -> bool {
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty())
     })
+}
+
+async fn check_provider_auth(
+    provider: &ProviderRegistration,
+    credential: Option<Credential>,
+    auth_context: Arc<dyn AuthContext>,
+    cancellation: CancellationToken,
+) -> Result<Option<crate::AuthCheck>, crate::AuthError> {
+    let credential_type = credential
+        .as_ref()
+        .map_or(crate::CredentialType::ApiKey, Credential::credential_type);
+    let store = Arc::new(InMemoryCredentialStore::default());
+    if let Some(credential) = credential {
+        let mut lease = store
+            .acquire_lease(provider.descriptor.id.clone(), cancellation.clone())
+            .await?;
+        lease.replace(Some(credential));
+        lease.commit().await?;
+    }
+    let auth = await_auth_or_cancelled(
+        provider.auth.resolve(
+            crate::ResolveAuthRequest {
+                provider: provider.descriptor.clone(),
+                model: None,
+                purpose: AuthResolutionPurpose::ConfigurationCheck,
+                credential_store: store,
+                auth_context,
+                overrides: AuthResolutionOverrides::default(),
+            },
+            cancellation.clone(),
+        ),
+        &cancellation,
+    )
+    .await?;
+    Ok(auth.map(|auth| crate::AuthCheck {
+        source: Some(auth.source),
+        credential_type,
+    }))
+}
+
+async fn check_local_provider_auth(
+    provider: &LocalProviderRegistration,
+    credential: Option<Credential>,
+    auth_context: Rc<dyn LocalAuthContext>,
+    cancellation: CancellationToken,
+) -> Result<Option<crate::AuthCheck>, crate::AuthError> {
+    let credential_type = credential
+        .as_ref()
+        .map_or(crate::CredentialType::ApiKey, Credential::credential_type);
+    let store = Rc::new(LocalInMemoryCredentialStore::default());
+    if let Some(credential) = credential {
+        let mut lease = store
+            .acquire_lease(provider.descriptor.id.clone(), cancellation.clone())
+            .await?;
+        lease.replace(Some(credential));
+        lease.commit().await?;
+    }
+    let auth = await_auth_or_cancelled(
+        provider.auth.resolve(
+            crate::LocalResolveAuthRequest {
+                provider: provider.descriptor.clone(),
+                model: None,
+                purpose: AuthResolutionPurpose::ConfigurationCheck,
+                credential_store: store,
+                auth_context,
+                overrides: AuthResolutionOverrides::default(),
+            },
+            cancellation.clone(),
+        ),
+        &cancellation,
+    )
+    .await?;
+    Ok(auth.map(|auth| crate::AuthCheck {
+        source: Some(auth.source),
+        credential_type,
+    }))
 }
 
 async fn await_auth_or_cancelled<T>(

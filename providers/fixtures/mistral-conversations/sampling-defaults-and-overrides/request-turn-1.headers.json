@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "method": "POST",
+  "path": "/v1/chat/completions",
+  "headers": {
+    "accept": "text/event-stream",
+    "authorization": "[REDACTED]",
+    "content-type": "application/json"
+  },
+  "omittedRuntimeHeaders": [
+    "accept-encoding",
+    "connection",
+    "content-length",
+    "host",
+    "user-agent"
+  ]
+}

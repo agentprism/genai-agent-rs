@@ -572,6 +572,10 @@ enum PersistedProviderOAuthExtra {
     GitHubCopilot {
         api_endpoint: url::Url,
         account_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enterprise_url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        available_model_ids: Option<Vec<crate::ModelId>>,
     },
     #[serde(rename = "openai_codex")]
     OpenAiCodex { account_id: String },
@@ -597,9 +601,13 @@ impl PersistedProviderOAuthExtra {
             ProviderOAuthExtra::GitHubCopilot {
                 api_endpoint,
                 account_id,
+                enterprise_url,
+                available_model_ids,
             } => Self::GitHubCopilot {
                 api_endpoint,
                 account_id,
+                enterprise_url,
+                available_model_ids,
             },
             ProviderOAuthExtra::OpenAiCodex { account_id } => Self::OpenAiCodex { account_id },
             ProviderOAuthExtra::Custom {
@@ -627,9 +635,13 @@ impl PersistedProviderOAuthExtra {
             Self::GitHubCopilot {
                 api_endpoint,
                 account_id,
+                enterprise_url,
+                available_model_ids,
             } => ProviderOAuthExtra::GitHubCopilot {
                 api_endpoint: api_endpoint.clone(),
                 account_id: account_id.clone(),
+                enterprise_url: enterprise_url.clone(),
+                available_model_ids: available_model_ids.clone(),
             },
             Self::OpenAiCodex { account_id } => ProviderOAuthExtra::OpenAiCodex {
                 account_id: account_id.clone(),

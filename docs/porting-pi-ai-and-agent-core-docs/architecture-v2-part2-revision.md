@@ -344,6 +344,8 @@ impl AssistantAssembler {
 
 > Correction: Pinned OpenAI Responses initializes a function-call scratch buffer from `response.output_item.added.item.arguments` and replaces it with the authoritative `response.output_item.done.item.arguments`, which need not extend the streamed prefix. The immutable Rust protocol therefore includes `ToolArgumentsReplaced { block_id, arguments }` in addition to `ToolArgumentsDelta`; decoders emit the initial value as a delta and use replacement when the final value is not an append-only extension (`packages/ai/src/api/openai-responses-shared.ts:650–760`).
 
+> Correction: Pinned `pi-messages` treats the complete `toolCall` carried by `toolcall_end` as authoritative and replaces the streamed tool-call `id`, `name`, and `arguments` in place. Because `ToolCallMetadata` establishes stable incremental identity and rejects identity drift, the immutable Rust protocol also includes `ToolCallMetadataReplaced { block_id, call_id, name }` for this terminal provider-authoritative replacement (`packages/ai/src/api/pi-messages.ts`, `toolcall_end`).
+
 Completion validation is strict:
 
 ```rust
@@ -3311,6 +3313,20 @@ pub enum ProviderOAuthExtra {
     },
 }
 ```
+
+> Correction: Pinned Pi's GitHub Copilot OAuth result also carries
+> `availableModelIds`, and `providers/github-copilot.ts` uses that
+> entitlement-derived list to filter the credential-visible catalog. The Rust
+> `GitHubCopilot` variant therefore also carries
+> `available_model_ids: Option<Vec<ModelId>>`; omitting it would make
+> credential-scoped availability lossy.
+
+> Correction: Pinned Pi persists GitHub Copilot's normalized enterprise domain
+> as a distinct `enterpriseUrl` field and uses it during both refresh and
+> request-auth conversion. It is not account identity. The Rust
+> `GitHubCopilot` variant therefore also carries
+> `enterprise_url: Option<String>` independently of `account_id`, and the
+> credential writer preserves it (`packages/ai/src/auth/oauth/github-copilot.ts:341–347,487–505`).
 
 At the persistence boundary, unknown provider extras still round-trip through `Custom`.
 

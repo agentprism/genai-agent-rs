@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "method": "POST",
+  "path": "/v1/chat/completions",
+  "headers": {
+    "accept": "text/event-stream",
+    "authorization": "[REDACTED]",
+    "content-type": "application/json",
+    "x-fixture-model": "model-value",
+    "x-fixture-request": "request-value"
+  },
+  "omittedRuntimeHeaders": [
+    "accept-encoding",
+    "connection",
+    "content-length",
+    "host",
+    "user-agent"
+  ]
+}

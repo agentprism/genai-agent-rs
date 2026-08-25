@@ -5,6 +5,9 @@ import { pathToFileURL } from "node:url";
 
 const PINNED_COMMIT = "c49906ec77788625aacbdc53ebca6fbe65bd20f5";
 const FIXTURE_TIMESTAMP = 1_700_000_000_000;
+// Provider decoders allocate assistant timestamps internally. Pin Date.now so
+// turn-two bodies are reproducible as well as the canonical input corpus.
+Date.now = () => FIXTURE_TIMESTAMP;
 const FIXTURE_SESSION_ID = "session-m4-00000000";
 const FIXTURE_API_KEY = "fixture-api-key-never-forwarded";
 const FIXTURE_CODEX_API_KEY =
@@ -35,9 +38,12 @@ type Family =
 	| "anthropic-messages"
 	| "bedrock-converse-stream"
 	| "openai-responses"
+	| "azure-openai-responses"
 	| "openai-codex-responses"
 	| "google-generative-ai"
-	| "google-vertex";
+	| "google-vertex"
+	| "mistral-conversations"
+	| "pi-messages";
 type ResponseKind = "text" | "tool" | "multiple-tools" | "signed-reasoning" | "redacted-reasoning";
 type CaptureMode = "hermetic" | "credential-backed";
 
@@ -88,7 +94,8 @@ interface CredentialCaptureResult {
 }
 
 function isOpenAiFamily(family: Family): boolean {
-	return family === "openai-completions" || family === "openai-responses" || family === "openai-codex-responses";
+	return family === "openai-completions" || family === "openai-responses" ||
+		family === "azure-openai-responses" || family === "openai-codex-responses";
 }
 
 function isGoogleFamily(family: Family): boolean {
@@ -96,7 +103,8 @@ function isGoogleFamily(family: Family): boolean {
 }
 
 function isResponsesFamily(family: Family): boolean {
-	return family === "openai-responses" || family === "openai-codex-responses";
+	return family === "openai-responses" || family === "azure-openai-responses" ||
+		family === "openai-codex-responses";
 }
 
 function isBedrockFamily(family: Family): boolean {
@@ -435,6 +443,8 @@ function modelFor(family: Family, baseUrl: string, patch: Record<string, unknown
 	const codex = family === "openai-codex-responses";
 	const google = isGoogleFamily(family);
 	const bedrock = isBedrockFamily(family);
+	const mistral = family === "mistral-conversations";
+	const piMessages = family === "pi-messages";
 	const base: Record<string, unknown> = {
 		id: bedrock
 			? "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
@@ -442,6 +452,10 @@ function modelFor(family: Family, baseUrl: string, patch: Record<string, unknown
 			? "fixture-codex-model"
 			: google
 				? "gemini-3-fixture"
+			: mistral
+				? "fixture-mistral-model"
+				: piMessages
+					? "fixture-pi-model"
 			: openAi
 				? "fixture-openai-model"
 				: "fixture-anthropic-model",
@@ -451,6 +465,10 @@ function modelFor(family: Family, baseUrl: string, patch: Record<string, unknown
 			? "Fixture Codex Model"
 			: google
 				? "Fixture Google Model"
+				: mistral
+					? "Fixture Mistral Model"
+					: piMessages
+						? "Fixture Pi Messages Model"
 				: openAi
 					? "Fixture OpenAI Model"
 					: "Fixture Anthropic Model",
@@ -463,6 +481,12 @@ function modelFor(family: Family, baseUrl: string, patch: Record<string, unknown
 				? "fixture-google"
 				: family === "google-vertex"
 					? "fixture-google-vertex"
+					: family === "azure-openai-responses"
+						? "azure-openai-responses"
+						: mistral
+							? "mistral"
+							: piMessages
+								? "radius"
 					: openAi
 						? "fixture-openai"
 						: "fixture-anthropic",
@@ -856,7 +880,7 @@ function anthropicFrames(kind: ResponseKind, model: string, turn: number): strin
 }
 
 function responsesFrames(
-	family: "openai-responses" | "openai-codex-responses",
+	family: "openai-responses" | "azure-openai-responses" | "openai-codex-responses",
 	kind: ResponseKind,
 	model: string,
 	turn: number,
@@ -977,6 +1001,95 @@ function responsesFrames(
 				output_tokens_details: { reasoning_tokens: kind.includes("reasoning") ? 3 : 0 },
 			},
 		},
+	});
+	return events.map((value) => `data: ${JSON.stringify(value)}\n\n`).join("");
+}
+
+function mistralFrames(kind: ResponseKind, model: string, turn: number): string {
+	const chunks: Record<string, unknown>[] = [];
+	if (kind === "text") {
+		chunks.push({
+			id: `mistral-fixture-${turn}`,
+			model,
+			choices: [{ delta: { content: `fixture response turn ${turn}` }, finish_reason: "stop" }],
+		});
+	} else {
+		const content = kind.includes("reasoning")
+			? [{ type: "thinking", thinking: [{ type: "text", text: "Inspect the requested fixture." }] }]
+			: undefined;
+		const paths = kind === "multiple-tools" ? ["Cargo.toml", "README.md"] : ["Cargo.toml"];
+		chunks.push({
+			id: `mistral-fixture-${turn}`,
+			model,
+			choices: [{
+				delta: {
+					content,
+					tool_calls: paths.map((path, index) => ({
+						id: index === 0 ? TOOL_CALL_1 : TOOL_CALL_2,
+						index,
+						function: { name: "read_file", arguments: JSON.stringify({ path }) },
+					})),
+				},
+				finish_reason: "tool_calls",
+			}],
+		});
+	}
+	chunks.push({
+		id: `mistral-fixture-${turn}`,
+		model,
+		choices: [],
+		usage: { prompt_tokens: 12, completion_tokens: 8, total_tokens: 20 },
+	});
+	return `${chunks.map((value) => `data: ${JSON.stringify(value)}\n\n`).join("")}data: [DONE]\n\n`;
+}
+
+function piMessagesFrames(kind: ResponseKind, turn: number): string {
+	const events: Record<string, unknown>[] = [{ type: "start" }];
+	let index = 0;
+	if (kind === "text") {
+		events.push(
+			{ type: "text_start", contentIndex: index },
+			{ type: "text_delta", contentIndex: index, delta: `fixture response turn ${turn}` },
+			{ type: "text_end", contentIndex: index, content: `fixture response turn ${turn}` },
+		);
+	} else {
+		if (kind.includes("reasoning")) {
+			events.push(
+				{ type: "thinking_start", contentIndex: index },
+				{ type: "thinking_delta", contentIndex: index, delta: "Inspect the requested fixture." },
+				{
+					type: "thinking_end",
+					contentIndex: index,
+					content: "Inspect the requested fixture.",
+					contentSignature: kind === "signed-reasoning" ? "signed-fixture-reasoning" : "encrypted-fixture-reasoning",
+					redacted: kind === "redacted-reasoning",
+				},
+			);
+			index += 1;
+		}
+		const paths = kind === "multiple-tools" ? ["Cargo.toml", "README.md"] : ["Cargo.toml"];
+		for (const [offset, path] of paths.entries()) {
+			const id = offset === 0 ? TOOL_CALL_1 : TOOL_CALL_2;
+			const argumentsJson = JSON.stringify({ path });
+			events.push(
+				{ type: "toolcall_start", contentIndex: index + offset, id, toolName: "read_file" },
+				{ type: "toolcall_delta", contentIndex: index + offset, delta: argumentsJson },
+				{ type: "toolcall_end", contentIndex: index + offset, toolCall: { type: "toolCall", id, name: "read_file", arguments: { path } } },
+			);
+		}
+	}
+	events.push({
+		type: "done",
+		reason: kind === "text" ? "stop" : "toolUse",
+		usage: {
+			input: 12,
+			output: 8,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 20,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		responseId: `pi-fixture-${turn}`,
 	});
 	return events.map((value) => `data: ${JSON.stringify(value)}\n\n`).join("");
 }
@@ -1150,6 +1263,8 @@ function responseFrames(family: Family, kind: ResponseKind, model: string, turn:
 	if (family === "anthropic-messages") return anthropicFrames(kind, model, turn);
 	if (family === "bedrock-converse-stream") return bedrockFrames(kind, turn);
 	if (isGoogleFamily(family)) return googleFrames(kind, model, turn);
+	if (family === "mistral-conversations") return mistralFrames(kind, model, turn);
+	if (family === "pi-messages") return piMessagesFrames(kind, turn);
 	return responsesFrames(family, kind, model, turn);
 }
 
@@ -1364,6 +1479,30 @@ function assertRetainedTurnTwoLowering(
 	if (!fixture.simple) return;
 	const turnOne = parseRequestBody(requestOne);
 	const turnTwo = parseRequestBody(requestTwo);
+	if (family === "pi-messages") {
+		const one = turnOne.options as Record<string, unknown> | undefined;
+		const two = turnTwo.options as Record<string, unknown> | undefined;
+		for (const field of ["maxTokens", "temperature", "reasoning", "cacheRetention", "sessionId", "toolChoice"]) {
+			if (Object.hasOwn(one ?? {}, field) && JSON.stringify(one?.[field]) !== JSON.stringify(two?.[field])) {
+				throw new Error(`${family}/${fixture.name} lost ${field} lowering on turn two`);
+			}
+		}
+		return;
+	}
+	if (family === "mistral-conversations") {
+		for (const field of ["max_tokens", "temperature", "prompt_mode", "reasoning_effort", "prompt_cache_key"]) {
+			if (!Object.hasOwn(turnOne, field)) continue;
+			if (fixture.name === "max-output-clamp" && field === "max_tokens") {
+				const requested = fixture.options?.maxTokens;
+				if (typeof requested !== "number" || Number(turnOne[field]) >= requested || Number(turnTwo[field]) >= requested) {
+					throw new Error(`${family}/${fixture.name} bypassed streamSimple max-output clamping on turn two`);
+				}
+			} else {
+				assertSameJsonField(family, fixture, turnOne, turnTwo, field);
+			}
+		}
+		return;
+	}
 	if (family === "bedrock-converse-stream") {
 		const one = turnOne.inferenceConfig as Record<string, unknown> | undefined;
 		const two = turnTwo.inferenceConfig as Record<string, unknown> | undefined;
@@ -1391,7 +1530,7 @@ function assertRetainedTurnTwoLowering(
 		? "max_tokens"
 		: isGoogleFamily(family)
 			? "generationConfig"
-		: family === "openai-responses"
+		: family === "openai-responses" || family === "azure-openai-responses"
 			? "max_output_tokens"
 			: Object.hasOwn(turnOne, "max_tokens")
 				? "max_tokens"
@@ -1526,6 +1665,8 @@ async function captureCase(
 		const localBasePath = credentialTarget?.upstream.localBasePath ??
 			(family === "openai-codex-responses"
 				? ""
+				: family === "azure-openai-responses" || family === "mistral-conversations" || family === "pi-messages"
+					? ""
 				: family === "bedrock-converse-stream"
 					? ""
 				: family === "google-generative-ai"
@@ -1549,6 +1690,7 @@ async function captureCase(
 		const fixtureHeaders = fixture.options?.headers as Record<string, string> | undefined;
 		const options = {
 			...fixture.options,
+			...(family === "azure-openai-responses" ? { azureBaseUrl: baseUrl } : {}),
 			...(fixtureHeaders || credentialTarget?.optionHeaders
 				? { headers: { ...credentialTarget?.optionHeaders, ...fixtureHeaders } }
 				: {}),
@@ -1713,6 +1855,9 @@ async function main(): Promise<void> {
 	const openAiResponsesModule = await import(
 		`${pathToFileURL(join(workRoot, "src", "api", "openai-responses.ts")).href}?pin=${PINNED_COMMIT}`
 	);
+	const azureOpenAiResponsesModule = await import(
+		`${pathToFileURL(join(workRoot, "src", "api", "azure-openai-responses.ts")).href}?pin=${PINNED_COMMIT}`
+	);
 	const openAiCodexResponsesModule = await import(
 		`${pathToFileURL(join(workRoot, "src", "api", "openai-codex-responses.ts")).href}?pin=${PINNED_COMMIT}`
 	);
@@ -1721,6 +1866,12 @@ async function main(): Promise<void> {
 	);
 	const googleVertexModule = await import(
 		`${pathToFileURL(join(workRoot, "src", "api", "google-vertex.ts")).href}?pin=${PINNED_COMMIT}`
+	);
+	const mistralConversationsModule = await import(
+		`${pathToFileURL(join(workRoot, "src", "api", "mistral-conversations.ts")).href}?pin=${PINNED_COMMIT}`
+	);
+	const piMessagesModule = await import(
+		`${pathToFileURL(join(workRoot, "src", "api", "pi-messages.ts")).href}?pin=${PINNED_COMMIT}`
 	);
 	const families: Array<{
 		family: Family;
@@ -1753,6 +1904,12 @@ async function main(): Promise<void> {
 			module: openAiResponsesModule,
 		},
 		{
+			family: "azure-openai-responses",
+			provider: "azure-openai-responses",
+			model: "fixture-openai-model",
+			module: azureOpenAiResponsesModule,
+		},
+		{
 			family: "openai-codex-responses",
 			provider: "openai-codex",
 			model: "fixture-codex-model",
@@ -1769,6 +1926,18 @@ async function main(): Promise<void> {
 			provider: "fixture-google-vertex",
 			model: "gemini-3-fixture",
 			module: googleVertexModule,
+		},
+		{
+			family: "mistral-conversations",
+			provider: "mistral",
+			model: "fixture-mistral-model",
+			module: mistralConversationsModule,
+		},
+		{
+			family: "pi-messages",
+			provider: "radius",
+			model: "fixture-pi-model",
+			module: piMessagesModule,
 		},
 	];
 

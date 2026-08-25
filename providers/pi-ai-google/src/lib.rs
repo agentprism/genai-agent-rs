@@ -1,4 +1,4 @@
-//! Google Gemini Developer API and Vertex provider leaves for `pi-ai`.
+//! Shared Google API-family implementations and the Gemini provider leaf.
 
 #![deny(missing_docs)]
 

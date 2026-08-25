@@ -33,6 +33,12 @@ pub fn trim_ecmascript(value: &str) -> &str {
     value.trim_matches(is_ecmascript_whitespace)
 }
 
+/// Trims the same leading characters as ECMAScript
+/// `String.prototype.trimStart()`.
+pub fn trim_start_ecmascript(value: &str) -> &str {
+    value.trim_start_matches(is_ecmascript_whitespace)
+}
+
 /// Replacement used when secret-bearing error data reaches a public boundary.
 const REDACTED: &str = "[REDACTED]";
 

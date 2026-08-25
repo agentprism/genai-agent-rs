@@ -1,0 +1,10 @@
+data: {"type":"response.created","response":{"id":"resp_fixture_1","model":"fixture-openai-model","status":"in_progress","output":[]}}
+
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","role":"assistant","content":[],"status":"in_progress","id":"msg_fixture_1","phase":"final_answer"}}
+
+data: {"type":"response.output_text.delta","output_index":0,"delta":"fixture response turn 1"}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fixture response turn 1","annotations":[]}],"status":"completed","id":"msg_fixture_1","phase":"final_answer"}}
+
+data: {"type":"response.completed","response":{"id":"resp_fixture_1","model":"fixture-openai-model","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fixture response turn 1","annotations":[]}],"status":"completed","id":"msg_fixture_1","phase":"final_answer"}],"usage":{"input_tokens":12,"output_tokens":8,"total_tokens":20,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}}
+

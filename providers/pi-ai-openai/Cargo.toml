@@ -9,7 +9,6 @@ description = "OpenAI-compatible Chat Completions API-family implementation for 
 publish = false
 
 [dependencies]
-base64 = "0.22.1"
 futures-util = "0.3.31"
 futures-timer = { version = "3.0.3", features = ["wasm-bindgen"] }
 http = "1.3.1"
@@ -20,4 +19,8 @@ url = { version = "2.5.7", features = ["serde"] }
 zstd = "0.13.3"
 
 [dev-dependencies]
+base64 = "0.22.1"
 futures-executor = "0.3.31"
+pi-ai-deepseek = { path = "../pi-ai-deepseek" }
+pi-ai-openai-codex = { path = "../pi-ai-openai-codex" }
+pi-ai-openrouter = { path = "../pi-ai-openrouter" }

@@ -388,6 +388,7 @@ impl HttpTransport for PendingErrorBodyTransport {
                 headers: HeaderMap::new(),
                 diagnostics: Vec::new(),
                 notify_observers: true,
+                decode_non_success: false,
                 body: Box::pin(futures_util::stream::pending()),
             })
         })
@@ -408,6 +409,7 @@ impl LocalHttpTransport for LocalPendingErrorBodyTransport {
                 headers: HeaderMap::new(),
                 diagnostics: Vec::new(),
                 notify_observers: true,
+                decode_non_success: false,
                 body: Box::pin(futures_util::stream::pending()),
             })
         })
@@ -2253,6 +2255,7 @@ fn models_provider_registration_is_atomic() {
         descriptor: ProviderDescriptor::new("test-provider"),
         auth: Arc::new(AnonymousAuthResolver),
         catalog: Arc::new(StaticModelCatalog::new(vec![model()])),
+        filter_models: None,
         apis: std::collections::HashMap::new(),
         retry_policy: RetryPolicy::default(),
         retry_classifier: Arc::new(classifier()),

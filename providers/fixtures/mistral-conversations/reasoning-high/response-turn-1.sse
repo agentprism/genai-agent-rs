@@ -1,0 +1,6 @@
+data: {"id":"mistral-fixture-1","model":"fixture-mistral-model","choices":[{"delta":{"content":"fixture response turn 1"},"finish_reason":"stop"}]}
+
+data: {"id":"mistral-fixture-1","model":"fixture-mistral-model","choices":[],"usage":{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20}}
+
+data: [DONE]
+

@@ -1792,7 +1792,7 @@ impl ToolCallIdPolicy for OpenAiResponsesHandoff {
     ) -> Result<ToolCallId, HandoffError> {
         let allowed = matches!(
             target.provider.as_str(),
-            "openai" | "openai-codex" | "opencode"
+            "openai" | "openai-codex" | "opencode" | "azure-openai-responses"
         );
         let value = original.as_str();
         if !allowed {

@@ -117,6 +117,13 @@ pub enum ProviderOAuthExtra {
         api_endpoint: Url,
         /// Optional account identifier.
         account_id: Option<String>,
+        /// Optional GitHub Enterprise domain used for token refresh and
+        /// request endpoint derivation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enterprise_url: Option<String>,
+        /// Model identifiers returned by the Copilot entitlement endpoint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        available_model_ids: Option<Vec<crate::ModelId>>,
     },
     /// OpenAI Codex account identity.
     OpenAiCodex {
@@ -152,12 +159,21 @@ impl PartialEq for ProviderOAuthExtra {
                 Self::GitHubCopilot {
                     api_endpoint: left_endpoint,
                     account_id: left_account,
+                    enterprise_url: left_enterprise,
+                    available_model_ids: left_models,
                 },
                 Self::GitHubCopilot {
                     api_endpoint: right_endpoint,
                     account_id: right_account,
+                    enterprise_url: right_enterprise,
+                    available_model_ids: right_models,
                 },
-            ) => left_endpoint == right_endpoint && left_account == right_account,
+            ) => {
+                left_endpoint == right_endpoint
+                    && left_account == right_account
+                    && left_enterprise == right_enterprise
+                    && left_models == right_models
+            }
             (
                 Self::OpenAiCodex {
                     account_id: left_account,
@@ -1753,6 +1769,9 @@ impl ProviderAuthResolver {
         let Some(oauth) = &self.oauth else {
             return Ok(None);
         };
+        if request.purpose == AuthResolutionPurpose::ConfigurationCheck {
+            return Ok(Some(configuration_only_oauth()));
+        }
         const DEFAULT_VALIDITY: Duration = Duration::from_secs(5 * 60);
         let (requested, minimum) = match request.purpose {
             AuthResolutionPurpose::Request => {
@@ -1763,6 +1782,9 @@ impl ProviderAuthResolver {
                 )
             }
             AuthResolutionPurpose::CatalogRefresh => (None, Duration::ZERO),
+            AuthResolutionPurpose::ConfigurationCheck => {
+                unreachable!("configuration-only OAuth resolution returns before refresh planning")
+            }
         };
         let expires_soon = |credential: &OAuthCredential| {
             let minimum_millis = i64::try_from(minimum.as_millis()).unwrap_or(i64::MAX);
@@ -1791,6 +1813,9 @@ impl ProviderAuthResolver {
                     }
                     AuthResolutionPurpose::CatalogRefresh => {
                         oauth.refresh(current, cancellation.clone()).await
+                    }
+                    AuthResolutionPurpose::ConfigurationCheck => {
+                        unreachable!("configuration-only OAuth resolution never refreshes")
                     }
                 };
                 let refreshed = match refresh {
@@ -1860,6 +1885,16 @@ async fn refresh_oauth_with_timeout(
             refresh_cancellation.cancel();
             Err(AuthError::Cancelled)
         }
+    }
+}
+
+fn configuration_only_oauth() -> ResolvedAuth {
+    ResolvedAuth {
+        api_key: None,
+        headers: HeaderMap::new(),
+        transport_headers: HeaderMap::new(),
+        base_url: None,
+        source: AuthSource::new("OAuth"),
     }
 }
 
@@ -2066,6 +2101,9 @@ impl LocalProviderAuthResolver {
         let Some(oauth) = &self.oauth else {
             return Ok(None);
         };
+        if request.purpose == AuthResolutionPurpose::ConfigurationCheck {
+            return Ok(Some(configuration_only_oauth()));
+        }
         const DEFAULT_VALIDITY: Duration = Duration::from_secs(5 * 60);
         let (requested, minimum) = match request.purpose {
             AuthResolutionPurpose::Request => {
@@ -2076,6 +2114,9 @@ impl LocalProviderAuthResolver {
                 )
             }
             AuthResolutionPurpose::CatalogRefresh => (None, Duration::ZERO),
+            AuthResolutionPurpose::ConfigurationCheck => {
+                unreachable!("configuration-only OAuth resolution returns before refresh planning")
+            }
         };
         let expires_soon = |credential: &OAuthCredential| {
             let minimum_millis = i64::try_from(minimum.as_millis()).unwrap_or(i64::MAX);
@@ -2108,6 +2149,9 @@ impl LocalProviderAuthResolver {
                     }
                     AuthResolutionPurpose::CatalogRefresh => {
                         oauth.refresh(current, cancellation.clone()).await
+                    }
+                    AuthResolutionPurpose::ConfigurationCheck => {
+                        unreachable!("configuration-only OAuth resolution never refreshes")
                     }
                 };
                 let refreshed = match refresh {

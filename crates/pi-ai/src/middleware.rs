@@ -84,6 +84,11 @@ pub struct HttpResponse {
     /// Whether this response represents an HTTP exchange visible to response
     /// observers. Synthetic WebSocket adapters set this to `false`.
     pub notify_observers: bool,
+    /// Whether an API-family adapter must decode a non-success response as an
+    /// established semantic stream after response observers have run. Raw
+    /// transports leave this `false`; adapters such as pi-messages use it to
+    /// preserve provider-specific in-band failure messages.
+    pub decode_non_success: bool,
     /// Unconsumed response body.
     pub body: HttpBody,
 }
@@ -96,6 +101,7 @@ impl HttpResponse {
             headers,
             diagnostics: Vec::new(),
             notify_observers: true,
+            decode_non_success: false,
             body: Box::pin(futures_util::stream::once(async move { Ok(body) })),
         }
     }
@@ -107,6 +113,7 @@ impl HttpResponse {
             headers,
             diagnostics: Vec::new(),
             notify_observers: true,
+            decode_non_success: false,
             body: Box::pin(futures_util::stream::empty()),
         }
     }
@@ -120,6 +127,7 @@ impl fmt::Debug for HttpResponse {
             .field("headers", &"<redacted headers>")
             .field("diagnostics", &self.diagnostics)
             .field("notify_observers", &self.notify_observers)
+            .field("decode_non_success", &self.decode_non_success)
             .field("body", &"<stream>")
             .finish()
     }
@@ -137,6 +145,8 @@ pub struct LocalHttpResponse {
     /// Whether this response represents an HTTP exchange visible to local
     /// response observers. Synthetic WebSocket adapters set this to `false`.
     pub notify_observers: bool,
+    /// Local counterpart to [`HttpResponse::decode_non_success`].
+    pub decode_non_success: bool,
     /// Unconsumed local response body.
     pub body: LocalHttpBody,
 }
@@ -149,6 +159,7 @@ impl LocalHttpResponse {
             headers,
             diagnostics: Vec::new(),
             notify_observers: true,
+            decode_non_success: false,
             body: Box::pin(futures_util::stream::once(async move { Ok(body) })),
         }
     }
@@ -160,6 +171,7 @@ impl LocalHttpResponse {
             headers,
             diagnostics: Vec::new(),
             notify_observers: true,
+            decode_non_success: false,
             body: Box::pin(futures_util::stream::empty()),
         }
     }
@@ -173,6 +185,7 @@ impl fmt::Debug for LocalHttpResponse {
             .field("headers", &"<redacted headers>")
             .field("diagnostics", &self.diagnostics)
             .field("notify_observers", &self.notify_observers)
+            .field("decode_non_success", &self.decode_non_success)
             .field("body", &"<local stream>")
             .finish()
     }

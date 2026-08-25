@@ -1,0 +1,1 @@
+{"model":"fixture-pi-model","context":{"messages":[{"role":"user","content":"Return a concise fixture response.","timestamp":1700000000000}]},"options":{"maxTokens":4096,"reasoning":"high"}}

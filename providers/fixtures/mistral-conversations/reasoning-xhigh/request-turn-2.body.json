@@ -1,0 +1,1 @@
+{"model":"fixture-mistral-model","stream":true,"messages":[{"role":"user","content":"Return a concise fixture response."},{"role":"assistant","prefix":false,"content":[{"type":"text","text":"fixture response turn 1"}]},{"role":"user","content":"Deterministic turn-two follow-up."}],"max_tokens":4096,"prompt_mode":"reasoning"}

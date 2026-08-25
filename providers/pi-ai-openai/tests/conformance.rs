@@ -33,12 +33,14 @@ use pi_ai::{
     import_legacy_openai_chat_tool_signatures, openai_grammar_tool_input_properties,
     parse_ordered_json, resolve_openai_completions_compat, transform_context_for_model,
 };
+use pi_ai_deepseek::{deepseek_models, deepseek_provider_with_api};
 use pi_ai_openai::{
-    LocalOpenRouterOAuth, OpenAiCompletionsDecodeContext, OpenRouterOAuth,
-    decode_openai_completions_sse, deepseek_models, deepseek_provider_with_api,
-    local_openai_completions_api, local_openai_provider, local_openai_responses_api,
-    openai_completions_api, openai_provider, openai_responses_api, openrouter_models,
-    openrouter_provider_with_api,
+    OpenAiCompletionsDecodeContext, decode_openai_completions_sse, local_openai_completions_api,
+    local_openai_provider, local_openai_responses_api, openai_completions_api, openai_provider,
+    openai_responses_api,
+};
+use pi_ai_openrouter::{
+    LocalOpenRouterOAuth, OpenRouterOAuth, openrouter_models, openrouter_provider_with_api,
 };
 use serde_json::Value;
 use std::cell::{Cell, RefCell};
@@ -1252,6 +1254,7 @@ fn stream_failure_is_terminal_message() {
         headers: HeaderMap::new(),
         diagnostics: Vec::new(),
         notify_observers: true,
+        decode_non_success: false,
         body: Box::pin(stream::iter(vec![
             Ok(partial_text_sse()),
             Err(TransportError::new("body", "body disconnected")),
@@ -1287,6 +1290,7 @@ fn stream_cancellation_is_terminal_message() {
         headers: HeaderMap::new(),
         diagnostics: Vec::new(),
         notify_observers: true,
+        decode_non_success: false,
         body: Box::pin(stream::iter(vec![
             Ok(partial_text_sse()),
             Ok(br#"data: {"id":"chat-1","model":"fixture-openai-model","choices":[{"delta":{"content":" ignored"},"finish_reason":"stop"}]}
@@ -1336,6 +1340,7 @@ fn openai_local_stream_body_error_preserves_partial_content() {
         headers: HeaderMap::new(),
         diagnostics: Vec::new(),
         notify_observers: true,
+        decode_non_success: false,
         body: Box::pin(stream::iter(vec![
             Ok(partial_text_sse()),
             Err(TransportError::new("body", "local body disconnected")),

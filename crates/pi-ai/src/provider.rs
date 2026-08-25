@@ -35,7 +35,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use url::Url;
 
-const MAX_PROVIDER_ERROR_BODY_BYTES: usize = 64 * 1024;
+/// Maximum bytes retained while normalizing a provider failure body.
+pub const MAX_PROVIDER_ERROR_BODY_BYTES: usize = 64 * 1024;
 
 /// Public provider identity and logical request defaults.
 #[derive(Clone, Eq, PartialEq)]
@@ -135,6 +136,8 @@ pub enum AuthResolutionPurpose {
     Request,
     /// Credential resolution for a dynamic catalog network refresh.
     CatalogRefresh,
+    /// Network-free configuration inspection for [`crate::Models::check_auth`].
+    ConfigurationCheck,
 }
 
 /// Owned context passed to provider authentication resolution.
@@ -200,6 +203,15 @@ pub struct LocalResolveAuthRequest {
     pub auth_context: Rc<dyn crate::LocalAuthContext>,
     /// Explicit per-request values and OAuth validity requirement.
     pub overrides: crate::AuthResolutionOverrides,
+}
+
+/// Non-secret result of checking whether provider auth is configured.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthCheck {
+    /// Human-readable source label for account/status UI.
+    pub source: Option<AuthSource>,
+    /// Configured credential category.
+    pub credential_type: crate::CredentialType,
 }
 
 impl LocalResolveAuthRequest {
@@ -621,6 +633,9 @@ pub struct ApiExecutionContext<'a> {
     pub cancellation: &'a CancellationToken,
     /// Resolved API key for SDK-style handlers that cannot consume a header.
     pub api_key: Option<&'a SecretString>,
+    /// Common transport controls, including logical header deletion markers
+    /// that are intentionally absent from the finalized [`HeaderMap`].
+    pub request_options: &'a ApiRequestOptions,
     /// Original call options, unaffected by payload middleware.
     pub call_options: ApiCallOptions<'a>,
 }
@@ -777,6 +792,18 @@ pub trait ChatApi: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Adds provider-contextual headers after the model header overlay and
+    /// before explicit request headers and the final header transforms.
+    fn apply_contextual_headers(
+        &self,
+        _model: &ModelDescriptor,
+        _context: &Context,
+        _effective_base_url: &Url,
+        _headers: &mut HeaderMap,
+    ) -> Result<(), AiError> {
+        Ok(())
+    }
+
     /// Establishes a normalized assistant stream.
     fn stream(
         &self,
@@ -838,6 +865,7 @@ impl HttpChatApi {
             transport: self.transport.as_ref(),
             cancellation: &cancellation,
             api_key: request.api_key.as_ref(),
+            request_options: &request.request_options,
             call_options: request.full_options.as_ref().map_or(
                 ApiCallOptions::Simple(&request.options),
                 ApiCallOptions::Full,
@@ -980,7 +1008,7 @@ impl HttpChatApi {
                                 .map_err(|source| AttemptFailure::Middleware { attempt, source })?;
                         }
                     }
-                    if !(200..300).contains(&response.status) {
+                    if !(200..300).contains(&response.status) && !response.decode_non_success {
                         retry_diagnostics
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1032,6 +1060,7 @@ impl HttpChatApi {
             transport: self.transport.as_ref(),
             cancellation: &cancellation,
             api_key: request.api_key.as_ref(),
+            request_options: &request.request_options,
             call_options: request.full_options.as_ref().map_or(
                 ApiCallOptions::Simple(&request.options),
                 ApiCallOptions::Full,
@@ -1140,6 +1169,9 @@ pub struct LocalApiExecutionContext<'a> {
     pub cancellation: &'a CancellationToken,
     /// Resolved API key for SDK-style handlers.
     pub api_key: Option<&'a SecretString>,
+    /// Common transport controls, including logical header deletion markers
+    /// that are intentionally absent from the finalized [`HeaderMap`].
+    pub request_options: &'a ApiRequestOptions,
     /// Original call options, unaffected by payload middleware.
     pub call_options: ApiCallOptions<'a>,
 }
@@ -1249,6 +1281,18 @@ pub trait LocalChatApi: 'static {
         Ok(())
     }
 
+    /// Adds provider-contextual local headers after the model header overlay
+    /// and before explicit request headers and final header transforms.
+    fn apply_contextual_headers(
+        &self,
+        _model: &ModelDescriptor,
+        _context: &Context,
+        _effective_base_url: &Url,
+        _headers: &mut HeaderMap,
+    ) -> Result<(), AiError> {
+        Ok(())
+    }
+
     /// Establishes a normalized local assistant stream.
     fn stream(
         &self,
@@ -1312,6 +1356,7 @@ impl LocalHttpChatApi {
             transport: self.transport.as_ref(),
             cancellation: &cancellation,
             api_key: request.api_key.as_ref(),
+            request_options: &request.request_options,
             call_options: request.full_options.as_ref().map_or(
                 ApiCallOptions::Simple(&request.options),
                 ApiCallOptions::Full,
@@ -1452,7 +1497,7 @@ impl LocalHttpChatApi {
                                 .map_err(|source| AttemptFailure::Middleware { attempt, source })?;
                         }
                     }
-                    if !(200..300).contains(&response.status) {
+                    if !(200..300).contains(&response.status) && !response.decode_non_success {
                         retry_diagnostics
                             .borrow_mut()
                             .extend(std::mem::take(&mut response.diagnostics));
@@ -1512,6 +1557,7 @@ impl LocalHttpChatApi {
             transport: self.transport.as_ref(),
             cancellation: &cancellation,
             api_key: request.api_key.as_ref(),
+            request_options: &request.request_options,
             call_options: request.full_options.as_ref().map_or(
                 ApiCallOptions::Simple(&request.options),
                 ApiCallOptions::Full,
@@ -1596,6 +1642,7 @@ async fn local_http_failure(
         headers,
         diagnostics: _,
         notify_observers: _,
+        decode_non_success: _,
         mut body,
     } = response;
     let bytes = match read_provider_failure_body(&mut body, cancellation).await {
@@ -1654,6 +1701,7 @@ async fn send_http_failure(
         headers,
         diagnostics: _,
         notify_observers: _,
+        decode_non_success: _,
         mut body,
     } = response;
     let bytes = match read_provider_failure_body(&mut body, cancellation).await {
@@ -1850,6 +1898,16 @@ fn sensitive_header_name(name: &str) -> bool {
     )
 }
 
+/// Credential-scoped model filter used by provider registrations.
+pub type ModelAvailabilityFilter = dyn Fn(&[ModelDescriptor], Option<&crate::Credential>) -> Vec<ModelDescriptor>
+    + Send
+    + Sync
+    + 'static;
+
+/// Local-executor credential-scoped model filter.
+pub type LocalModelAvailabilityFilter =
+    dyn Fn(&[ModelDescriptor], Option<&crate::Credential>) -> Vec<ModelDescriptor> + 'static;
+
 /// Complete provider composition registered atomically with [`crate::Models`].
 #[derive(Clone)]
 pub struct ProviderRegistration {
@@ -1859,6 +1917,9 @@ pub struct ProviderRegistration {
     pub auth: Arc<dyn AuthResolver>,
     /// Current immutable catalog snapshot.
     pub catalog: Arc<dyn ModelCatalog>,
+    /// Optional provider policy that narrows the complete catalog for one
+    /// stored credential.
+    pub filter_models: Option<Arc<ModelAvailabilityFilter>>,
     /// API-family dispatch table.
     pub apis: HashMap<ApiId, Arc<dyn ChatApi>>,
     /// Provider-default retry policy.
@@ -1874,6 +1935,7 @@ impl fmt::Debug for ProviderRegistration {
             .field("descriptor", &self.descriptor)
             .field("models", &self.catalog.snapshot().len())
             .field("refreshable", &self.catalog.catalog_source().is_some())
+            .field("credential_scoped", &self.filter_models.is_some())
             .field("apis", &self.apis.keys())
             .field("retry_policy", &self.retry_policy)
             .finish_non_exhaustive()
@@ -1913,6 +1975,7 @@ pub struct ProviderRegistrationBuilder {
     auth: Arc<dyn AuthResolver>,
     catalog: Arc<dyn ModelCatalog>,
     catalog_source: Option<Arc<dyn ModelCatalogSource>>,
+    filter_models: Option<Arc<ModelAvailabilityFilter>>,
     preserve_catalog: bool,
     apis: HashMap<ApiId, Arc<dyn ChatApi>>,
     retry_policy: RetryPolicy,
@@ -1927,6 +1990,7 @@ impl ProviderRegistrationBuilder {
             auth: Arc::new(AnonymousAuthResolver),
             catalog: Arc::new(StaticModelCatalog::new(Vec::new())),
             catalog_source: None,
+            filter_models: None,
             preserve_catalog: false,
             apis: HashMap::new(),
             retry_policy: RetryPolicy::default(),
@@ -1982,6 +2046,13 @@ impl ProviderRegistrationBuilder {
         self
     }
 
+    /// Sets a credential-scoped model-availability policy. The provider's
+    /// synchronous catalog remains complete.
+    pub fn filter_models(mut self, filter: Arc<ModelAvailabilityFilter>) -> Self {
+        self.filter_models = Some(filter);
+        self
+    }
+
     /// Registers one API implementation under an open API identifier.
     pub fn api(mut self, api: impl Into<ApiId>, implementation: Arc<dyn ChatApi>) -> Self {
         self.apis.insert(api.into(), implementation);
@@ -2007,6 +2078,7 @@ impl ProviderRegistrationBuilder {
             auth,
             catalog,
             catalog_source,
+            filter_models,
             preserve_catalog,
             apis,
             retry_policy,
@@ -2035,6 +2107,7 @@ impl ProviderRegistrationBuilder {
             descriptor,
             auth,
             catalog,
+            filter_models,
             apis,
             retry_policy,
             retry_classifier,
@@ -2108,6 +2181,8 @@ pub struct LocalProviderRegistration {
     pub auth: Rc<dyn LocalAuthResolver>,
     /// Current immutable local catalog snapshot.
     pub catalog: Rc<dyn LocalModelCatalog>,
+    /// Optional local credential-scoped model policy.
+    pub filter_models: Option<Rc<LocalModelAvailabilityFilter>>,
     /// Local API-family dispatch table.
     pub apis: HashMap<ApiId, Rc<dyn LocalChatApi>>,
     /// Provider-default retry policy.
@@ -2123,6 +2198,7 @@ impl fmt::Debug for LocalProviderRegistration {
             .field("descriptor", &self.descriptor)
             .field("models", &self.catalog.snapshot().len())
             .field("refreshable", &self.catalog.catalog_source().is_some())
+            .field("credential_scoped", &self.filter_models.is_some())
             .field("apis", &self.apis.keys())
             .field("retry_policy", &self.retry_policy)
             .finish_non_exhaustive()
@@ -2162,6 +2238,7 @@ pub struct LocalProviderRegistrationBuilder {
     auth: Rc<dyn LocalAuthResolver>,
     catalog: Rc<dyn LocalModelCatalog>,
     catalog_source: Option<Rc<dyn LocalModelCatalogSource>>,
+    filter_models: Option<Rc<LocalModelAvailabilityFilter>>,
     preserve_catalog: bool,
     apis: HashMap<ApiId, Rc<dyn LocalChatApi>>,
     retry_policy: RetryPolicy,
@@ -2176,6 +2253,7 @@ impl LocalProviderRegistrationBuilder {
             auth: Rc::new(AnonymousAuthResolver),
             catalog: Rc::new(LocalStaticModelCatalog::new(Vec::new())),
             catalog_source: None,
+            filter_models: None,
             preserve_catalog: false,
             apis: HashMap::new(),
             retry_policy: RetryPolicy::default(),
@@ -2231,6 +2309,12 @@ impl LocalProviderRegistrationBuilder {
         self
     }
 
+    /// Sets a local credential-scoped model-availability policy.
+    pub fn filter_models(mut self, filter: Rc<LocalModelAvailabilityFilter>) -> Self {
+        self.filter_models = Some(filter);
+        self
+    }
+
     /// Registers one local API implementation.
     pub fn api(mut self, api: impl Into<ApiId>, implementation: Rc<dyn LocalChatApi>) -> Self {
         self.apis.insert(api.into(), implementation);
@@ -2256,6 +2340,7 @@ impl LocalProviderRegistrationBuilder {
             auth,
             catalog,
             catalog_source,
+            filter_models,
             preserve_catalog,
             apis,
             retry_policy,
@@ -2283,6 +2368,7 @@ impl LocalProviderRegistrationBuilder {
             descriptor,
             auth,
             catalog,
+            filter_models,
             apis,
             retry_policy,
             retry_classifier,
