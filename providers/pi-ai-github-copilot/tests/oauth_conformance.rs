@@ -285,6 +285,7 @@ fn assistant_context(model: &ModelRef, api: &str) -> Context {
         requested_model: model.model.clone(),
         response_model: None,
         response_id: None,
+        deferred: None,
         end_turn: None,
         diagnostics: Vec::new(),
         content: vec![ContentBlock::Text {

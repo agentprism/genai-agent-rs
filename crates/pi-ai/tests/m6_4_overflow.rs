@@ -23,6 +23,7 @@ fn message(
         response_id: None,
         end_turn: None,
         diagnostics: Vec::new(),
+        deferred: None,
         content: Vec::new(),
         replay: ReplayEnvelope::new(ReplayScope::new(
             ProviderId::new("test-provider"),

@@ -1075,6 +1075,7 @@ fn failed_events() -> Vec<AssistantEvent> {
         response_id: None,
         end_turn: None,
         diagnostics: Vec::new(),
+        deferred: None,
         content: Vec::new(),
         replay: ReplayEnvelope::new(ReplayScope::new(
             provider.clone(),

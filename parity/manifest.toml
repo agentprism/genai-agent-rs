@@ -1138,9 +1138,18 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/providers.test.ts"
-rust = []
+rust = [
+  "deferred_capabilities_are_optional_and_independent_send_and_local",
+  "deferred_handle_persistence_round_trip_pi_exact",
+  "deferred_mixed_api_capability_check_follows_auth_send_and_local",
+  "deferred_models_request_options_reach_handler_send_and_local",
+  "deferred_scripted_failure_and_cancel_send_and_local",
+  "deferred_scripted_submit_poll_resolve_replay_send_and_local",
+  "deferred_terminal_requires_durable_handle",
+  "deferred_unsupported_provider_precedes_auth_send_and_local",
+]
 status = "planned"
-milestone = "M3.2"
+milestone = "M7"
 
 [[mapping]]
 source = "packages/ai/test/qwen-token-plan-models.test.ts"

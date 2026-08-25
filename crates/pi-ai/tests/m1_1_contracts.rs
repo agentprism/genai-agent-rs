@@ -261,6 +261,7 @@ fn anthropic_complete_replay_item_is_found_after_message_round_trip() {
         response_id: Some("msg_provider_0".into()),
         end_turn: None,
         diagnostics: Vec::new(),
+        deferred: None,
         content: vec![ContentBlock::Thinking {
             id: ContentBlockId::new("b0"),
             text: "reasoning".into(),
@@ -330,6 +331,7 @@ fn persisted_openai_responses_message_round_trip() {
         response_id: Some("resp_123".into()),
         end_turn: None,
         diagnostics: Vec::new(),
+        deferred: None,
         content: vec![ContentBlock::Text {
             id: ContentBlockId::new("b1"),
             text: "I found the issue.".into(),

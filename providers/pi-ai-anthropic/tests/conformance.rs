@@ -457,6 +457,7 @@ fn parse_assistant(
         requested_model: ModelId::new(model),
         response_model: None,
         response_id: None,
+        deferred: None,
         end_turn: None,
         diagnostics: Vec::new(),
         content,

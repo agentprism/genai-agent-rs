@@ -604,6 +604,9 @@ pub struct SimpleGenerationOptions {
     pub cache_retention: Option<CacheRetention>,
     /// Provider-neutral tool selection; defaults are applied during planning.
     pub tool_choice: Option<ToolChoice>,
+    /// Ask a capable API family to return a durable handle and continue the
+    /// request asynchronously.
+    pub deferred: Option<crate::DeferredSubmission>,
     /// The sole erased API-family patch for dynamic callers.
     pub api_options: Option<ErasedApiOptionsPatch>,
 }
@@ -636,6 +639,7 @@ impl fmt::Debug for SimpleGenerationOptions {
             .field("headers", &"<redacted headers>")
             .field("cache_retention", &self.cache_retention)
             .field("tool_choice", &self.tool_choice)
+            .field("deferred", &self.deferred)
             .field(
                 "api_options",
                 &self.api_options.as_ref().map(|_| "<redacted API options>"),

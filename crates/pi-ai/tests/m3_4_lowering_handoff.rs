@@ -127,6 +127,7 @@ fn assistant(
         response_id: None,
         end_turn: None,
         diagnostics: Vec::new(),
+        deferred: None,
         content,
         replay: ReplayEnvelope::new(ReplayScope::new(provider, api, model, model)),
         usage: Usage::zero(UsageSource::Unknown),

@@ -138,6 +138,9 @@ pub struct AssistantMessage {
     pub response_model: Option<ModelId>,
     /// Provider response identifier when reported.
     pub response_id: Option<String>,
+    /// Durable provider handle when the terminal reason is `Deferred`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred: Option<crate::DeferredHandle>,
     /// Provider indication that the model explicitly ended its turn.
     ///
     /// Pinned Pi currently exposes this only for ChatGPT Codex Responses and

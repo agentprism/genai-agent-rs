@@ -29,6 +29,8 @@ pub enum RequestStartErrorKind {
     UnknownProvider,
     /// The model reference is not registered.
     UnknownModel,
+    /// The selected provider/API does not implement the requested operation.
+    UnsupportedOperation,
     /// The runtime has no capacity or scripted response available.
     RuntimeUnavailable,
     /// The runtime violated an internal setup invariant.

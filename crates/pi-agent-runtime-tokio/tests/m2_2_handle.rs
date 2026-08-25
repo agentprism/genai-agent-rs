@@ -133,6 +133,7 @@ fn terminal_message(id: &str, reason: AssistantFinishReason) -> AssistantMessage
         requested_model: model.clone(),
         response_model: None,
         response_id: None,
+        deferred: None,
         end_turn: None,
         diagnostics: Vec::new(),
         content: Vec::new(),

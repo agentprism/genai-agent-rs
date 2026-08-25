@@ -156,6 +156,7 @@ pub fn message_from_value(
                     .get("responseId")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
+                deferred: None,
                 end_turn: value.get("endTurn").and_then(Value::as_bool),
                 diagnostics: Vec::new(),
                 content,

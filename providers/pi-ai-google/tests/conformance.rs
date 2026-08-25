@@ -373,6 +373,7 @@ fn parse_assistant(value: &Value, index: usize, model: &ModelDescriptor) -> Assi
         requested_model: ModelId::new(model_id),
         response_model: None,
         response_id: None,
+        deferred: None,
         end_turn: None,
         diagnostics: Vec::new(),
         content,
@@ -919,6 +920,7 @@ fn one_text_with_replay(
         requested_model: ModelId::new(model),
         response_model: None,
         response_id: None,
+        deferred: None,
         end_turn: None,
         diagnostics: Vec::new(),
         content: vec![ContentBlock::Text {

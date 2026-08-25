@@ -77,6 +77,7 @@ fn assistant_tool_entry(
         requested_model: model.clone(),
         response_model: None,
         response_id: None,
+        deferred: None,
         end_turn: None,
         diagnostics: Vec::new(),
         content: vec![ContentBlock::ToolCall {

@@ -3,14 +3,17 @@
 use crate::{
     ApiId, AssemblyError, AssistantAssembler, AssistantEvent, AssistantFinish,
     AssistantFinishReason, AssistantStream, CancellationReason, CancellationToken, ContentBlockId,
-    ContentBlockKind, LocalAssistantStream, LocalBoxFuture, LocalModelRuntime, MessageId,
-    ModelRequest, ModelRuntime, OpaquePayload, PublicError, ReplayApplicability,
-    ReplayDataOperation, ReplayItemId, ReplayKind, ReplayTarget, RequestStartError,
-    RequestStartErrorKind, SendBoxFuture, Timestamp, ToolCallId, Usage,
+    ContentBlockKind, DeferredCancelOptions, DeferredFetchOptions, DeferredHandle,
+    DeferredModelRuntime, LocalAssistantStream, LocalBoxFuture, LocalDeferredModelRuntime,
+    LocalModelRuntime, MessageId, ModelRef, ModelRequest, ModelRuntime, OpaquePayload, PublicError,
+    ReplayApplicability, ReplayDataOperation, ReplayItemId, ReplayKind, ReplayTarget,
+    RequestStartError, RequestStartErrorKind, SendBoxFuture, SimpleGenerationOptions, Timestamp,
+    ToolCallId, Usage,
 };
 use futures_core::Stream;
+use futures_util::StreamExt;
 use serde_json::Value;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -54,6 +57,7 @@ pub struct ScriptedReplayItem {
 pub struct ScriptedResponse {
     kind: ScriptedResponseKind,
     api: ApiId,
+    deferred_handle: Option<DeferredHandle>,
     response_id: Option<String>,
     response_model: Option<crate::ModelId>,
     usage_updates: Vec<Usage>,
@@ -66,6 +70,11 @@ enum ScriptedResponseKind {
     Generated {
         content: GeneratedContent,
         terminal: ScriptedTerminal,
+    },
+    DeferredSubmission {
+        handle: DeferredHandle,
+        pending_fetches: usize,
+        final_response: Box<ScriptedResponse>,
     },
     Events(Vec<AssistantEvent>),
 }
@@ -134,6 +143,34 @@ impl ScriptedResponse {
         }
     }
 
+    /// Creates a response that resolves immediately unless the request asks
+    /// for deferred execution. Deferred submission registers `final_response`
+    /// under the durable handle for later fetches.
+    pub fn deferred(handle: DeferredHandle, final_response: ScriptedResponse) -> Self {
+        Self {
+            api: handle.api.clone(),
+            kind: ScriptedResponseKind::DeferredSubmission {
+                handle,
+                pending_fetches: 0,
+                final_response: Box::new(final_response),
+            },
+            ..Self::empty_completed()
+        }
+    }
+
+    /// Configures how many fetches return the original pending handle before
+    /// the scripted final response becomes ready.
+    pub fn with_pending_fetches(mut self, pending_fetches: usize) -> Self {
+        if let ScriptedResponseKind::DeferredSubmission {
+            pending_fetches: configured,
+            ..
+        } = &mut self.kind
+        {
+            *configured = pending_fetches;
+        }
+        self
+    }
+
     /// Overrides the API-family identity emitted by a generated response.
     pub fn with_api(mut self, api: impl Into<ApiId>) -> Self {
         self.api = api.into();
@@ -194,6 +231,7 @@ impl ScriptedResponse {
                 terminal: ScriptedTerminal::Completed(AssistantFinishReason::Stop),
             },
             api: ApiId::new("scripted"),
+            deferred_handle: None,
             response_id: None,
             response_model: None,
             usage_updates: Vec::new(),
@@ -228,6 +266,14 @@ pub fn tool_call_response(name: impl Into<String>, arguments: Value) -> Scripted
     }
 }
 
+/// Creates one deferred scripted submission and its eventual response.
+pub fn deferred_response(
+    handle: DeferredHandle,
+    final_response: ScriptedResponse,
+) -> ScriptedResponse {
+    ScriptedResponse::deferred(handle, final_response)
+}
+
 /// Builder for a queue-backed [`ScriptedRuntime`].
 #[derive(Clone, Debug, Default)]
 pub struct ScriptedRuntimeBuilder {
@@ -256,6 +302,11 @@ impl ScriptedRuntimeBuilder {
         self.response(ScriptedResponse::events(events))
     }
 
+    /// Appends one deferred submission and eventual response.
+    pub fn deferred(self, handle: DeferredHandle, final_response: ScriptedResponse) -> Self {
+        self.response(ScriptedResponse::deferred(handle, final_response))
+    }
+
     /// Appends an empty successful response with one cumulative usage update.
     pub fn usage(self, cumulative: Usage) -> Self {
         self.response(ScriptedResponse::empty_completed().with_usage(cumulative))
@@ -276,7 +327,18 @@ pub struct ScriptedRuntime {
 #[derive(Debug)]
 struct ScriptedRuntimeState {
     responses: VecDeque<ScriptedResponse>,
+    deferred: HashMap<String, ScriptedDeferredEntry>,
+    deferred_fetch_count: u64,
+    cancelled_deferred: Vec<DeferredHandle>,
     next_message_sequence: u64,
+}
+
+#[derive(Debug)]
+struct ScriptedDeferredEntry {
+    handle: DeferredHandle,
+    pending_fetches: usize,
+    final_response: ScriptedResponse,
+    cancelled: bool,
 }
 
 impl ScriptedRuntime {
@@ -285,6 +347,9 @@ impl ScriptedRuntime {
         Self {
             inner: Arc::new(Mutex::new(ScriptedRuntimeState {
                 responses: responses.into_iter().collect(),
+                deferred: HashMap::new(),
+                deferred_fetch_count: 0,
+                cancelled_deferred: Vec::new(),
                 next_message_sequence: 1,
             })),
         }
@@ -298,6 +363,67 @@ impl ScriptedRuntime {
     /// Returns the number of unconsumed scripted responses.
     pub fn remaining(&self) -> usize {
         lock_unpoisoned(&self.inner).responses.len()
+    }
+
+    /// Returns the number of deferred fetch operations observed so far.
+    pub fn deferred_fetch_count(&self) -> u64 {
+        lock_unpoisoned(&self.inner).deferred_fetch_count
+    }
+
+    /// Returns durable handles passed to best-effort cancellation in call
+    /// order.
+    pub fn cancelled_deferred(&self) -> Vec<DeferredHandle> {
+        lock_unpoisoned(&self.inner).cancelled_deferred.clone()
+    }
+
+    /// Polls a scripted deferred response through the Send capability.
+    pub fn fetch_deferred(
+        &self,
+        model: ModelRef,
+        handle: DeferredHandle,
+        options: DeferredFetchOptions,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<crate::AssistantMessage, RequestStartError>> {
+        Box::pin(async move {
+            let mut stream = AssistantStream::new(self.prepare_deferred(
+                model.clone(),
+                handle,
+                options,
+                cancellation,
+            )?);
+            while let Some(event) = stream.next().await {
+                if let Some(message) = event.terminal_message() {
+                    return Ok(message.clone());
+                }
+            }
+            Err(RequestStartError::new(
+                RequestStartErrorKind::RuntimeUnavailable,
+                "scripted deferred response ended without a terminal message",
+            )
+            .with_model(model))
+        })
+    }
+
+    /// Records best-effort scripted deferred cancellation.
+    pub fn cancel_deferred(
+        &self,
+        model: ModelRef,
+        handle: DeferredHandle,
+        _options: DeferredCancelOptions,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<(), RequestStartError>> {
+        Box::pin(async move {
+            cancellation.check().map_err(|_| {
+                RequestStartError::new(RequestStartErrorKind::Cancelled, "request cancelled")
+                    .with_model(model.clone())
+            })?;
+            let mut state = lock_unpoisoned(&self.inner);
+            state.cancelled_deferred.push(handle.clone());
+            if let Some(entry) = state.deferred.get_mut(&handle.id) {
+                entry.cancelled = true;
+            }
+            Ok(())
+        })
     }
 
     fn prepare(
@@ -314,11 +440,80 @@ impl ScriptedRuntime {
                 )
                 .with_model(request.model.clone())
             })?;
+            let response = resolve_deferred_submission(response, &request, &mut state)?;
             let sequence = state.next_message_sequence;
             state.next_message_sequence = state.next_message_sequence.saturating_add(1);
             (response, sequence)
         };
 
+        let events = materialize(response, &request, sequence)?;
+        Ok(ScriptedEventStream::new(events, cancellation))
+    }
+
+    fn prepare_deferred(
+        &self,
+        model: ModelRef,
+        handle: DeferredHandle,
+        _options: DeferredFetchOptions,
+        cancellation: CancellationToken,
+    ) -> Result<ScriptedEventStream, RequestStartError> {
+        cancellation.check().map_err(|_| {
+            RequestStartError::new(RequestStartErrorKind::Cancelled, "request cancelled")
+                .with_model(model.clone())
+        })?;
+        let (response, sequence) = {
+            let mut state = lock_unpoisoned(&self.inner);
+            state.deferred_fetch_count = state.deferred_fetch_count.saturating_add(1);
+            let response = {
+                let entry = state.deferred.get_mut(&handle.id);
+                if entry.as_ref().is_none_or(|entry| {
+                    handle.schema_version != crate::DEFERRED_HANDLE_SCHEMA_VERSION
+                        || entry.handle.provider != handle.provider
+                        || entry.handle.model_id != handle.model_id
+                        || entry.handle.api != handle.api
+                }) {
+                    ScriptedResponse::failure(PublicError {
+                        code: "deferred_unknown".into(),
+                        message: format!("Unknown scripted deferred response: {}", handle.id),
+                        retryable: false,
+                        provider_code: None,
+                        status: None,
+                        request_id: None,
+                    })
+                    .with_api(handle.api.clone())
+                } else if entry.as_ref().is_some_and(|entry| entry.cancelled) {
+                    ScriptedResponse::failure(PublicError {
+                        code: "deferred_cancelled".into(),
+                        message: format!("Scripted deferred response was cancelled: {}", handle.id),
+                        retryable: false,
+                        provider_code: None,
+                        status: None,
+                        request_id: None,
+                    })
+                    .with_api(handle.api.clone())
+                } else if entry
+                    .as_ref()
+                    .is_some_and(|entry| entry.pending_fetches > 0)
+                {
+                    let entry = entry.expect("checked scripted deferred entry");
+                    entry.pending_fetches -= 1;
+                    pending_deferred_response(entry.handle.clone())
+                } else {
+                    entry
+                        .expect("checked scripted deferred entry")
+                        .final_response
+                        .clone()
+                }
+            };
+            let sequence = state.next_message_sequence;
+            state.next_message_sequence = state.next_message_sequence.saturating_add(1);
+            (response, sequence)
+        };
+        let request = ModelRequest {
+            model,
+            context: crate::Context::new(None),
+            options: SimpleGenerationOptions::default(),
+        };
         let events = materialize(response, &request, sequence)?;
         Ok(ScriptedEventStream::new(events, cancellation))
     }
@@ -347,6 +542,165 @@ impl LocalModelRuntime for ScriptedRuntime {
             self.prepare(request, cancellation)
                 .map(LocalAssistantStream::new)
         })
+    }
+}
+
+impl DeferredModelRuntime for ScriptedRuntime {
+    fn fetch_deferred(
+        &self,
+        model: ModelRef,
+        handle: DeferredHandle,
+        options: DeferredFetchOptions,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<crate::AssistantMessage, RequestStartError>> {
+        ScriptedRuntime::fetch_deferred(self, model, handle, options, cancellation)
+    }
+
+    fn cancel_deferred(
+        &self,
+        model: ModelRef,
+        handle: DeferredHandle,
+        options: DeferredCancelOptions,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<(), RequestStartError>> {
+        ScriptedRuntime::cancel_deferred(self, model, handle, options, cancellation)
+    }
+}
+
+impl LocalDeferredModelRuntime for ScriptedRuntime {
+    fn fetch_deferred(
+        &self,
+        model: ModelRef,
+        handle: DeferredHandle,
+        options: DeferredFetchOptions,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<crate::AssistantMessage, RequestStartError>> {
+        Box::pin(async move {
+            let mut stream = LocalAssistantStream::new(self.prepare_deferred(
+                model.clone(),
+                handle,
+                options,
+                cancellation,
+            )?);
+            while let Some(event) = stream.next().await {
+                if let Some(message) = event.terminal_message() {
+                    return Ok(message.clone());
+                }
+            }
+            Err(RequestStartError::new(
+                RequestStartErrorKind::RuntimeUnavailable,
+                "scripted deferred response ended without a terminal message",
+            )
+            .with_model(model))
+        })
+    }
+
+    fn cancel_deferred(
+        &self,
+        model: ModelRef,
+        handle: DeferredHandle,
+        _options: DeferredCancelOptions,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<(), RequestStartError>> {
+        Box::pin(async move {
+            cancellation.check().map_err(|_| {
+                RequestStartError::new(RequestStartErrorKind::Cancelled, "request cancelled")
+                    .with_model(model.clone())
+            })?;
+            let mut state = lock_unpoisoned(&self.inner);
+            state.cancelled_deferred.push(handle.clone());
+            if let Some(entry) = state.deferred.get_mut(&handle.id) {
+                entry.cancelled = true;
+            }
+            Ok(())
+        })
+    }
+}
+
+fn resolve_deferred_submission(
+    response: ScriptedResponse,
+    request: &ModelRequest,
+    state: &mut ScriptedRuntimeState,
+) -> Result<ScriptedResponse, RequestStartError> {
+    let ScriptedResponse {
+        kind,
+        api,
+        deferred_handle,
+        response_id,
+        response_model,
+        usage_updates,
+        replay_items,
+        timestamp,
+    } = response;
+    let (handle, pending_fetches, final_response) = match kind {
+        ScriptedResponseKind::DeferredSubmission {
+            handle,
+            pending_fetches,
+            final_response,
+        } => (handle, pending_fetches, final_response),
+        kind => {
+            return Ok(ScriptedResponse {
+                kind,
+                api,
+                deferred_handle,
+                response_id,
+                response_model,
+                usage_updates,
+                replay_items,
+                timestamp,
+            });
+        }
+    };
+
+    let enabled = request
+        .options
+        .deferred
+        .as_ref()
+        .is_some_and(crate::DeferredSubmission::is_enabled);
+    if !enabled {
+        return Ok(*final_response);
+    }
+    if handle.schema_version != crate::DEFERRED_HANDLE_SCHEMA_VERSION
+        || handle.provider != request.model.provider
+        || handle.model_id != request.model.model
+        || handle.api != api
+    {
+        return Err(invalid_script(
+            request,
+            "scripted deferred handle does not match the request provider, API, model, or schema",
+        ));
+    }
+    if state.deferred.contains_key(&handle.id) {
+        return Err(invalid_script(
+            request,
+            format!("duplicate scripted deferred handle: {}", handle.id),
+        ));
+    }
+    state.deferred.insert(
+        handle.id.clone(),
+        ScriptedDeferredEntry {
+            handle: handle.clone(),
+            pending_fetches,
+            final_response: *final_response,
+            cancelled: false,
+        },
+    );
+    Ok(pending_deferred_response(handle))
+}
+
+fn pending_deferred_response(handle: DeferredHandle) -> ScriptedResponse {
+    ScriptedResponse {
+        kind: ScriptedResponseKind::Generated {
+            content: GeneratedContent::Empty,
+            terminal: ScriptedTerminal::Completed(AssistantFinishReason::Deferred),
+        },
+        api: handle.api.clone(),
+        deferred_handle: Some(handle),
+        response_id: None,
+        response_model: None,
+        usage_updates: Vec::new(),
+        replay_items: Vec::new(),
+        timestamp: Timestamp::default(),
     }
 }
 
@@ -468,14 +822,20 @@ fn materialize(
 
     let terminal_event = match terminal {
         ScriptedTerminal::Completed(reason) => {
-            let message = assembler
-                .clone()
-                .finish_completed(AssistantFinish {
+            let message = if reason == AssistantFinishReason::Deferred {
+                assembler.clone().finish_deferred(
+                    response.deferred_handle.clone().ok_or_else(|| {
+                        invalid_script(request, "deferred response omitted handle")
+                    })?,
+                )
+            } else {
+                assembler.clone().finish_completed(AssistantFinish {
                     reason,
                     raw_provider_reason: None,
                     error: None,
                 })
-                .map_err(|error| invalid_script(request, error.to_string()))?;
+            }
+            .map_err(|error| invalid_script(request, error.to_string()))?;
             AssistantEvent::Finished { message }
         }
         ScriptedTerminal::Failed(error) => AssistantEvent::Failed {

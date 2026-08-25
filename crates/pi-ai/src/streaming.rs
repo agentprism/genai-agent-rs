@@ -3,10 +3,11 @@
 
 use crate::{
     ApiId, AssistantFinish, AssistantFinishReason, AssistantMessage, AssistantMessageDiagnostic,
-    ContentBlock, ContentBlockId, Cost, LocalBoxStream, MessageId, ModelId, OpaquePayload,
-    ProviderId, PublicError, REPLAY_ENVELOPE_SCHEMA_VERSION, ReplayApplicability,
-    ReplayCompleteness, ReplayEnvelope, ReplayItem, ReplayItemId, ReplayKind, ReplayScope,
-    ReplayTarget, SendBoxStream, Timestamp, ToolCall, ToolCallId, Usage, UsageSource,
+    ContentBlock, ContentBlockId, Cost, DEFERRED_HANDLE_SCHEMA_VERSION, DeferredHandle,
+    LocalBoxStream, MessageId, ModelId, OpaquePayload, ProviderId, PublicError,
+    REPLAY_ENVELOPE_SCHEMA_VERSION, ReplayApplicability, ReplayCompleteness, ReplayEnvelope,
+    ReplayItem, ReplayItemId, ReplayKind, ReplayScope, ReplayTarget, SendBoxStream, Timestamp,
+    ToolCall, ToolCallId, Usage, UsageSource,
 };
 use futures_core::{Stream, stream::FusedStream};
 use indexmap::IndexMap;
@@ -607,6 +608,7 @@ struct AssistantMessageBuilder {
     requested_model: ModelId,
     response_model: Option<ModelId>,
     response_id: Option<String>,
+    deferred: Option<DeferredHandle>,
     end_turn: Option<bool>,
     diagnostics: Vec<AssistantMessageDiagnostic>,
     usage: Usage,
@@ -624,6 +626,7 @@ impl AssistantMessageBuilder {
             requested_model: ModelId::default(),
             response_model: None,
             response_id: None,
+            deferred: None,
             end_turn: None,
             diagnostics: Vec::new(),
             usage: Usage::zero(UsageSource::Unknown),
@@ -1213,6 +1216,7 @@ impl AssistantAssembler {
             requested_model: self.message.requested_model.clone(),
             response_model: self.message.response_model.clone(),
             response_id: self.message.response_id.clone(),
+            deferred: self.message.deferred.clone(),
             end_turn: self.message.end_turn,
             diagnostics: self.message.diagnostics.clone(),
             content: self.content_snapshot(true),
@@ -1235,6 +1239,20 @@ impl AssistantAssembler {
         self.validate_successful_blocks()?;
         self.validate_successful_replay()?;
         self.build_message(finish, false)
+    }
+
+    /// Finishes a successful deferred response with its durable provider
+    /// handle.
+    pub fn finish_deferred(
+        mut self,
+        handle: DeferredHandle,
+    ) -> Result<AssistantMessage, AssemblyError> {
+        self.message.deferred = Some(handle);
+        self.finish_completed(AssistantFinish {
+            reason: AssistantFinishReason::Deferred,
+            raw_provider_reason: None,
+            error: None,
+        })
     }
 
     /// Finishes a failed message, retaining complete replay items and marking
@@ -1505,6 +1523,7 @@ impl AssistantAssembler {
         allow_partial: bool,
     ) -> Result<AssistantMessage, AssemblyError> {
         self.require_started()?;
+        self.validate_deferred_handle(&finish)?;
         Ok(AssistantMessage {
             id: self.message.id.clone(),
             provider: self.message.provider.clone(),
@@ -1512,6 +1531,7 @@ impl AssistantAssembler {
             requested_model: self.message.requested_model.clone(),
             response_model: self.message.response_model.clone(),
             response_id: self.message.response_id.clone(),
+            deferred: self.message.deferred.clone(),
             end_turn: self.message.end_turn,
             diagnostics: self.message.diagnostics.clone(),
             content: self.content_snapshot(allow_partial),
@@ -1535,6 +1555,7 @@ impl AssistantAssembler {
             requested_model: self.message.requested_model.clone(),
             response_model: self.message.response_model.clone(),
             response_id: self.message.response_id.clone(),
+            deferred: self.message.deferred.clone(),
             end_turn: self.message.end_turn,
             diagnostics: self.message.diagnostics.clone(),
             content: self.content_snapshot(true),
@@ -1570,6 +1591,10 @@ impl AssistantAssembler {
         // API-family cost calculation is authoritative at the terminal
         // response boundary and deliberately remains separate from Usage.
         self.message.cost = message.cost.clone();
+        // Pinned Pi attaches the handle only to the successful terminal
+        // message, so it becomes authoritative at this boundary like cost and
+        // timestamp rather than through a separate delta event.
+        self.message.deferred = message.deferred.clone();
         let assembled = self.build_message(message.finish.clone(), allow_partial)?;
         if assembled != *message {
             return Err(AssemblyError::TerminalMessageMismatch);
@@ -1591,6 +1616,21 @@ impl AssistantAssembler {
             return Err(AssemblyError::InvalidSuccessfulFinish);
         }
         Ok(())
+    }
+
+    fn validate_deferred_handle(&self, finish: &AssistantFinish) -> Result<(), AssemblyError> {
+        match (finish.reason, self.message.deferred.as_ref()) {
+            (AssistantFinishReason::Deferred, None) => Err(AssemblyError::MissingDeferredHandle),
+            (AssistantFinishReason::Deferred, Some(handle)) => {
+                if handle.schema_version != DEFERRED_HANDLE_SCHEMA_VERSION {
+                    return Err(AssemblyError::UnsupportedDeferredHandleSchema(
+                        handle.schema_version,
+                    ));
+                }
+                Ok(())
+            }
+            (_, _) => Ok(()),
+        }
     }
 
     fn validate_failed_finish(finish: &AssistantFinish) -> Result<(), AssemblyError> {
@@ -1644,6 +1684,9 @@ pub struct AssistantMessageSnapshot {
     pub response_model: Option<ModelId>,
     /// Last provider response identifier.
     pub response_id: Option<String>,
+    /// Durable deferred handle after a deferred terminal event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred: Option<DeferredHandle>,
     /// Last provider end-turn indication.
     pub end_turn: Option<bool>,
     /// Redacted diagnostics observed so far.
@@ -1732,6 +1775,10 @@ pub enum AssemblyError {
     ReplayTargetNotFound(ReplayItemId),
     /// Error or aborted metadata was supplied to successful completion.
     InvalidSuccessfulFinish,
+    /// A deferred successful terminal omitted its durable handle.
+    MissingDeferredHandle,
+    /// A deferred handle used an unsupported persisted schema.
+    UnsupportedDeferredHandleSchema(u32),
     /// A terminal event carried a finish reason inconsistent with its variant.
     UnexpectedTerminalReason {
         /// Required reason, or `Stop` as the successful-reason class marker.
@@ -1819,6 +1866,15 @@ impl fmt::Display for AssemblyError {
             }
             Self::InvalidSuccessfulFinish => {
                 formatter.write_str("successful finish contains failure metadata")
+            }
+            Self::MissingDeferredHandle => {
+                formatter.write_str("deferred assistant finish omitted its durable handle")
+            }
+            Self::UnsupportedDeferredHandleSchema(version) => {
+                write!(
+                    formatter,
+                    "unsupported deferred handle schema version {version}"
+                )
             }
             Self::UnexpectedTerminalReason { expected, actual } => write!(
                 formatter,

@@ -16,6 +16,7 @@ mod auth;
 mod bedrock;
 mod cancellation;
 mod catalog;
+mod deferred;
 mod estimate;
 #[cfg(not(target_arch = "wasm32"))]
 mod file_credentials;
@@ -48,6 +49,7 @@ pub use auth::*;
 pub use bedrock::*;
 pub use cancellation::*;
 pub use catalog::*;
+pub use deferred::*;
 pub use estimate::*;
 #[cfg(not(target_arch = "wasm32"))]
 pub use file_credentials::*;

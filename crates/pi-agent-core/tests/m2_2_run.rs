@@ -660,6 +660,7 @@ fn terminal_only_message(id: &str, reason: AssistantFinishReason) -> AssistantMe
         requested_model: model.clone(),
         response_model: None,
         response_id: None,
+        deferred: None,
         end_turn: None,
         diagnostics: Vec::new(),
         content: vec![ContentBlock::Text {
@@ -720,6 +721,7 @@ fn incomplete_replay_terminal_stream() -> Vec<AssistantEvent> {
         requested_model: snapshot.requested_model,
         response_model: snapshot.response_model,
         response_id: snapshot.response_id,
+        deferred: snapshot.deferred,
         end_turn: snapshot.end_turn,
         diagnostics: snapshot.diagnostics,
         content: snapshot.content,

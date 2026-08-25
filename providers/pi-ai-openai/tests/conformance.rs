@@ -3286,6 +3286,7 @@ fn fixture_assistant(
         requested_model: requested_model.into(),
         response_model: None,
         response_id: None,
+        deferred: None,
         end_turn: None,
         diagnostics: Vec::new(),
         content,
@@ -3560,6 +3561,7 @@ fn assistant_with_thinking_detail() -> AssistantMessage {
         requested_model: "fixture-openai-model".into(),
         response_model: None,
         response_id: Some("chat-1".into()),
+        deferred: None,
         end_turn: None,
         diagnostics: Vec::new(),
         content: vec![ContentBlock::Thinking {
@@ -3608,6 +3610,7 @@ fn assistant_with_tool_call() -> AssistantMessage {
         requested_model: "fixture-openai-model".into(),
         response_model: None,
         response_id: Some("chat-tool".into()),
+        deferred: None,
         end_turn: None,
         diagnostics: Vec::new(),
         content: vec![ContentBlock::ToolCall {

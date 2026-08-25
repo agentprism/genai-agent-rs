@@ -9,16 +9,17 @@
 use crate::{
     ApiId, ApiRequestOptions, AssistantStream, AttemptFailure, AttemptMiddleware, AuthError,
     AuthResolutionOverrides, CancellationToken, Context, DefaultRetryClassifier,
-    ErasedApiFullOptions, ErasedApiOptionsPatch, ErasedPayloadContext, ErasedPayloadTransform,
-    HeaderMapSpec, HttpRequest, HttpResponse, HttpTransport, LocalAssistantStream,
-    LocalAttemptMiddleware, LocalBoxFuture, LocalDefaultRetryClassifier, LocalDefaultRetrySleeper,
-    LocalErasedPayloadTransform, LocalHttpResponse, LocalHttpTransport, LocalManagedModelCatalog,
-    LocalModelCatalogSource, LocalProviderCatalogState, LocalResponseObserver,
-    LocalRetryClassifier, LocalRetrySleeper, ManagedModelCatalog, ModelCatalogSource,
-    ModelDescriptor, ModelRef, PayloadTransformDisposition, ProviderCatalogState, ProviderId,
-    ProviderPayload, ProviderResponseMetadata, RequestStartError, RequestStartErrorKind,
-    ResponseObservationContext, ResponseObserver, RetryClassifier, RetryDecision, RetryPolicy,
-    RetrySleeper, SecretString, SendBoxFuture, SimpleGenerationOptions, apply_header_spec,
+    DeferredCapabilities, DeferredHandle, ErasedApiFullOptions, ErasedApiOptionsPatch,
+    ErasedPayloadContext, ErasedPayloadTransform, HeaderMapSpec, HttpRequest, HttpResponse,
+    HttpTransport, LocalAssistantStream, LocalAttemptMiddleware, LocalBoxFuture,
+    LocalDefaultRetryClassifier, LocalDefaultRetrySleeper, LocalErasedPayloadTransform,
+    LocalHttpResponse, LocalHttpTransport, LocalManagedModelCatalog, LocalModelCatalogSource,
+    LocalProviderCatalogState, LocalResponseObserver, LocalRetryClassifier, LocalRetrySleeper,
+    ManagedModelCatalog, ModelCatalogSource, ModelDescriptor, ModelRef,
+    PayloadTransformDisposition, ProviderCatalogState, ProviderId, ProviderPayload,
+    ProviderResponseMetadata, RequestStartError, RequestStartErrorKind, ResponseObservationContext,
+    ResponseObserver, RetryClassifier, RetryDecision, RetryPolicy, RetrySleeper, SecretString,
+    SendBoxFuture, SimpleGenerationOptions, apply_header_spec,
     establish_with_retry_and_local_sleeper, establish_with_retry_and_sleeper,
     request_id_from_headers,
 };
@@ -496,6 +497,7 @@ impl AiError {
             AiErrorKind::InvalidRequest | AiErrorKind::Protocol => {
                 RequestStartErrorKind::InvalidRequest
             }
+            AiErrorKind::UnsupportedOperation => RequestStartErrorKind::UnsupportedOperation,
             AiErrorKind::UnknownProvider => RequestStartErrorKind::UnknownProvider,
             AiErrorKind::UnknownModel => RequestStartErrorKind::UnknownModel,
             AiErrorKind::Cancelled => RequestStartErrorKind::Cancelled,
@@ -545,6 +547,8 @@ pub enum AiErrorKind {
     ProviderRejected,
     /// Provider protocol violation.
     Protocol,
+    /// The selected provider/API does not implement the requested operation.
+    UnsupportedOperation,
     /// Caller cancelled the request.
     Cancelled,
     /// Internal invariant or middleware failure.
@@ -583,6 +587,42 @@ pub struct ResolvedApiRequest {
     /// Resolved retry policy.
     pub retry_policy: RetryPolicy,
     /// Per-attempt HTTP response-establishment timeout.
+    pub timeout: Option<Duration>,
+    /// Provider-selected retry classifier.
+    pub retry_classifier: Arc<dyn RetryClassifier>,
+}
+
+/// Resolved provider request for deferred fetch or cancellation.
+///
+/// Unlike [`ResolvedApiRequest`], this operation has no canonical context or
+/// generation payload. It still uses the same auth, endpoint, header,
+/// observer, retry, timeout, and attempt-middleware resolution path.
+pub struct ResolvedDeferredRequest {
+    /// Current model descriptor.
+    pub model: ModelDescriptor,
+    /// Durable provider token being redeemed or cancelled.
+    pub handle: DeferredHandle,
+    /// Maximum provider long-poll duration for fetch; absent for cancellation.
+    pub wait_ms: Option<u64>,
+    /// Common transport controls.
+    pub request_options: ApiRequestOptions,
+    /// Effective endpoint after auth resolution.
+    pub endpoint: Url,
+    /// Final logical headers after transforms.
+    pub headers: HeaderMap,
+    /// Credential-derived invariant transport headers.
+    pub auth_headers: HeaderMap,
+    /// Resolved provider secret when needed outside headers.
+    pub api_key: Option<SecretString>,
+    /// Selected API family.
+    pub api: ApiId,
+    /// Attempt-independent response observers.
+    pub response_observers: Arc<[Arc<dyn ResponseObserver>]>,
+    /// Attempt middleware in registration order.
+    pub attempt_middleware: Arc<[Arc<dyn AttemptMiddleware>]>,
+    /// Resolved retry policy.
+    pub retry_policy: RetryPolicy,
+    /// Per-attempt response-establishment timeout.
     pub timeout: Option<Duration>,
     /// Provider-selected retry classifier.
     pub retry_classifier: Arc<dyn RetryClassifier>,
@@ -638,6 +678,36 @@ pub struct ApiExecutionContext<'a> {
     pub request_options: &'a ApiRequestOptions,
     /// Original call options, unaffected by payload middleware.
     pub call_options: ApiCallOptions<'a>,
+}
+
+/// HTTP execution resources for an erased deferred-response handler.
+pub struct DeferredExecutionContext<'a> {
+    /// Current catalog model.
+    pub model: &'a ModelDescriptor,
+    /// Effective endpoint.
+    pub endpoint: &'a Url,
+    /// Final logical headers.
+    pub headers: &'a HeaderMap,
+    /// Credential-derived invariant transport headers.
+    pub auth_headers: &'a HeaderMap,
+    /// Resolved retry policy.
+    pub retry_policy: &'a RetryPolicy,
+    /// Per-attempt response-establishment timeout.
+    pub timeout: Option<Duration>,
+    /// Provider-selected retry classifier.
+    pub retry_classifier: &'a dyn RetryClassifier,
+    /// Injected HTTP transport.
+    pub transport: &'a dyn HttpTransport,
+    /// Request cancellation token.
+    pub cancellation: &'a CancellationToken,
+    /// Resolved provider key for SDK-style handlers.
+    pub api_key: Option<&'a SecretString>,
+    /// Common request controls.
+    pub request_options: &'a ApiRequestOptions,
+    /// Response observers applied by a deferred handler that establishes HTTP.
+    pub response_observers: &'a [Arc<dyn ResponseObserver>],
+    /// Attempt middleware applied by a deferred handler that establishes HTTP.
+    pub attempt_middleware: &'a [Arc<dyn AttemptMiddleware>],
 }
 
 /// Established provider response passed to the API-family stream decoder.
@@ -712,6 +782,43 @@ pub trait ErasedApiHandler: Send + Sync + 'static {
         _execution: &ApiExecutionContext<'_>,
     ) -> Result<(), AiError> {
         Ok(())
+    }
+
+    /// Declares optional deferred-response operations implemented by this
+    /// handler. Lazy/provider adapters use this before auth resolution.
+    fn deferred_capabilities(&self) -> DeferredCapabilities {
+        DeferredCapabilities::NONE
+    }
+
+    /// Polls or long-polls one deferred response.
+    fn fetch_deferred<'a>(
+        &'a self,
+        _handle: &'a DeferredHandle,
+        _wait_ms: Option<u64>,
+        execution: DeferredExecutionContext<'a>,
+    ) -> SendBoxFuture<'a, Result<AssistantStream, AiError>> {
+        Box::pin(async move {
+            Err(AiError::new(
+                AiErrorKind::UnsupportedOperation,
+                "API does not support deferred responses",
+            )
+            .with_model(execution.model.common.model_ref.clone()))
+        })
+    }
+
+    /// Attempts best-effort cancellation of one deferred response.
+    fn cancel_deferred<'a>(
+        &'a self,
+        _handle: &'a DeferredHandle,
+        execution: DeferredExecutionContext<'a>,
+    ) -> SendBoxFuture<'a, Result<(), AiError>> {
+        Box::pin(async move {
+            Err(AiError::new(
+                AiErrorKind::UnsupportedOperation,
+                "API cannot cancel deferred responses",
+            )
+            .with_model(execution.model.common.model_ref.clone()))
+        })
     }
 
     /// Converts an established response body into normalized assistant events.
@@ -802,6 +909,41 @@ pub trait ChatApi: Send + Sync + 'static {
         _headers: &mut HeaderMap,
     ) -> Result<(), AiError> {
         Ok(())
+    }
+
+    /// Declares optional deferred-response operations exposed by this API.
+    fn deferred_capabilities(&self) -> DeferredCapabilities {
+        DeferredCapabilities::NONE
+    }
+
+    /// Establishes a normalized stream for one deferred fetch.
+    fn fetch_deferred(
+        &self,
+        request: ResolvedDeferredRequest,
+        _cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<AssistantStream, AiError>> {
+        Box::pin(async move {
+            Err(AiError::new(
+                AiErrorKind::UnsupportedOperation,
+                "API does not support deferred responses",
+            )
+            .with_model(request.model.common.model_ref))
+        })
+    }
+
+    /// Attempts best-effort cancellation of one deferred response.
+    fn cancel_deferred(
+        &self,
+        request: ResolvedDeferredRequest,
+        _cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<(), AiError>> {
+        Box::pin(async move {
+            Err(AiError::new(
+                AiErrorKind::UnsupportedOperation,
+                "API cannot cancel deferred responses",
+            )
+            .with_model(request.model.common.model_ref))
+        })
     }
 
     /// Establishes a normalized assistant stream.
@@ -1100,6 +1242,72 @@ impl ChatApi for HttpChatApi {
         )
     }
 
+    fn deferred_capabilities(&self) -> DeferredCapabilities {
+        self.handler.deferred_capabilities()
+    }
+
+    fn fetch_deferred(
+        &self,
+        request: ResolvedDeferredRequest,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<AssistantStream, AiError>> {
+        Box::pin(async move {
+            cancellation.check().map_err(|_| {
+                AiError::new(AiErrorKind::Cancelled, "request cancelled")
+                    .with_model(request.model.common.model_ref.clone())
+            })?;
+            let execution = DeferredExecutionContext {
+                model: &request.model,
+                endpoint: &request.endpoint,
+                headers: &request.headers,
+                auth_headers: &request.auth_headers,
+                retry_policy: &request.retry_policy,
+                timeout: request.timeout,
+                retry_classifier: request.retry_classifier.as_ref(),
+                transport: self.transport.as_ref(),
+                cancellation: &cancellation,
+                api_key: request.api_key.as_ref(),
+                request_options: &request.request_options,
+                response_observers: &request.response_observers,
+                attempt_middleware: &request.attempt_middleware,
+            };
+            self.handler
+                .fetch_deferred(&request.handle, request.wait_ms, execution)
+                .await
+        })
+    }
+
+    fn cancel_deferred(
+        &self,
+        request: ResolvedDeferredRequest,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<(), AiError>> {
+        Box::pin(async move {
+            cancellation.check().map_err(|_| {
+                AiError::new(AiErrorKind::Cancelled, "request cancelled")
+                    .with_model(request.model.common.model_ref.clone())
+            })?;
+            let execution = DeferredExecutionContext {
+                model: &request.model,
+                endpoint: &request.endpoint,
+                headers: &request.headers,
+                auth_headers: &request.auth_headers,
+                retry_policy: &request.retry_policy,
+                timeout: request.timeout,
+                retry_classifier: request.retry_classifier.as_ref(),
+                transport: self.transport.as_ref(),
+                cancellation: &cancellation,
+                api_key: request.api_key.as_ref(),
+                request_options: &request.request_options,
+                response_observers: &request.response_observers,
+                attempt_middleware: &request.attempt_middleware,
+            };
+            self.handler
+                .cancel_deferred(&request.handle, execution)
+                .await
+        })
+    }
+
     fn stream(
         &self,
         request: ResolvedApiRequest,
@@ -1147,6 +1355,38 @@ pub struct LocalResolvedApiRequest {
     pub retry_classifier: Rc<dyn LocalRetryClassifier>,
 }
 
+/// Resolved single-threaded request for deferred fetch or cancellation.
+pub struct LocalResolvedDeferredRequest {
+    /// Current model descriptor.
+    pub model: ModelDescriptor,
+    /// Durable provider token being redeemed or cancelled.
+    pub handle: DeferredHandle,
+    /// Maximum provider long-poll duration for fetch; absent for cancellation.
+    pub wait_ms: Option<u64>,
+    /// Common transport controls.
+    pub request_options: ApiRequestOptions,
+    /// Effective endpoint after auth resolution.
+    pub endpoint: Url,
+    /// Final logical headers after transforms.
+    pub headers: HeaderMap,
+    /// Credential-derived invariant transport headers.
+    pub auth_headers: HeaderMap,
+    /// Resolved provider secret when needed outside headers.
+    pub api_key: Option<SecretString>,
+    /// Selected API family.
+    pub api: ApiId,
+    /// Local response observers.
+    pub response_observers: Rc<[Rc<dyn LocalResponseObserver>]>,
+    /// Local attempt middleware.
+    pub attempt_middleware: Rc<[Rc<dyn LocalAttemptMiddleware>]>,
+    /// Resolved retry policy.
+    pub retry_policy: RetryPolicy,
+    /// Per-attempt response-establishment timeout.
+    pub timeout: Option<Duration>,
+    /// Provider-selected local retry classifier.
+    pub retry_classifier: Rc<dyn LocalRetryClassifier>,
+}
+
 /// Local API execution resources available during lowering and decoding.
 pub struct LocalApiExecutionContext<'a> {
     /// Current catalog model.
@@ -1174,6 +1414,36 @@ pub struct LocalApiExecutionContext<'a> {
     pub request_options: &'a ApiRequestOptions,
     /// Original call options, unaffected by payload middleware.
     pub call_options: ApiCallOptions<'a>,
+}
+
+/// Local HTTP execution resources for an erased deferred-response handler.
+pub struct LocalDeferredExecutionContext<'a> {
+    /// Current catalog model.
+    pub model: &'a ModelDescriptor,
+    /// Effective endpoint.
+    pub endpoint: &'a Url,
+    /// Final logical headers.
+    pub headers: &'a HeaderMap,
+    /// Credential-derived invariant transport headers.
+    pub auth_headers: &'a HeaderMap,
+    /// Resolved retry policy.
+    pub retry_policy: &'a RetryPolicy,
+    /// Per-attempt response-establishment timeout.
+    pub timeout: Option<Duration>,
+    /// Provider-selected local retry classifier.
+    pub retry_classifier: &'a dyn LocalRetryClassifier,
+    /// Injected local HTTP transport.
+    pub transport: &'a dyn LocalHttpTransport,
+    /// Request cancellation token.
+    pub cancellation: &'a CancellationToken,
+    /// Resolved provider key for SDK-style handlers.
+    pub api_key: Option<&'a SecretString>,
+    /// Common request controls.
+    pub request_options: &'a ApiRequestOptions,
+    /// Local response observers.
+    pub response_observers: &'a [Rc<dyn LocalResponseObserver>],
+    /// Local attempt middleware.
+    pub attempt_middleware: &'a [Rc<dyn LocalAttemptMiddleware>],
 }
 
 /// Established local provider response passed to the local decoder.
@@ -1248,6 +1518,42 @@ pub trait LocalErasedApiHandler: 'static {
         Ok(())
     }
 
+    /// Declares optional local deferred-response operations.
+    fn deferred_capabilities(&self) -> DeferredCapabilities {
+        DeferredCapabilities::NONE
+    }
+
+    /// Polls or long-polls one deferred response locally.
+    fn fetch_deferred<'a>(
+        &'a self,
+        _handle: &'a DeferredHandle,
+        _wait_ms: Option<u64>,
+        execution: LocalDeferredExecutionContext<'a>,
+    ) -> LocalBoxFuture<'a, Result<LocalAssistantStream, AiError>> {
+        Box::pin(async move {
+            Err(AiError::new(
+                AiErrorKind::UnsupportedOperation,
+                "local API does not support deferred responses",
+            )
+            .with_model(execution.model.common.model_ref.clone()))
+        })
+    }
+
+    /// Attempts best-effort local cancellation of one deferred response.
+    fn cancel_deferred<'a>(
+        &'a self,
+        _handle: &'a DeferredHandle,
+        execution: LocalDeferredExecutionContext<'a>,
+    ) -> LocalBoxFuture<'a, Result<(), AiError>> {
+        Box::pin(async move {
+            Err(AiError::new(
+                AiErrorKind::UnsupportedOperation,
+                "local API cannot cancel deferred responses",
+            )
+            .with_model(execution.model.common.model_ref.clone()))
+        })
+    }
+
     /// Converts an established local response into normalized assistant events.
     fn decode_stream(
         &self,
@@ -1291,6 +1597,41 @@ pub trait LocalChatApi: 'static {
         _headers: &mut HeaderMap,
     ) -> Result<(), AiError> {
         Ok(())
+    }
+
+    /// Declares optional local deferred-response operations.
+    fn deferred_capabilities(&self) -> DeferredCapabilities {
+        DeferredCapabilities::NONE
+    }
+
+    /// Establishes a local normalized stream for one deferred fetch.
+    fn fetch_deferred(
+        &self,
+        request: LocalResolvedDeferredRequest,
+        _cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<LocalAssistantStream, AiError>> {
+        Box::pin(async move {
+            Err(AiError::new(
+                AiErrorKind::UnsupportedOperation,
+                "local API does not support deferred responses",
+            )
+            .with_model(request.model.common.model_ref))
+        })
+    }
+
+    /// Attempts best-effort local cancellation of one deferred response.
+    fn cancel_deferred(
+        &self,
+        request: LocalResolvedDeferredRequest,
+        _cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<(), AiError>> {
+        Box::pin(async move {
+            Err(AiError::new(
+                AiErrorKind::UnsupportedOperation,
+                "local API cannot cancel deferred responses",
+            )
+            .with_model(request.model.common.model_ref))
+        })
     }
 
     /// Establishes a normalized local assistant stream.
@@ -1595,6 +1936,72 @@ impl LocalChatApi for LocalHttpChatApi {
             request_options,
             headers,
         )
+    }
+
+    fn deferred_capabilities(&self) -> DeferredCapabilities {
+        self.handler.deferred_capabilities()
+    }
+
+    fn fetch_deferred(
+        &self,
+        request: LocalResolvedDeferredRequest,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<LocalAssistantStream, AiError>> {
+        Box::pin(async move {
+            cancellation.check().map_err(|_| {
+                AiError::new(AiErrorKind::Cancelled, "request cancelled")
+                    .with_model(request.model.common.model_ref.clone())
+            })?;
+            let execution = LocalDeferredExecutionContext {
+                model: &request.model,
+                endpoint: &request.endpoint,
+                headers: &request.headers,
+                auth_headers: &request.auth_headers,
+                retry_policy: &request.retry_policy,
+                timeout: request.timeout,
+                retry_classifier: request.retry_classifier.as_ref(),
+                transport: self.transport.as_ref(),
+                cancellation: &cancellation,
+                api_key: request.api_key.as_ref(),
+                request_options: &request.request_options,
+                response_observers: &request.response_observers,
+                attempt_middleware: &request.attempt_middleware,
+            };
+            self.handler
+                .fetch_deferred(&request.handle, request.wait_ms, execution)
+                .await
+        })
+    }
+
+    fn cancel_deferred(
+        &self,
+        request: LocalResolvedDeferredRequest,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<(), AiError>> {
+        Box::pin(async move {
+            cancellation.check().map_err(|_| {
+                AiError::new(AiErrorKind::Cancelled, "request cancelled")
+                    .with_model(request.model.common.model_ref.clone())
+            })?;
+            let execution = LocalDeferredExecutionContext {
+                model: &request.model,
+                endpoint: &request.endpoint,
+                headers: &request.headers,
+                auth_headers: &request.auth_headers,
+                retry_policy: &request.retry_policy,
+                timeout: request.timeout,
+                retry_classifier: request.retry_classifier.as_ref(),
+                transport: self.transport.as_ref(),
+                cancellation: &cancellation,
+                api_key: request.api_key.as_ref(),
+                request_options: &request.request_options,
+                response_observers: &request.response_observers,
+                attempt_middleware: &request.attempt_middleware,
+            };
+            self.handler
+                .cancel_deferred(&request.handle, execution)
+                .await
+        })
     }
 
     fn stream(

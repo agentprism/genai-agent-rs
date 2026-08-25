@@ -2,25 +2,26 @@
 //! §3.6 and part 2 §2.6.
 
 use crate::{
-    AiError, ApiFamily, ApiRequestOptions, AttemptMiddleware, AuthContext, AuthInteraction,
-    AuthResolutionOverrides, AuthResolutionPurpose, CancellationToken, CatalogError,
-    CatalogFetchContext, CatalogSnapshot, Context, Credential, CredentialInfo, CredentialStore,
-    EmptyAuthContext, ErasedApiFullOptions, ErasedPayloadTransform, HeaderTransform,
-    HeaderTransformContext, InMemoryCredentialStore, InMemoryModelOverrideStore,
+    AiError, ApiFamily, ApiRequestOptions, AssistantMessage, AttemptMiddleware, AuthContext,
+    AuthInteraction, AuthResolutionOverrides, AuthResolutionPurpose, CancellationToken,
+    CatalogError, CatalogFetchContext, CatalogSnapshot, Context, Credential, CredentialInfo,
+    CredentialStore, DeferredCancelOptions, DeferredFetchOptions, DeferredHandle,
+    DeferredModelRuntime, EmptyAuthContext, ErasedApiFullOptions, ErasedPayloadTransform,
+    HeaderTransform, HeaderTransformContext, InMemoryCredentialStore, InMemoryModelOverrideStore,
     InMemoryModelsStore, LocalAssistantStream, LocalAttemptMiddleware, LocalAuthContext,
-    LocalAuthInteraction, LocalBoxFuture, LocalCredentialStore, LocalErasedPayloadTransform,
-    LocalHeaderTransform, LocalInMemoryCredentialStore, LocalInMemoryModelOverrideStore,
-    LocalInMemoryModelsStore, LocalModelOverrideStore, LocalModelRuntime, LocalModelsStore,
-    LocalPayloadTransform, LocalPayloadTransformAdapter, LocalProviderCatalogState,
-    LocalProviderRefreshCoordination, LocalProviderRegistration, LocalResolvedApiRequest,
-    LocalResponseObserver, ModelDescriptor, ModelOverride, ModelOverrideStore, ModelRef,
-    ModelRequest, ModelRuntime, ModelsStore, PayloadTransform, PayloadTransformAdapter,
-    ProviderCatalogLayers, ProviderCatalogState, ProviderRefreshCoordination,
-    ProviderRefreshResult, ProviderRegistration, ProviderRegistrationError, RefreshGeneration,
-    RefreshReport, RefreshRequest, RequestStartError, RequestStartErrorKind, ResolvedApiRequest,
-    ResponseObserver, SendBoxFuture, SimpleGenerationOptions,
-    apply_anthropic_messages_default_headers, apply_header_spec,
-    apply_openai_codex_responses_session_affinity_headers,
+    LocalAuthInteraction, LocalBoxFuture, LocalCredentialStore, LocalDeferredModelRuntime,
+    LocalErasedPayloadTransform, LocalHeaderTransform, LocalInMemoryCredentialStore,
+    LocalInMemoryModelOverrideStore, LocalInMemoryModelsStore, LocalModelOverrideStore,
+    LocalModelRuntime, LocalModelsStore, LocalPayloadTransform, LocalPayloadTransformAdapter,
+    LocalProviderCatalogState, LocalProviderRefreshCoordination, LocalProviderRegistration,
+    LocalResolvedApiRequest, LocalResolvedDeferredRequest, LocalResponseObserver, ModelDescriptor,
+    ModelOverride, ModelOverrideStore, ModelRef, ModelRequest, ModelRuntime, ModelsStore,
+    PayloadTransform, PayloadTransformAdapter, ProviderCatalogLayers, ProviderCatalogState,
+    ProviderRefreshCoordination, ProviderRefreshResult, ProviderRegistration,
+    ProviderRegistrationError, RefreshGeneration, RefreshReport, RefreshRequest, RequestStartError,
+    RequestStartErrorKind, ResolvedApiRequest, ResolvedDeferredRequest, ResponseObserver,
+    SendBoxFuture, SimpleGenerationOptions, apply_anthropic_messages_default_headers,
+    apply_header_spec, apply_openai_codex_responses_session_affinity_headers,
     apply_openai_completions_session_affinity_headers,
     apply_openai_responses_session_affinity_headers, local_provider_default_headers,
     merge_header_map, provider_default_headers, publish_candidate, publish_local_candidate,
@@ -68,6 +69,22 @@ struct ProviderSlot {
     // merely because the provider was temporarily removed.
     registration: Option<Arc<ProviderRegistration>>,
     coordination: Arc<ProviderRefreshCoordination>,
+}
+
+#[derive(Clone, Copy)]
+enum DeferredOperation {
+    Fetch,
+    Cancel,
+}
+
+struct DeferredResolutionRequest {
+    model_ref: ModelRef,
+    handle: DeferredHandle,
+    wait_ms: Option<u64>,
+    request_options: ApiRequestOptions,
+    auth_overrides: AuthResolutionOverrides,
+    operation: DeferredOperation,
+    cancellation: CancellationToken,
 }
 
 impl fmt::Debug for Models {
@@ -804,6 +821,298 @@ impl Models {
         )
     }
 
+    /// Polls or long-polls a provider-owned deferred response and returns its
+    /// terminal assistant message. A still-pending result has finish reason
+    /// [`crate::AssistantFinishReason::Deferred`] and carries the same handle.
+    pub fn fetch_deferred(
+        &self,
+        model: ModelRef,
+        handle: DeferredHandle,
+        options: DeferredFetchOptions,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<AssistantMessage, RequestStartError>> {
+        self.fetch_deferred_with_auth(
+            model,
+            handle,
+            options,
+            AuthResolutionOverrides::default(),
+            cancellation,
+        )
+    }
+
+    /// Polls a deferred response with explicit request-scoped authentication
+    /// overrides. This mirrors [`Models::stream_simple_with_auth`] and keeps
+    /// secrets and provider environment values out of serializable options.
+    pub fn fetch_deferred_with_auth(
+        &self,
+        model: ModelRef,
+        handle: DeferredHandle,
+        options: DeferredFetchOptions,
+        auth_overrides: AuthResolutionOverrides,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<AssistantMessage, RequestStartError>> {
+        Box::pin(async move {
+            let (implementation, request) = self
+                .resolve_deferred_request(DeferredResolutionRequest {
+                    model_ref: model.clone(),
+                    handle,
+                    wait_ms: options.wait_ms,
+                    request_options: options.request,
+                    auth_overrides,
+                    operation: DeferredOperation::Fetch,
+                    cancellation: cancellation.clone(),
+                })
+                .await?;
+            let mut stream = implementation
+                .fetch_deferred(request, cancellation)
+                .await
+                .map_err(AiError::into_request_start)?;
+            while let Some(event) = stream.next().await {
+                if let Some(message) = event.terminal_message() {
+                    return Ok(message.clone());
+                }
+            }
+            Err(RequestStartError::new(
+                RequestStartErrorKind::RuntimeUnavailable,
+                "deferred response stream ended without a terminal message",
+            )
+            .with_model(model))
+        })
+    }
+
+    /// Attempts best-effort provider cancellation of a deferred response.
+    pub fn cancel_deferred(
+        &self,
+        model: ModelRef,
+        handle: DeferredHandle,
+        options: DeferredCancelOptions,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<(), RequestStartError>> {
+        self.cancel_deferred_with_auth(
+            model,
+            handle,
+            options,
+            AuthResolutionOverrides::default(),
+            cancellation,
+        )
+    }
+
+    /// Cancels a deferred response with explicit request-scoped
+    /// authentication overrides.
+    pub fn cancel_deferred_with_auth(
+        &self,
+        model: ModelRef,
+        handle: DeferredHandle,
+        options: DeferredCancelOptions,
+        auth_overrides: AuthResolutionOverrides,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<(), RequestStartError>> {
+        Box::pin(async move {
+            let (implementation, request) = self
+                .resolve_deferred_request(DeferredResolutionRequest {
+                    model_ref: model,
+                    handle,
+                    wait_ms: None,
+                    request_options: options,
+                    auth_overrides,
+                    operation: DeferredOperation::Cancel,
+                    cancellation: cancellation.clone(),
+                })
+                .await?;
+            implementation
+                .cancel_deferred(request, cancellation)
+                .await
+                .map_err(AiError::into_request_start)
+        })
+    }
+
+    async fn resolve_deferred_request(
+        &self,
+        request: DeferredResolutionRequest,
+    ) -> Result<(Arc<dyn crate::ChatApi>, ResolvedDeferredRequest), RequestStartError> {
+        let DeferredResolutionRequest {
+            model_ref,
+            handle,
+            wait_ms,
+            request_options,
+            auth_overrides,
+            operation,
+            cancellation,
+        } = request;
+        cancellation.check().map_err(|_| {
+            RequestStartError::new(RequestStartErrorKind::Cancelled, "request cancelled")
+                .with_model(model_ref.clone())
+        })?;
+        let provider = self.provider(&model_ref.provider).ok_or_else(|| {
+            RequestStartError::new(
+                RequestStartErrorKind::UnknownProvider,
+                format!("unknown provider: {}", model_ref.provider),
+            )
+            .with_model(model_ref.clone())
+        })?;
+        let model = provider
+            .catalog
+            .snapshot()
+            .iter()
+            .find(|model| model.common.model_ref == model_ref)
+            .cloned()
+            .ok_or_else(|| {
+                RequestStartError::new(
+                    RequestStartErrorKind::UnknownModel,
+                    format!("unknown model: {model_ref:?}"),
+                )
+                .with_model(model_ref.clone())
+            })?;
+        let api = model.api.api_id();
+        let provider_supports_operation = provider.apis.values().any(|api| {
+            let capabilities = api.deferred_capabilities();
+            match operation {
+                DeferredOperation::Fetch => capabilities.fetch,
+                DeferredOperation::Cancel => capabilities.cancel,
+            }
+        });
+        if !provider_supports_operation {
+            return Err(RequestStartError::new(
+                RequestStartErrorKind::UnsupportedOperation,
+                format!(
+                    "Provider {} does not support deferred responses",
+                    provider.descriptor.id
+                ),
+            )
+            .with_model(model_ref));
+        }
+
+        let resolved_auth = await_or_cancelled(
+            provider.auth.resolve(
+                crate::ResolveAuthRequest {
+                    provider: provider.descriptor.clone(),
+                    model: Some(model.clone()),
+                    purpose: AuthResolutionPurpose::Request,
+                    credential_store: Arc::clone(&self.inner.credentials),
+                    auth_context: Arc::clone(&self.inner.auth_context),
+                    overrides: auth_overrides,
+                },
+                cancellation.clone(),
+            ),
+            &cancellation,
+        )
+        .await?
+        .map_err(|error| {
+            RequestStartError::new(RequestStartErrorKind::RuntimeUnavailable, error.to_string())
+                .with_model(model.common.model_ref.clone())
+        })?;
+        let header_only_auth = resolved_auth.is_none()
+            && matches!(&model.api, crate::ApiModelConfig::OpenAiResponses(_))
+            && has_responses_auth_header_spec(&request_options.headers);
+        let auth = match resolved_auth {
+            Some(auth) => auth,
+            None if header_only_auth => crate::ResolvedAuth {
+                api_key: None,
+                headers: http::HeaderMap::new(),
+                transport_headers: http::HeaderMap::new(),
+                base_url: None,
+                source: crate::AuthSource::new("explicit_header"),
+            },
+            None => return Err(provider_not_configured(&model_ref, &provider.descriptor.id)),
+        };
+
+        let endpoint = auth
+            .base_url
+            .clone()
+            .or_else(|| provider.descriptor.base_url.clone())
+            .unwrap_or_else(|| model.common.base_url.clone());
+        let mut auth_headers = auth.transport_headers.clone();
+        merge_header_map(&mut auth_headers, &auth.headers);
+        let mut headers =
+            provider_default_headers(&provider).map_err(AiError::into_request_start)?;
+        merge_header_map(&mut headers, &auth.headers);
+        apply_header_spec(&mut headers, &model.common.headers).map_err(|error| {
+            RequestStartError::new(RequestStartErrorKind::InvalidRequest, error.message)
+                .with_model(model_ref.clone())
+        })?;
+        apply_header_spec(&mut headers, &request_options.headers).map_err(|error| {
+            RequestStartError::new(RequestStartErrorKind::InvalidRequest, error.message)
+                .with_model(model_ref.clone())
+        })?;
+        for transform in self.inner.header_transforms.iter() {
+            await_or_cancelled(
+                transform.transform(
+                    HeaderTransformContext {
+                        provider: &provider.descriptor.id,
+                        model: &model,
+                        api: &api,
+                        endpoint: &endpoint,
+                    },
+                    &mut headers,
+                ),
+                &cancellation,
+            )
+            .await?
+            .map_err(|error| {
+                RequestStartError::new(RequestStartErrorKind::Internal, error.message)
+                    .with_model(model_ref.clone())
+            })?;
+        }
+        if header_only_auth && !has_responses_auth_header(&headers) {
+            return Err(provider_not_configured(&model_ref, &provider.descriptor.id));
+        }
+
+        let implementation = provider.apis.get(&api).cloned();
+        let target_supports_operation = implementation.as_ref().is_some_and(|implementation| {
+            let capabilities = implementation.deferred_capabilities();
+            match operation {
+                DeferredOperation::Fetch => capabilities.fetch,
+                DeferredOperation::Cancel => capabilities.cancel,
+            }
+        });
+        if !target_supports_operation {
+            let message = match operation {
+                DeferredOperation::Fetch => format!(
+                    "Provider {} does not support deferred responses for \"{api}\"",
+                    provider.descriptor.id
+                ),
+                DeferredOperation::Cancel => format!(
+                    "Provider {} cannot cancel deferred responses for \"{api}\"",
+                    provider.descriptor.id
+                ),
+            };
+            return Err(RequestStartError::new(
+                RequestStartErrorKind::UnsupportedOperation,
+                message,
+            )
+            .with_model(model_ref));
+        }
+        let implementation = implementation.expect("checked deferred API implementation");
+
+        let mut retry_policy = provider.retry_policy.clone();
+        if let Some(max_retries) = request_options.max_retries {
+            retry_policy.max_retries = max_retries;
+        }
+        if let Some(max_delay_ms) = request_options.max_retry_delay_ms {
+            retry_policy.max_server_delay = Some(Duration::from_millis(max_delay_ms));
+        }
+        let timeout = request_options.timeout_ms.map(Duration::from_millis);
+        Ok((
+            implementation,
+            ResolvedDeferredRequest {
+                model,
+                handle,
+                wait_ms,
+                request_options,
+                endpoint,
+                headers,
+                auth_headers,
+                api,
+                api_key: auth.api_key,
+                response_observers: Arc::clone(&self.inner.response_observers),
+                attempt_middleware: Arc::clone(&self.inner.attempt_middleware),
+                retry_policy,
+                timeout,
+                retry_classifier: Arc::clone(&provider.retry_classifier),
+            },
+        ))
+    }
+
     fn stream_request_with_auth(
         &self,
         request: ModelRequest,
@@ -1094,6 +1403,28 @@ impl ModelRuntime for Models {
         cancellation: CancellationToken,
     ) -> SendBoxFuture<'_, Result<crate::AssistantStream, RequestStartError>> {
         self.stream_simple(request, cancellation)
+    }
+}
+
+impl DeferredModelRuntime for Models {
+    fn fetch_deferred(
+        &self,
+        model: ModelRef,
+        handle: DeferredHandle,
+        options: DeferredFetchOptions,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<AssistantMessage, RequestStartError>> {
+        Models::fetch_deferred(self, model, handle, options, cancellation)
+    }
+
+    fn cancel_deferred(
+        &self,
+        model: ModelRef,
+        handle: DeferredHandle,
+        options: DeferredCancelOptions,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<(), RequestStartError>> {
+        Models::cancel_deferred(self, model, handle, options, cancellation)
     }
 }
 
@@ -2015,6 +2346,296 @@ impl LocalModels {
         )
     }
 
+    /// Local counterpart to [`Models::fetch_deferred`].
+    pub fn fetch_deferred(
+        &self,
+        model: ModelRef,
+        handle: DeferredHandle,
+        options: DeferredFetchOptions,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<AssistantMessage, RequestStartError>> {
+        self.fetch_deferred_with_auth(
+            model,
+            handle,
+            options,
+            AuthResolutionOverrides::default(),
+            cancellation,
+        )
+    }
+
+    /// Local deferred fetch with explicit request-scoped authentication
+    /// overrides.
+    pub fn fetch_deferred_with_auth(
+        &self,
+        model: ModelRef,
+        handle: DeferredHandle,
+        options: DeferredFetchOptions,
+        auth_overrides: AuthResolutionOverrides,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<AssistantMessage, RequestStartError>> {
+        Box::pin(async move {
+            let (implementation, request) = self
+                .resolve_deferred_request(DeferredResolutionRequest {
+                    model_ref: model.clone(),
+                    handle,
+                    wait_ms: options.wait_ms,
+                    request_options: options.request,
+                    auth_overrides,
+                    operation: DeferredOperation::Fetch,
+                    cancellation: cancellation.clone(),
+                })
+                .await?;
+            let mut stream = implementation
+                .fetch_deferred(request, cancellation)
+                .await
+                .map_err(AiError::into_request_start)?;
+            while let Some(event) = stream.next().await {
+                if let Some(message) = event.terminal_message() {
+                    return Ok(message.clone());
+                }
+            }
+            Err(RequestStartError::new(
+                RequestStartErrorKind::RuntimeUnavailable,
+                "deferred response stream ended without a terminal message",
+            )
+            .with_model(model))
+        })
+    }
+
+    /// Local counterpart to [`Models::cancel_deferred`].
+    pub fn cancel_deferred(
+        &self,
+        model: ModelRef,
+        handle: DeferredHandle,
+        options: DeferredCancelOptions,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<(), RequestStartError>> {
+        self.cancel_deferred_with_auth(
+            model,
+            handle,
+            options,
+            AuthResolutionOverrides::default(),
+            cancellation,
+        )
+    }
+
+    /// Local deferred cancellation with explicit request-scoped
+    /// authentication overrides.
+    pub fn cancel_deferred_with_auth(
+        &self,
+        model: ModelRef,
+        handle: DeferredHandle,
+        options: DeferredCancelOptions,
+        auth_overrides: AuthResolutionOverrides,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<(), RequestStartError>> {
+        Box::pin(async move {
+            let (implementation, request) = self
+                .resolve_deferred_request(DeferredResolutionRequest {
+                    model_ref: model,
+                    handle,
+                    wait_ms: None,
+                    request_options: options,
+                    auth_overrides,
+                    operation: DeferredOperation::Cancel,
+                    cancellation: cancellation.clone(),
+                })
+                .await?;
+            implementation
+                .cancel_deferred(request, cancellation)
+                .await
+                .map_err(AiError::into_request_start)
+        })
+    }
+
+    async fn resolve_deferred_request(
+        &self,
+        request: DeferredResolutionRequest,
+    ) -> Result<(Rc<dyn crate::LocalChatApi>, LocalResolvedDeferredRequest), RequestStartError>
+    {
+        let DeferredResolutionRequest {
+            model_ref,
+            handle,
+            wait_ms,
+            request_options,
+            auth_overrides,
+            operation,
+            cancellation,
+        } = request;
+        cancellation.check().map_err(|_| {
+            RequestStartError::new(RequestStartErrorKind::Cancelled, "request cancelled")
+                .with_model(model_ref.clone())
+        })?;
+        let provider = self.provider(&model_ref.provider).ok_or_else(|| {
+            RequestStartError::new(
+                RequestStartErrorKind::UnknownProvider,
+                format!("unknown provider: {}", model_ref.provider),
+            )
+            .with_model(model_ref.clone())
+        })?;
+        let model = provider
+            .catalog
+            .snapshot()
+            .iter()
+            .find(|model| model.common.model_ref == model_ref)
+            .cloned()
+            .ok_or_else(|| {
+                RequestStartError::new(
+                    RequestStartErrorKind::UnknownModel,
+                    format!("unknown model: {model_ref:?}"),
+                )
+                .with_model(model_ref.clone())
+            })?;
+        let api = model.api.api_id();
+        let provider_supports_operation = provider.apis.values().any(|api| {
+            let capabilities = api.deferred_capabilities();
+            match operation {
+                DeferredOperation::Fetch => capabilities.fetch,
+                DeferredOperation::Cancel => capabilities.cancel,
+            }
+        });
+        if !provider_supports_operation {
+            return Err(RequestStartError::new(
+                RequestStartErrorKind::UnsupportedOperation,
+                format!(
+                    "Provider {} does not support deferred responses",
+                    provider.descriptor.id
+                ),
+            )
+            .with_model(model_ref));
+        }
+
+        let resolved_auth = await_or_cancelled(
+            provider.auth.resolve(
+                crate::LocalResolveAuthRequest {
+                    provider: provider.descriptor.clone(),
+                    model: Some(model.clone()),
+                    purpose: AuthResolutionPurpose::Request,
+                    credential_store: Rc::clone(&self.inner.credentials),
+                    auth_context: Rc::clone(&self.inner.auth_context),
+                    overrides: auth_overrides,
+                },
+                cancellation.clone(),
+            ),
+            &cancellation,
+        )
+        .await?
+        .map_err(|error| {
+            RequestStartError::new(RequestStartErrorKind::RuntimeUnavailable, error.to_string())
+                .with_model(model.common.model_ref.clone())
+        })?;
+        let header_only_auth = resolved_auth.is_none()
+            && matches!(&model.api, crate::ApiModelConfig::OpenAiResponses(_))
+            && has_responses_auth_header_spec(&request_options.headers);
+        let auth = match resolved_auth {
+            Some(auth) => auth,
+            None if header_only_auth => crate::ResolvedAuth {
+                api_key: None,
+                headers: http::HeaderMap::new(),
+                transport_headers: http::HeaderMap::new(),
+                base_url: None,
+                source: crate::AuthSource::new("explicit_header"),
+            },
+            None => return Err(provider_not_configured(&model_ref, &provider.descriptor.id)),
+        };
+
+        let endpoint = auth
+            .base_url
+            .clone()
+            .or_else(|| provider.descriptor.base_url.clone())
+            .unwrap_or_else(|| model.common.base_url.clone());
+        let mut auth_headers = auth.transport_headers.clone();
+        merge_header_map(&mut auth_headers, &auth.headers);
+        let mut headers =
+            local_provider_default_headers(&provider).map_err(AiError::into_request_start)?;
+        merge_header_map(&mut headers, &auth.headers);
+        apply_header_spec(&mut headers, &model.common.headers).map_err(|error| {
+            RequestStartError::new(RequestStartErrorKind::InvalidRequest, error.message)
+                .with_model(model_ref.clone())
+        })?;
+        apply_header_spec(&mut headers, &request_options.headers).map_err(|error| {
+            RequestStartError::new(RequestStartErrorKind::InvalidRequest, error.message)
+                .with_model(model_ref.clone())
+        })?;
+        for transform in self.inner.header_transforms.iter() {
+            await_or_cancelled(
+                transform.transform(
+                    HeaderTransformContext {
+                        provider: &provider.descriptor.id,
+                        model: &model,
+                        api: &api,
+                        endpoint: &endpoint,
+                    },
+                    &mut headers,
+                ),
+                &cancellation,
+            )
+            .await?
+            .map_err(|error| {
+                RequestStartError::new(RequestStartErrorKind::Internal, error.message)
+                    .with_model(model_ref.clone())
+            })?;
+        }
+        if header_only_auth && !has_responses_auth_header(&headers) {
+            return Err(provider_not_configured(&model_ref, &provider.descriptor.id));
+        }
+
+        let implementation = provider.apis.get(&api).cloned();
+        let target_supports_operation = implementation.as_ref().is_some_and(|implementation| {
+            let capabilities = implementation.deferred_capabilities();
+            match operation {
+                DeferredOperation::Fetch => capabilities.fetch,
+                DeferredOperation::Cancel => capabilities.cancel,
+            }
+        });
+        if !target_supports_operation {
+            let message = match operation {
+                DeferredOperation::Fetch => format!(
+                    "Provider {} does not support deferred responses for \"{api}\"",
+                    provider.descriptor.id
+                ),
+                DeferredOperation::Cancel => format!(
+                    "Provider {} cannot cancel deferred responses for \"{api}\"",
+                    provider.descriptor.id
+                ),
+            };
+            return Err(RequestStartError::new(
+                RequestStartErrorKind::UnsupportedOperation,
+                message,
+            )
+            .with_model(model_ref));
+        }
+        let implementation = implementation.expect("checked local deferred API implementation");
+
+        let mut retry_policy = provider.retry_policy.clone();
+        if let Some(max_retries) = request_options.max_retries {
+            retry_policy.max_retries = max_retries;
+        }
+        if let Some(max_delay_ms) = request_options.max_retry_delay_ms {
+            retry_policy.max_server_delay = Some(Duration::from_millis(max_delay_ms));
+        }
+        let timeout = request_options.timeout_ms.map(Duration::from_millis);
+        Ok((
+            implementation,
+            LocalResolvedDeferredRequest {
+                model,
+                handle,
+                wait_ms,
+                request_options,
+                endpoint,
+                headers,
+                auth_headers,
+                api,
+                api_key: auth.api_key,
+                response_observers: Rc::clone(&self.inner.response_observers),
+                attempt_middleware: Rc::clone(&self.inner.attempt_middleware),
+                retry_policy,
+                timeout,
+                retry_classifier: Rc::clone(&provider.retry_classifier),
+            },
+        ))
+    }
+
     fn stream_request_with_auth(
         &self,
         request: ModelRequest,
@@ -2297,6 +2918,28 @@ impl LocalModelRuntime for LocalModels {
         cancellation: CancellationToken,
     ) -> LocalBoxFuture<'_, Result<LocalAssistantStream, RequestStartError>> {
         self.stream_simple(request, cancellation)
+    }
+}
+
+impl LocalDeferredModelRuntime for LocalModels {
+    fn fetch_deferred(
+        &self,
+        model: ModelRef,
+        handle: DeferredHandle,
+        options: DeferredFetchOptions,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<AssistantMessage, RequestStartError>> {
+        LocalModels::fetch_deferred(self, model, handle, options, cancellation)
+    }
+
+    fn cancel_deferred(
+        &self,
+        model: ModelRef,
+        handle: DeferredHandle,
+        options: DeferredCancelOptions,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<(), RequestStartError>> {
+        LocalModels::cancel_deferred(self, model, handle, options, cancellation)
     }
 }
 

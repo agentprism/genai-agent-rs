@@ -92,6 +92,7 @@ fn mistral_tool_id_collision_uses_transcript_encounter_order_pi_exact() {
             requested_model: ModelId::new("foreign-model"),
             response_model: None,
             response_id: None,
+            deferred: None,
             end_turn: None,
             diagnostics: Vec::new(),
             content: vec![ContentBlock::ToolCall {
@@ -195,6 +196,7 @@ fn wire_mistral_conversations_ecmascript_trim_pi_exact() {
         requested_model: ModelId::new("mistral-large-latest"),
         response_model: None,
         response_id: None,
+        deferred: None,
         end_turn: None,
         diagnostics: Vec::new(),
         content: vec![

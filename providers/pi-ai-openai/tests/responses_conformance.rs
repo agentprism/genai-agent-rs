@@ -1310,6 +1310,7 @@ fn responses_fallback_message_ids_skip_unencoded_messages_pi_exact() {
         requested_model: "claude".into(),
         response_model: None,
         response_id: None,
+        deferred: None,
         end_turn: None,
         diagnostics: Vec::new(),
         content: vec![ContentBlock::Thinking {
@@ -1340,6 +1341,7 @@ fn responses_fallback_message_ids_skip_unencoded_messages_pi_exact() {
         requested_model: "claude".into(),
         response_model: None,
         response_id: None,
+        deferred: None,
         end_turn: None,
         diagnostics: Vec::new(),
         content: vec![ContentBlock::Text {
@@ -2375,6 +2377,7 @@ fn captured_responses_message(value: &Value, index: usize, model: &ModelDescript
                 .into(),
             response_model: None,
             response_id: None,
+            deferred: None,
             end_turn: None,
             diagnostics: Vec::new(),
             content: captured_responses_content(&value["content"], 10_000 + index),
@@ -3008,6 +3011,7 @@ fn assistant_tool_message(provider: &str, api: &str, model: &str, id: &str) -> A
         requested_model: model.into(),
         response_model: None,
         response_id: None,
+        deferred: None,
         end_turn: None,
         diagnostics: Vec::new(),
         content: vec![ContentBlock::ToolCall {
