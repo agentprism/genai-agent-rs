@@ -924,3 +924,102 @@ M7 added three corrections, all from M7.1 to Architecture v2 Part 2:
   `invalid_fork_target`, while whole-tree forks remain unrestricted.
 
 M7.2 added no correction note.
+
+## 2026-08-25 — M7 final closeout: deferred responses, sessions, environment, and native runtime
+
+This final M7 record supersedes the earlier M7 entry for package enumeration and
+coverage totals because the approved M7.0 deferred-response package landed after
+the initial closeout. M7 established serializable deferred-response execution,
+the native `pi-agent-session` protocol and reducer, portable environment
+capabilities, their Tokio filesystem and process implementation, process-tree
+termination semantics, and the native Tokio actor facade. These session and
+environment/runtime crates remain outside `pi-agent-core` as required by
+Architecture v2 Part 2 §§7 and 9.
+
+### Approved packages
+
+- M7.1 — `pi-agent-session`: entry tree, lanes, operation records, Send and Local
+  storage traits, reducer, recovery, and branching —
+  `8c9f3c6c0859757c7c02c0481e4cfe04a803d5bf`
+- M7.2 — `pi-agent-env` and `pi-agent-runtime-tokio`: portable capability
+  traits, Tokio filesystem and process execution, termination behavior, and
+  actor facade — `aa3f90d635f7edac1a36c6084a1b3fcf4e281487`
+- M7.0 — deferred responses: versioned serializable `DeferredHandle`, Send and
+  Local fetch/cancel execution capabilities, `Models` orchestration, and
+  hermetic `ScriptedRuntime` support —
+  `9bf40c5bd56fa863e8c5a51dba6779b1dd4a7295`
+
+### Architecture v2 Part 2 §10 conformance now passing
+
+M7 adds 27 previously absent exact §10.10 conformance names. The final M7 tree
+contains 306 exact §10 conformance names in total.
+
+§10.10 reducer and session-tree conformance (16 new):
+
+```text
+session_sequence_starts_at_one
+session_sequence_is_global_across_mutation_kinds
+session_sequence_gap_is_corruption
+session_entry_parent_must_exist
+session_lane_head_moves_on_append
+session_lane_can_move_to_ancestor
+session_multiple_lanes_share_entry_tree
+session_branch_scan_leaf_to_root
+session_global_entry_query_sequence_order
+session_fact_latest_value_wins
+session_label_is_global_not_branch_scoped
+session_stats_derive_from_usage_records
+session_open_operation_detected
+session_multiple_open_operations_is_corruption
+session_operation_recovery_reconstructs_intent
+session_reducer_replay_equals_live_state
+```
+
+§10.10 environment conformance (11 new):
+
+```text
+env_read_file
+env_write_file
+env_atomic_replace
+env_process_stdout_stream
+env_process_stderr_stream
+env_process_exit_status
+env_process_graceful_termination
+env_process_forced_termination
+env_process_tree_termination
+env_stdio_grace_period
+env_cancellation
+```
+
+M7.0 adds eight deferred-response tests covering handle persistence, successful
+and failed/cancelled scripted lifecycles, fetch/cancel option propagation,
+provider/auth/capability ordering, independent optional capabilities, and the
+durable-handle terminal invariant. These tests cite pinned
+`packages/ai/test/providers.test.ts`, but deferred responses have no separately
+named exact conformance row in Part 2 §10.
+
+### Parity manifest coverage
+
+- Pinned upstream test files mapped: 159/159 — 63 `semantic-parity`, 0
+  `deliberate-divergence`, and 96 `planned`.
+- Status-bearing mappings: 246 total — 140 `semantic-parity`, 10
+  `deliberate-divergence`, and 96 `planned`.
+- Future named conformance tests: 1 `planned_test` entry, assigned to M3.4.
+- Rust test inventory discovered by the parity checker: 747 unique tests.
+
+### Architecture correction notes
+
+M7 added three corrections, all from M7.1 to Architecture v2 Part 2:
+
+- §7.2 records that Pi session usage records permit negative token and monetary
+  adjustments; native response `Usage` remains unsigned, while the operation
+  record carries separate cost and signed fixed-point adjustment fields without
+  `f64`.
+- §7.4 records that replay retains unmatched operation-finished records and
+  multiple unresolved starts for corruption diagnosis, while live in-memory and
+  JSONL writers reject a second open operation on one lane.
+- §7.5 records that Pi branch forks accept only message-entry targets; custom,
+  compaction, and other entry targets are rejected as `invalid_fork_target`,
+  while whole-tree forks remain unrestricted.
+
+M7.0 and M7.2 added no correction notes to either architecture document.
