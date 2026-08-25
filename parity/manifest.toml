@@ -10,7 +10,7 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#10.9-ffi-agent-conformance"
-rust = ["agent_cancelled_assistant_is_committed", "agent_handle_event_sinks_are_barriers", "agent_prompt_text_event_sequence", "agent_run_finished_is_final_event"]
+rust = ["agent_cancelled_assistant_is_committed", "agent_handle_event_sinks_are_barriers", "agent_prompt_text_event_sequence", "agent_run_finished_is_final_event", "ffi_callback_initiated_cancellation_is_nonblocking"]
 status = "semantic-parity"
 
 [[mapping]]
@@ -1414,9 +1414,28 @@ milestone = "M8"
 
 [[mapping]]
 source = "packages/agent/test/harness/nodejs-env.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = [
+  "capability_unavailable_process_spawner_is_explicit",
+  "env_atomic_replace",
+  "env_cancellation",
+  "env_process_exit_status",
+  "env_process_forced_termination",
+  "env_process_graceful_termination",
+  "env_process_large_bidirectional_stdio",
+  "env_process_non_tree_termination",
+  "env_process_stderr_stream",
+  "env_process_stdout_stream",
+  "env_process_tree_termination",
+  "env_read_file",
+  "env_stdio_grace_period",
+  "env_write_file",
+]
+status = "semantic-parity"
+
+[[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#9.4-actor-facade"
+rust = ["tokio_actor_processes_nine_commands_serially"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/harness/prompt-templates.test.ts"

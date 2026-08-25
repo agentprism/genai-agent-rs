@@ -6,6 +6,13 @@
 
 #![deny(missing_docs)]
 
+mod environment;
+
+pub use environment::{
+    TokioAgentEnvironment, TokioAgentFileSystem, TokioClock, TokioProcessSpawner,
+    TokioTemporaryArtifactStore,
+};
+
 use futures_util::StreamExt;
 use pi_agent_core::{
     Agent, AgentControl, AgentError, AgentEvent, AgentRecord, AgentSnapshot, MessageRole,
@@ -140,17 +147,19 @@ impl TokioAgentRun {
 
 /// Tokio owner-task facade for the Send [`Agent`] family.
 ///
-/// One task exclusively owns the agent. Prompt, continuation, retry, reset,
-/// subscription, and shutdown commands are serialized through a bounded
-/// mailbox. Queue ingress and cancellation retain the separate cloneable
-/// [`AgentControl`] capability required by Architecture v2 part 2 §8.4, so
-/// concurrent producers remain usable while an acknowledged sink is pending.
+/// One task exclusively owns the agent. The nine architecture commands—prompt,
+/// continue, retry, steer, follow-up, cancel, reset, snapshot, and shutdown—are
+/// serialized through a bounded mailbox. The actor invokes the underlying
+/// cloneable [`AgentControl`] capability when it reaches queue and cancellation
+/// commands, preserving the core's §8.4 phase-boundary semantics. A separate
+/// direct cancellation method is available for re-entrant foreign callbacks
+/// that cannot wait for the actor to acknowledge its own sink invocation.
 #[derive(Clone)]
 pub struct TokioAgentHandle {
     command_tx: mpsc::Sender<AgentCommand>,
     state_rx: watch::Receiver<AgentSnapshot>,
     idle_rx: watch::Receiver<bool>,
-    control: AgentControl,
+    direct_control: AgentControl,
     event_capacity: usize,
 }
 
@@ -176,7 +185,7 @@ impl TokioAgentHandle {
         let command_capacity = command_capacity.max(1);
         let event_capacity = event_capacity.max(1);
         let snapshot = agent.snapshot();
-        let control = agent.control();
+        let direct_control = agent.control();
         let (command_tx, command_rx) = mpsc::channel(command_capacity);
         let (state_tx, state_rx) = watch::channel(snapshot);
         let (idle_tx, idle_rx) = watch::channel(true);
@@ -185,7 +194,7 @@ impl TokioAgentHandle {
             command_tx,
             state_rx,
             idle_rx,
-            control,
+            direct_control,
             event_capacity,
         })
     }
@@ -242,25 +251,55 @@ impl TokioAgentHandle {
             .await
     }
 
-    /// Enqueues steering through the independent bounded control capability.
+    /// Enqueues steering through the actor's bounded serialized mailbox.
     pub async fn steer(
         &self,
         message: AgentRecord,
     ) -> Result<pi_agent_core::QueueReceipt, pi_agent_core::ControlError> {
-        self.control.steer(message).await
+        let (response, receiver) = oneshot::channel();
+        self.command_tx
+            .send(AgentCommand::Steer { message, response })
+            .await
+            .map_err(|_| pi_agent_core::ControlError::Closed)?;
+        receiver
+            .await
+            .map_err(|_| pi_agent_core::ControlError::Closed)?
     }
 
-    /// Enqueues follow-up work through the independent bounded control capability.
+    /// Enqueues follow-up work through the actor's bounded serialized mailbox.
     pub async fn follow_up(
         &self,
         message: AgentRecord,
     ) -> Result<pi_agent_core::QueueReceipt, pi_agent_core::ControlError> {
-        self.control.follow_up(message).await
+        let (response, receiver) = oneshot::channel();
+        self.command_tx
+            .send(AgentCommand::FollowUp { message, response })
+            .await
+            .map_err(|_| pi_agent_core::ControlError::Closed)?;
+        receiver
+            .await
+            .map_err(|_| pi_agent_core::ControlError::Closed)?
     }
 
-    /// Cancels the active run with the matching identity.
-    pub fn cancel(&self, run_id: RunId) -> Result<(), pi_agent_core::ControlError> {
-        self.control.cancel(run_id)
+    /// Cancels the active run with the matching identity through the mailbox.
+    pub async fn cancel(&self, run_id: RunId) -> Result<(), pi_agent_core::ControlError> {
+        let (response, receiver) = oneshot::channel();
+        self.command_tx
+            .send(AgentCommand::Cancel { run_id, response })
+            .await
+            .map_err(|_| pi_agent_core::ControlError::Closed)?;
+        receiver
+            .await
+            .map_err(|_| pi_agent_core::ControlError::Closed)?
+    }
+
+    /// Cancels through the core's synchronous cancellation capability.
+    ///
+    /// Unlike [`Self::cancel`], this does not enqueue a command or await actor
+    /// acknowledgement. It is intended for C callbacks and equivalent
+    /// re-entrant observers while the actor is awaiting that observer.
+    pub fn cancel_now(&self, run_id: RunId) -> Result<(), pi_agent_core::ControlError> {
+        self.direct_control.cancel(run_id)
     }
 
     /// Registers one acknowledged sink after all previously registered sinks.
@@ -306,11 +345,23 @@ impl TokioAgentHandle {
         receiver.await.map_err(|_| TokioAgentError::Closed)?
     }
 
-    /// Returns the most recently published owned agent snapshot.
+    /// Returns a snapshot after all earlier actor commands have been processed.
+    pub async fn snapshot(&self) -> Result<AgentSnapshot, TokioAgentError> {
+        let (response, receiver) = oneshot::channel();
+        self.command_tx
+            .send(AgentCommand::Snapshot { response })
+            .await
+            .map_err(|_| TokioAgentError::Closed)?;
+        receiver.await.map_err(|_| TokioAgentError::Closed)
+    }
+
+    /// Returns the most recently published snapshot without an actor barrier.
     ///
-    /// The actor publishes state before invoking event sinks, matching Pi's
-    /// high-level reducer-before-listener ordering.
-    pub fn snapshot(&self) -> AgentSnapshot {
+    /// This observation is intended for event sinks, where awaiting the
+    /// serialized [`Self::snapshot`] command would deadlock behind the sink's
+    /// own acknowledgement barrier. The actor publishes state before invoking
+    /// sinks, matching Pi's reducer-before-listener ordering.
+    pub fn latest_snapshot(&self) -> AgentSnapshot {
         self.state_rx.borrow().clone()
     }
 
@@ -387,6 +438,18 @@ enum AgentCommand {
     Retry {
         channels: RunChannels,
     },
+    Steer {
+        message: AgentRecord,
+        response: oneshot::Sender<Result<pi_agent_core::QueueReceipt, pi_agent_core::ControlError>>,
+    },
+    FollowUp {
+        message: AgentRecord,
+        response: oneshot::Sender<Result<pi_agent_core::QueueReceipt, pi_agent_core::ControlError>>,
+    },
+    Cancel {
+        run_id: RunId,
+        response: oneshot::Sender<Result<(), pi_agent_core::ControlError>>,
+    },
     ResetTranscript {
         response: oneshot::Sender<Result<(), TokioAgentError>>,
     },
@@ -400,6 +463,9 @@ enum AgentCommand {
     Unsubscribe {
         id: EventSinkId,
         response: oneshot::Sender<bool>,
+    },
+    Snapshot {
+        response: oneshot::Sender<AgentSnapshot>,
     },
     Shutdown {
         response: oneshot::Sender<()>,
@@ -419,6 +485,7 @@ struct DriveResult {
 
 struct DriveContext<'a> {
     commands: &'a mut mpsc::Receiver<AgentCommand>,
+    control: &'a AgentControl,
     sinks: &'a mut Vec<RegisteredSink>,
     next_sink_id: &'a mut u64,
     state_tx: &'a watch::Sender<AgentSnapshot>,
@@ -431,6 +498,7 @@ async fn actor_loop(
     state_tx: watch::Sender<AgentSnapshot>,
     idle_tx: watch::Sender<bool>,
 ) {
+    let control = agent.control();
     let mut sinks = Vec::<RegisteredSink>::new();
     let mut next_sink_id = 1_u64;
 
@@ -459,6 +527,7 @@ async fn actor_loop(
                     events,
                     DriveContext {
                         commands: &mut commands,
+                        control: &control,
                         sinks: &mut sinks,
                         next_sink_id: &mut next_sink_id,
                         state_tx: &state_tx,
@@ -493,6 +562,7 @@ async fn actor_loop(
                     events,
                     DriveContext {
                         commands: &mut commands,
+                        control: &control,
                         sinks: &mut sinks,
                         next_sink_id: &mut next_sink_id,
                         state_tx: &state_tx,
@@ -530,6 +600,7 @@ async fn actor_loop(
                     events,
                     DriveContext {
                         commands: &mut commands,
+                        control: &control,
                         sinks: &mut sinks,
                         next_sink_id: &mut next_sink_id,
                         state_tx: &state_tx,
@@ -567,6 +638,7 @@ async fn actor_loop(
                     events,
                     DriveContext {
                         commands: &mut commands,
+                        control: &control,
                         sinks: &mut sinks,
                         next_sink_id: &mut next_sink_id,
                         state_tx: &state_tx,
@@ -577,6 +649,15 @@ async fn actor_loop(
                 if finish_owned_run(&agent, &state_tx, &idle_tx, completion, result) {
                     return;
                 }
+            }
+            AgentCommand::Steer { message, response } => {
+                let _ = response.send(control.steer(message).await);
+            }
+            AgentCommand::FollowUp { message, response } => {
+                let _ = response.send(control.follow_up(message).await);
+            }
+            AgentCommand::Cancel { run_id, response } => {
+                let _ = response.send(control.cancel(run_id));
             }
             AgentCommand::ResetTranscript { response } => {
                 let result = agent.reset_transcript().map_err(TokioAgentError::from);
@@ -600,6 +681,9 @@ async fn actor_loop(
             AgentCommand::Unsubscribe { id, response } => {
                 let removed = remove_sink(&mut sinks, id);
                 let _ = response.send(removed);
+            }
+            AgentCommand::Snapshot { response } => {
+                let _ = response.send(agent.snapshot());
             }
             AgentCommand::Shutdown { response } => {
                 let _ = response.send(());
@@ -705,6 +789,15 @@ async fn drive_run<'a>(
                     | AgentCommand::ResetAll { response } => {
                         let _ = response.send(Err(AgentError::RunActive.into()));
                     }
+                    AgentCommand::Steer { message, response } => {
+                        let _ = response.send(context.control.steer(message).await);
+                    }
+                    AgentCommand::FollowUp { message, response } => {
+                        let _ = response.send(context.control.follow_up(message).await);
+                    }
+                    AgentCommand::Cancel { run_id, response } => {
+                        let _ = response.send(context.control.cancel(run_id));
+                    }
                     AgentCommand::Subscribe { sink, response } => {
                         let id = allocate_sink_id(context.next_sink_id);
                         context.sinks.push(RegisteredSink { id, sink });
@@ -713,6 +806,9 @@ async fn drive_run<'a>(
                     AgentCommand::Unsubscribe { id, response } => {
                         let removed = remove_sink(context.sinks, id);
                         let _ = response.send(removed);
+                    }
+                    AgentCommand::Snapshot { response } => {
+                        let _ = response.send(context.state_tx.borrow().clone());
                     }
                     AgentCommand::Shutdown { response } => {
                         cancellation.cancel();

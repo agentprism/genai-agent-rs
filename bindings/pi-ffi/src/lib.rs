@@ -458,7 +458,10 @@ impl PiAgent {
         }
     }
 
-    /// Cancels through the core's independent `AgentControl` capability.
+    /// Cancels without waiting for actor acknowledgement.
+    ///
+    /// The direct core capability keeps this operation safe when invoked from
+    /// an acknowledged C callback that the actor is currently awaiting.
     pub fn cancel_run(&self, run_id: u64) -> Result<(), PiFfiError> {
         let core_run_id = {
             let mut state = lock_unpoisoned(&self.shared.state);
@@ -475,7 +478,7 @@ impl PiAgent {
         };
         self.shared
             .handle
-            .cancel(core_run_id)
+            .cancel_now(core_run_id)
             .map_err(|error| PiFfiError::Agent {
                 message: error.to_string(),
             })
@@ -514,7 +517,7 @@ impl PiAgent {
                 .collect::<Vec<_>>()
         };
         for run_id in active {
-            let _ = self.shared.handle.cancel(run_id);
+            let _ = self.shared.handle.cancel_now(run_id);
         }
         self.wait_idle();
         self.runtime.block_on(self.shared.handle.shutdown())??;
@@ -615,7 +618,7 @@ impl AgentEventSink for BindingEventSink {
     fn on_event(
         &self,
         event: AgentEvent,
-        _cancellation: CancellationToken,
+        cancellation: CancellationToken,
     ) -> SendBoxFuture<'static, ()> {
         if self.terminal_delivered.load(Ordering::Acquire) {
             return Box::pin(async {});
@@ -649,7 +652,7 @@ impl AgentEventSink for BindingEventSink {
                     cancellation_requested
                 };
                 if cancellation_requested {
-                    let _ = self.shared.handle.cancel(run_id.clone());
+                    cancellation.cancel();
                 }
             }
             AgentEvent::TurnStarted { run_id, .. }

@@ -9,10 +9,21 @@ description = "pi-agent-runtime-tokio: Tokio environment implementation, the Sen
 publish = false
 
 [dependencies]
+async-stream = "0.3.6"
+bytes = "1.10.1"
 futures-util = { version = "0.3.31", default-features = false, features = ["alloc", "std"] }
 pi-agent-core = { path = "../pi-agent-core" }
+pi-agent-env = { path = "../pi-agent-env" }
 pi-ai = { path = "../pi-ai" }
-tokio = { version = "1.47.1", features = ["macros", "rt", "sync"] }
+tokio = { version = "1.47.1", features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
+url = "2.5.7"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.176"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [dev-dependencies]
-tokio = { version = "1.47.1", features = ["macros", "rt", "sync"] }
+tempfile = "3.23.0"
+tokio = { version = "1.47.1", features = ["macros", "rt", "sync", "time"] }
