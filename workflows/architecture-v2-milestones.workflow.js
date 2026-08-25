@@ -309,17 +309,41 @@ const MILESTONES = {
     ],
   },
   M8: {
-    title: "Milestone 8 — harness: compaction, branch summaries, skills, templates, reference tools, telemetry, orchestration (part 2 §7.7–7.12)",
+    title: "Milestone 8 — pin refresh; harness: compaction, branch summaries, skills, templates, reference tools, telemetry, orchestration (part 2 §7.7–7.12)",
     packages: [
+      {
+        id: "M8.0",
+        title: "Pin refresh: re-verify pi-ai against the new pin and regenerate the manifest",
+        crate: "parity, crates/pi-ai, providers/*",
+        read: "The pin has moved from c49906ec77788625aacbdc53ebca6fbe65bd20f5 to the commit named in the PIN constant (packages/agent is source-identical between the two; the whole delta is in packages/ai). Read the upstream diff for: src/api/openai-completions.ts, src/providers/cloudflare-ai-gateway.ts, scripts/generate-models.ts, the new scripts/openrouter-reasoning-options.ts; and the test delta: the new test/openrouter-reasoning-options.test.ts plus the modified openai-completions-reasoning-details.test.ts, openai-completions-tool-choice.test.ts, zai-coding-plan-models.test.ts.",
+        deliver: [
+          "Audit the pi-ai delta against the Rust port (openai-completions family, cloudflare-ai-gateway provider, any regenerated catalog data) and implement pi's new-pin behavior where they now differ; nothing outside the delta changes.",
+          "parity/manifest.toml: upstream_commit set to the new pin; a mapping for the new upstream test file; the three modified upstream tests' mappings re-verified against their new content (strengthen Rust tests where the upstream tests grew).",
+          "parity/upstream-tests.txt regenerated from the new pin; parity/check.sh passes against the new worktree.",
+        ],
+        accept: ["parity/check.sh passes with upstream_commit = the new pin and every upstream test file (including the new one) mapped; the affected wire/conformance suites still pass byte-identically for the fixture corpus."],
+      },
       { id: "M8.1", title: "Compaction, branch summarization, HarnessContextPolicy, overflow retry", crate: "crates/pi-agent-harness", read: "part 2 §7.7–7.8; pi harness/compaction/*.ts and tests.", deliver: ["CompactionPolicy, BranchSummaryPolicy, HarnessContextPolicy, the preparation flow, overflow retry under the same operation."], accept: ["§10.10 compaction_* and branch_summary_* tests pass with their exact names."] },
       { id: "M8.2", title: "Skills, prompt templates, reference tools, file mutation queue, truncation, telemetry", crate: "crates/pi-agent-harness", read: "part 2 §7.9, §7.11, §7.12; pi harness/skills.ts, prompt-templates.ts, tools/*.ts, utils/truncate.ts, telemetry.ts, docs/telemetry-schema.md and tests.", deliver: ["SkillCatalog, PromptTemplateRegistry, FileMutationQueue, edit semantics, TruncationLimits, BashToolResultDetails, TelemetryEnvelope/TelemetryEvent/TelemetrySink with the listed defaults and a generated JSON Schema checked in."], accept: ["§10.10 mutation_queue_*, edit_*, truncate_*, bash_*, skill_*, prompt_template_*, telemetry_* tests pass with their exact names."] },
       { id: "M8.3", title: "Harness orchestration over agent-core + session + environment", crate: "crates/pi-agent-harness", read: "part 2 §7.1 (derive from the implemented subsystems, not the scaffold), §7.6, §8.4 (durable enqueue acknowledgement); pi harness/agent-harness.ts, events.ts, messages.ts, result.ts, reducer.ts and tests.", deliver: ["The harness operation lifecycle: operation records around runs, durable queue acknowledgement, recovery on open, resource formatting and events per pi."], accept: ["§10.10 session_open_operation_detected, session_multiple_open_operations_is_corruption, session_operation_recovery_reconstructs_intent pass; the Agent gate is met end-to-end through the harness."] },
     ],
   },
   M9: {
-    title: "Milestone 9 — pi v4 JSONL compatibility and the session gate (part 2 §7.13)",
+    title: "Milestone 9 — native durable session store (part 2 §7.5–7.6 storage semantics; §7.13 as amended by the owner ruling of 2026-08-25: no pi v4 backward compatibility — no existing consumers exist, so the native format stands alone)",
     packages: [
-      { id: "M9.1", title: "pi-agent-compat-pi-jsonl: v4 reader, constrained writer, import of legacy replay slots", crate: "crates/pi-agent-compat-pi-jsonl", read: "part 2 §7.13 in full, §1.5 legacy fallback; pi harness/session/jsonl/*.ts and tests under test/harness/session.", deliver: ["Reader with header validation, sequence validation, torn-tail repair; constrained writer that rejects unrepresentable mutations and preserves existing bytes; legacy thoughtSignature → replay item import."], accept: ["§10.10 pi_v4_* tests pass with their exact names; the Session gate is met."] },
+      {
+        id: "M9.1",
+        title: "File-backed native session storage: serialized append, sequence validation, torn-tail recovery, atomic rewrite, crash recovery; retire the compat crate",
+        crate: "crates/pi-agent-session",
+        read: "part 2 §7.5–7.6 (storage traits, operation recovery, the eight reducer invariants already implemented in M7.1) and §7.13's protocol-semantics analysis (serialized append, sequence validation, torn-tail recovery, atomic rewrite are storage protocol semantics, not JSONL syntax — they survive the ruling even though v4 byte compatibility does not); pi harness/session/jsonl/storage.ts and codec.ts as the BEHAVIOR basis for those semantics only (not for byte format); the upstream session behavior tests context.test.ts, memory.test.ts, search.test.ts.",
+        deliver: [
+          "A file-backed durable backend for the M7.1 storage traits in the native format (schema_version-carrying, append-only mutations): serialized append (one writer, append lock), sequence validation on read, torn-tail detection and repair on open, atomic rewrite for compaction/branch operations, and recovery that feeds RecoveryDecision exactly as the in-memory store does.",
+          "The one-open-operation rule enforced on live append while replay preserves multiple unresolved starts for corruption diagnosis (same split M7.1 implemented, now durable).",
+          "Port the format-agnostic upstream session behavior tests (context, memory, search) against both the in-memory and file backends; map them in the manifest.",
+          "Delete crates/pi-agent-compat-pi-jsonl (crate and workspace membership) per the owner ruling; flip packages/agent/test/harness/session/jsonl-codec.test.ts, jsonl-storage.test.ts, and jsonl.test.ts to deliberate-divergence with reason: owner ruling 2026-08-25 — no backward compatibility (no existing consumers); the native durable store ports the protocol semantics, not the v4 byte format.",
+        ],
+        accept: ["§10.10 storage/recovery conformance names pass against the file backend (torn-tail, sequence validation, one-open-operation, recovery reconstructs intent); the behavior tests pass on both backends; the manifest has no remaining planned session entries and parity/check.sh passes with the compat crate gone."],
+      },
     ],
   },
   GATES: {
