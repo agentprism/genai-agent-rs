@@ -8,7 +8,7 @@
 
 ## What parity means
 
-Parity is **contract and invariant parity with pi at the pinned commit** (`c49906ec77788625aacbdc53ebca6fbe65bd20f5`, `earendil-works/pi`), defined operationally — not by reproducing the bytes a JavaScript runtime happens to emit:
+Parity is **contract and invariant parity with pi at the pinned commit** (`8fa7eebd235355522c8104166b4f1f959b4e2f10`, `earendil-works/pi`), defined operationally — not by reproducing the bytes a JavaScript runtime happens to emit:
 
 1. **The parity manifest** (Part 2 §10): every upstream `packages/ai/test/**/*.test.ts` and `packages/agent/test/**/*.test.ts` file maps to named Rust tests, with status `semantic-parity` or `deliberate-divergence` plus a reason. CI fails on an unmapped upstream test, a mapped Rust test that does not exist, a divergence without a reason, or a pin change without regenerating the manifest.
 2. **The conformance suites** (Part 2 §10.1–§10.10) are the definition of correct behavior for streams, replay, retry, middleware, lowering, handoff, catalogs, auth, the agent loop, and the harness. Each test names its pi basis.
@@ -22,7 +22,7 @@ The architecture is not considered delivered until all four pass (Part 2, "Commi
 1. **Replay gate** — all seven two-turn replay goldens pass after event assembly and a persistence round-trip.
 2. **Wire gate** — default request bodies for every supported API family are byte-identical to pi for the pinned fixture corpus.
 3. **Agent gate** — lifecycle, queue polling, tool scheduling, failed-message commitment, and event ordering pass the mapped pi conformance suite.
-4. **Session gate** — the Rust reader passes the pi v4 codec/storage corpus, and the compatibility writer rejects rather than loses unrepresentable native state.
+4. **Session gate** — the native durable session store passes the backend-generic storage/recovery conformance suite (serialized append, sequence validation, torn-tail recovery, atomic rewrite, operation recovery). Pi v4 byte compatibility was retired by owner ruling on 2026-08-25: this port has no existing consumers, so no backward compatibility is owed; the v4 protocol *semantics* are ported, the byte format is not.
 
 ## Implementation order
 

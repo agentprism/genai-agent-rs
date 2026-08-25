@@ -3990,6 +3990,8 @@ Defaults:
 
 ## 7.13 Should Rust read and write Pi's existing JSONL?
 
+> Owner ruling (2026-08-25): retired. This port has no existing consumers, so no pi v4 backward compatibility is owed; `pi-agent-compat-pi-jsonl` is removed from the plan. The storage *protocol semantics* this section identifies (serialized append, sequence validation, torn-tail recovery, atomic rewrite) are ported instead as the native file-backed backend behind the pluggable `SessionStorage`/`SessionRepository` seam, certified by the backend-generic conformance harness (the Rust mirror of `harness/session/testing/conformance.ts`). The Session gate is redefined accordingly in `goal.md`.
+
 ### Recommendation
 
 **Read Pi v4 JSONL: yes.**
