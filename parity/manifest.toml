@@ -1443,6 +1443,41 @@ status = "planned"
 milestone = "M7"
 
 [[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#7.2-7.6-and-10.10"
+rust = [
+  "session_branch_scan_leaf_to_root",
+  "session_entry_parent_must_exist",
+  "session_fact_latest_value_wins",
+  "session_global_entry_query_sequence_order",
+  "session_label_is_global_not_branch_scoped",
+  "session_lane_can_move_to_ancestor",
+  "session_lane_head_moves_on_append",
+  "session_multiple_lanes_share_entry_tree",
+  "session_multiple_open_operations_is_corruption",
+  "session_open_operation_detected",
+  "session_operation_recovery_is_lane_scoped",
+  "session_operation_recovery_reconstructs_intent",
+  "session_queue_cancellation_is_idempotent_during_reduction",
+  "session_queue_cancellation_is_lane_scoped",
+  "session_queue_cancellation_requires_pending_matching_enqueue",
+  "session_reducer_replay_equals_live_state",
+  "session_repository_branch_fork_copies_prefix_without_records",
+  "session_repository_tree_fork_preserves_lanes_and_facts",
+  "session_send_and_local_storage_trait_families_are_object_safe",
+  "session_sequence_gap_is_corruption",
+  "session_sequence_is_global_across_mutation_kinds",
+  "session_sequence_starts_at_one",
+  "session_stats_derive_from_usage_records",
+  "session_storage_append_is_atomic_on_reduction_failure",
+  "session_tool_invocation_identity_is_assistant_entry_and_index",
+  "session_tool_invocation_identity_is_lane_scoped",
+  "session_tool_start_must_match_committed_assistant_call",
+  "session_tool_start_rejects_provisioned_but_uncommitted_assistant",
+  "session_tree_fork_preserves_pi_source_order",
+]
+status = "semantic-parity"
+
+[[mapping]]
 source = "packages/agent/test/harness/session/jsonl-codec.test.ts"
 rust = []
 status = "planned"

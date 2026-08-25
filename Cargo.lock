@@ -1144,6 +1144,14 @@ dependencies = [
 [[package]]
 name = "pi-agent-session"
 version = "0.1.0"
+dependencies = [
+ "futures-executor",
+ "pi-agent-core",
+ "pi-ai",
+ "serde",
+ "serde_json",
+ "static_assertions",
+]
 
 [[package]]
 name = "pi-ai"
