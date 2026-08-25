@@ -870,6 +870,7 @@ fn codex_auth() -> ResolvedAuth {
     ResolvedAuth {
         api_key: None,
         headers: retry_auth_headers(),
+        transport_headers: HeaderMap::new(),
         base_url: None,
         source: AuthSource::new("fixture"),
     }

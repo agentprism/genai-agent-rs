@@ -27,6 +27,7 @@ status = "semantic-parity"
 source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#10.8"
 rust = [
   "fixture_corpus_anthropic_messages_cases_are_complete_and_canonical",
+  "fixture_corpus_bedrock_converse_stream_cases_are_complete_and_canonical",
   "fixture_corpus_anthropic_redacted_turn_two_contains_replay_marker",
   "fixture_corpus_anthropic_signed_turn_two_contains_replay_marker",
   "fixture_credential_backed_m4_1_minimum_corpus_is_complete",
@@ -80,12 +81,12 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/types.ts"
-rust = ["all_api_model_config_variants_round_trip", "all_identifier_model_ref_and_timestamp_types_round_trip", "anthropic_compat_every_architecture_field_round_trips", "canonical_message_context_and_conversation_types_round_trip", "catalog_unknown_extensions_round_trip", "finish_and_public_error_types_round_trip", "local_provider_components_accept_rc_state", "model_descriptor_and_typed_compat_fields_round_trip", "model_runtime_is_a_narrow_arc_capability_and_local_runtime_accepts_rc_state", "openai_completions_compat_serialized_values_match_pi_contract", "openrouter_max_price_decimal_number_is_lossless_and_distinct_from_string", "pricing_types_round_trip_and_use_integer_arithmetic", "replay_helpers_reject_incomplete_and_cross_model_items", "replay_r1_complete_item_identity_is_stable", "replay_r2_success_rejects_incomplete_item", "replay_r3_failed_and_cancelled_items_are_incomplete_and_ignored", "replay_r4_same_provider_round_trip_is_deterministic_before_encoder", "replay_r5_cross_provider_projection_rejects_nonportable_item", "replay_r6_signature_target_is_exact_and_stable", "replay_r7_provider_order_is_independent_of_block_order", "replay_r8_scratch_state_is_not_in_persisted_schema", "replay_target_applicability_completeness_and_usage_sources_round_trip", "request_wide_pricing_uses_highest_strictly_exceeded_tier", "secret_types_are_not_serializable_and_redact_debug", "stream_error_sanitizes_secrets", "stream_error_sanitizes_secrets_http_pipeline_send_and_local", "tool_call_spec_and_every_result_content_variant_round_trip", "tool_spec_constrained_sampling_serialized_values_match_pi_contract"]
+rust = ["all_api_model_config_variants_round_trip", "all_identifier_model_ref_and_timestamp_types_round_trip", "anthropic_compat_every_architecture_field_round_trips", "bedrock_body_stream_failure_sanitizes_secrets_send_and_local", "canonical_message_context_and_conversation_types_round_trip", "catalog_unknown_extensions_round_trip", "finish_and_public_error_types_round_trip", "local_provider_components_accept_rc_state", "model_descriptor_and_typed_compat_fields_round_trip", "model_runtime_is_a_narrow_arc_capability_and_local_runtime_accepts_rc_state", "openai_completions_compat_serialized_values_match_pi_contract", "openrouter_max_price_decimal_number_is_lossless_and_distinct_from_string", "pricing_types_round_trip_and_use_integer_arithmetic", "replay_helpers_reject_incomplete_and_cross_model_items", "replay_r1_complete_item_identity_is_stable", "replay_r2_success_rejects_incomplete_item", "replay_r3_failed_and_cancelled_items_are_incomplete_and_ignored", "replay_r4_same_provider_round_trip_is_deterministic_before_encoder", "replay_r5_cross_provider_projection_rejects_nonportable_item", "replay_r6_signature_target_is_exact_and_stable", "replay_r7_provider_order_is_independent_of_block_order", "replay_r8_scratch_state_is_not_in_persisted_schema", "replay_target_applicability_completeness_and_usage_sources_round_trip", "request_wide_pricing_uses_highest_strictly_exceeded_tier", "secret_types_are_not_serializable_and_redact_debug", "stream_error_sanitizes_secrets", "stream_error_sanitizes_secrets_bedrock_signing_start_and_body_send_and_local", "stream_error_sanitizes_secrets_http_pipeline_send_and_local", "tool_call_spec_and_every_result_content_variant_round_trip", "tool_spec_constrained_sampling_serialized_values_match_pi_contract"]
 status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/models.ts#request-pipeline"
-rust = ["headers_auth_before_model", "headers_explicit_before_transform", "headers_merge_case_insensitively", "headers_model_before_explicit", "headers_transform_can_delete_default", "headers_transform_not_forwarded_to_provider_options", "headers_transform_runs_once", "models_provider_registration_is_atomic", "models_registry_lock_is_released_before_auth_await", "openai_responses_header_only_auth_local", "openai_responses_header_only_auth_send", "responses_codex_session_affinity_reasserted_send_and_local"]
+rust = ["headers_auth_before_model", "headers_explicit_before_transform", "headers_merge_case_insensitively", "headers_model_before_explicit", "headers_sensitive_auth_follows_precedence_send_and_local", "headers_transform_can_delete_default", "headers_transform_not_forwarded_to_provider_options", "headers_transform_runs_once", "models_provider_registration_is_atomic", "models_registry_lock_is_released_before_auth_await", "openai_responses_header_only_auth_local", "openai_responses_header_only_auth_send", "responses_codex_session_affinity_reasserted_send_and_local"]
 status = "semantic-parity"
 
 [[mapping]]
@@ -100,7 +101,12 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/api/bedrock-converse-stream.ts#request-middleware"
-rust = ["bedrock_custom_headers_are_inserted_before_signing", "bedrock_reserved_headers_are_suppressed", "bedrock_response_observer_receives_raw_headers"]
+rust = ["bedrock_bearer_auth_is_reasserted_before_signing", "bedrock_custom_headers_are_inserted_before_signing", "bedrock_private_signer_header_collision_preserves_later_overlays_send_and_local", "bedrock_reserved_headers_are_suppressed", "bedrock_response_observer_receives_raw_headers"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#10.4-bedrock"
+rust = ["bedrock_custom_headers_are_inserted_before_signing", "bedrock_private_signer_header_collision_preserves_later_overlays_send_and_local", "bedrock_reserved_headers_are_suppressed", "bedrock_response_observer_receives_raw_headers"]
 status = "semantic-parity"
 
 [[mapping]]
@@ -220,7 +226,32 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/api/bedrock-converse-stream.ts"
-rust = ["bedrock_opaque_bytes_json_encoding_matches_architecture", "bedrock_partial_redacted_payload_is_not_replayed", "bedrock_redacted_bytes_survive_json_round_trip", "bedrock_redacted_chunks_concatenate_as_bytes", "bedrock_signed_reasoning_event_sequence_preserves_text_and_signature", "stream_cancellation_preserves_partial_tool_arguments", "stream_failure_preserves_partial_tool_arguments"]
+rust = ["bedrock_ambient_bearer_drops_stored_profile_environment_send_and_local_pi_exact", "bedrock_application_inference_profile_name_controls_thinking_and_cache", "bedrock_auth_eligibility_is_independent_from_client_profile_send_and_local", "bedrock_body_error_normalization_pi_exact_send_and_local", "bedrock_body_stream_failure_sanitizes_secrets_send_and_local", "bedrock_body_transport_diagnostic_is_committed_send_and_local", "bedrock_cancelled_signed_reasoning_retains_incomplete_replay", "bedrock_ecmascript_trim_message_blocks_pi_exact", "bedrock_ecmascript_trim_reasoning_and_signature_pi_exact", "bedrock_failed_signed_reasoning_retains_incomplete_replay", "bedrock_missing_required_signature_falls_back_to_text", "bedrock_modeled_stream_failure_message_matches_pi", "bedrock_models_environment_region_shapes_govcloud_send_and_local_pi_exact", "bedrock_non_anthropic_model_omits_reasoning_signature", "bedrock_opaque_bytes_json_encoding_matches_architecture", "bedrock_partial_redacted_payload_is_not_replayed", "bedrock_private_signer_header_collision_preserves_later_overlays_send_and_local", "bedrock_provider_environment_cache_controls_send_and_local", "bedrock_provider_environment_whitespace_is_present_send_and_local_pi_exact", "bedrock_proxy_resolution_is_request_scoped_send_and_local_pi_exact", "bedrock_redacted_bytes_survive_json_round_trip", "bedrock_redacted_chunks_concatenate_as_bytes", "bedrock_signature_then_redacted_turn_two_pi_exact", "bedrock_signed_reasoning_event_sequence_preserves_text_and_signature", "bedrock_signed_reasoning_replays_text_and_signature", "bedrock_skip_auth_applies_after_provider_eligibility_send_and_local_pi_exact", "bedrock_stream_permissive_variant_handling_matches_pi", "bedrock_tool_call_id_64_utf16_units_pi_exact", "bedrock_tool_call_id_astral_utf16_pi_exact", "bedrock_turn_two_replays_redacted_content_bytes", "bedrock_user_and_tool_result_images_use_pi_atob_pi_exact", "stream_cancellation_preserves_partial_tool_arguments", "stream_error_sanitizes_secrets_bedrock_signing_start_and_body_send_and_local", "stream_failure_preserves_partial_tool_arguments"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/ai/src/providers/amazon-bedrock.ts"
+rust = ["bedrock_ambient_bearer_drops_stored_profile_environment_send_and_local_pi_exact", "bedrock_auth_eligibility_is_independent_from_client_profile_send_and_local", "bedrock_auth_resolves_bearer_stored_profile_and_ambient_chain", "bedrock_skip_auth_applies_after_provider_eligibility_send_and_local_pi_exact", "bedrock_stored_empty_profile_blocks_ambient_profile_send_and_local", "bedrock_stored_non_profile_environment_does_not_configure_provider_send_and_local_pi_exact"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/ai/src/utils/provider-env.ts"
+rust = ["bedrock_models_environment_region_shapes_govcloud_send_and_local_pi_exact", "bedrock_provider_environment_cache_controls_send_and_local", "bedrock_provider_environment_whitespace_is_present_send_and_local_pi_exact"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/ai/src/utils/node-http-proxy.ts"
+rust = ["bedrock_proxy_resolution_is_request_scoped_send_and_local_pi_exact"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/ai/src/api/bedrock-converse-stream.ts#ordered-wire"
+rust = ["bedrock_ecmascript_trim_message_blocks_pi_exact", "bedrock_ecmascript_trim_reasoning_and_signature_pi_exact", "bedrock_redacted_reasoning_turn_two_pi_exact", "bedrock_signature_then_redacted_turn_two_pi_exact", "bedrock_thinking_levels_pi_exact", "bedrock_user_and_tool_result_images_use_pi_atob_pi_exact", "bedrock_wire_tool_results_orphan_and_failed_turns_pi_exact", "fixture_corpus_bedrock_converse_stream_cases_are_complete_and_canonical", "wire_bedrock_converse_stream_pi_exact"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#10.8-bedrock-converse-stream"
+rust = ["bedrock_application_inference_profile_name_controls_thinking_and_cache", "bedrock_ecmascript_trim_message_blocks_pi_exact", "bedrock_ecmascript_trim_reasoning_and_signature_pi_exact", "bedrock_models_environment_region_shapes_govcloud_send_and_local_pi_exact", "bedrock_provider_environment_cache_controls_send_and_local", "bedrock_redacted_reasoning_turn_two_pi_exact", "bedrock_signature_then_redacted_turn_two_pi_exact", "bedrock_thinking_levels_pi_exact", "bedrock_user_and_tool_result_images_use_pi_atob_pi_exact", "bedrock_wire_tool_results_orphan_and_failed_turns_pi_exact", "fixture_corpus_bedrock_converse_stream_cases_are_complete_and_canonical", "wire_bedrock_converse_stream_pi_exact"]
 status = "semantic-parity"
 
 [[mapping]]
@@ -395,31 +426,6 @@ reason = "The pinned top-level harness is a scaffold, so Rust derives orchestrat
 # for replay, decoded frames pass through AssistantAssembler, persistence,
 # continuation append, and Rust turn-two encoding before byte comparison.
 
-[[planned_test]]
-rust = "bedrock_turn_two_replays_redacted_content_bytes"
-source = "packages/ai/src/api/bedrock-converse-stream.ts"
-milestone = "M4"
-
-[[planned_test]]
-rust = "bedrock_signed_reasoning_replays_text_and_signature"
-source = "packages/ai/src/api/bedrock-converse-stream.ts"
-milestone = "M4"
-
-[[planned_test]]
-rust = "bedrock_missing_required_signature_falls_back_to_text"
-source = "packages/ai/src/api/bedrock-converse-stream.ts"
-milestone = "M4"
-
-[[planned_test]]
-rust = "bedrock_non_anthropic_model_omits_reasoning_signature"
-source = "packages/ai/src/api/bedrock-converse-stream.ts"
-milestone = "M4"
-
-[[planned_test]]
-rust = "bedrock_redacted_reasoning_turn_two_pi_exact"
-source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#10.8"
-milestone = "M4"
-
 # Every pinned upstream test file starts planned until its package ports the full file.
 
 [[mapping]]
@@ -585,63 +591,53 @@ milestone = "M6"
 
 [[mapping]]
 source = "packages/ai/test/bedrock-convert-messages.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["bedrock_ecmascript_trim_message_blocks_pi_exact", "bedrock_ecmascript_trim_reasoning_and_signature_pi_exact", "bedrock_message_conversion_edge_cases_match_pi", "bedrock_replayed_tool_arguments_remove_empty_keys", "bedrock_streamed_tool_arguments_preserve_empty_keys", "bedrock_strict_tool_schema_matches_capability", "bedrock_user_and_tool_result_images_use_pi_atob_pi_exact", "bedrock_wire_tool_results_orphan_and_failed_turns_pi_exact", "stream_unicode_matches_pi", "wire_bedrock_converse_stream_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/bedrock-credentials.test.ts"
-rust = []
-status = "planned"
-milestone = "M4"
+rust = ["bedrock_ambient_profile_and_static_keys_reach_signer_pi_exact", "bedrock_auth_eligibility_is_independent_from_client_profile_send_and_local", "bedrock_auth_resolves_bearer_stored_profile_and_ambient_chain", "bedrock_bearer_auth_is_reasserted_before_signing", "bedrock_provider_environment_whitespace_is_present_send_and_local_pi_exact", "bedrock_stored_empty_profile_blocks_ambient_profile_send_and_local"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/bedrock-custom-headers.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["bedrock_custom_headers_are_inserted_before_signing", "bedrock_private_signer_header_collision_preserves_later_overlays_send_and_local", "bedrock_reserved_headers_are_suppressed"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/bedrock-endpoint-resolution.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["bedrock_auth_eligibility_is_independent_from_client_profile_send_and_local", "bedrock_catalog_matches_pinned_pi", "bedrock_endpoint_resolution_preserves_pi_profile_and_custom_endpoint_rules", "bedrock_region_and_arn_route_the_effective_endpoint"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/bedrock-error-metadata.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["bedrock_body_error_normalization_pi_exact_send_and_local", "bedrock_error_metadata_normalization_pi_exact", "bedrock_failure_and_cancellation_preserve_usage_cost_and_request_id", "bedrock_modeled_stream_failure_message_matches_pi"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/bedrock-models.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["bedrock_catalog_matches_pinned_pi", "wire_bedrock_converse_stream_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/bedrock-raw-stop-reason.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["bedrock_raw_stop_reason_is_preserved"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/bedrock-redacted-reasoning.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["bedrock_partial_redacted_payload_is_not_replayed", "bedrock_redacted_bytes_survive_json_round_trip", "bedrock_redacted_chunks_concatenate_as_bytes", "bedrock_redacted_reasoning_turn_two_pi_exact", "bedrock_signature_then_redacted_turn_two_pi_exact", "bedrock_turn_two_replays_redacted_content_bytes"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/bedrock-response-headers.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["bedrock_response_observer_receives_raw_headers", "bedrock_failure_and_cancellation_preserve_usage_cost_and_request_id"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/bedrock-thinking-payload.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["bedrock_application_inference_profile_name_controls_thinking_and_cache", "bedrock_govcloud_omits_thinking_display_pi_exact", "bedrock_models_environment_region_shapes_govcloud_send_and_local_pi_exact", "bedrock_thinking_levels_pi_exact", "wire_bedrock_converse_stream_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/cache-retention.test.ts"
@@ -897,9 +893,8 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/node-http-proxy.test.ts"
-rust = []
-status = "planned"
-milestone = "M6"
+rust = ["bedrock_proxy_resolution_is_request_scoped_send_and_local_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/oauth-auth.test.ts"
@@ -1083,7 +1078,7 @@ milestone = "M6"
 
 [[mapping]]
 source = "packages/ai/test/provider-error-body-regression.test.ts"
-rust = []
+rust = ["bedrock_body_error_normalization_pi_exact_send_and_local", "bedrock_error_metadata_normalization_pi_exact", "stream_error_sanitizes_secrets_bedrock_signing_start_and_body_send_and_local"]
 status = "planned"
 milestone = "M6"
 

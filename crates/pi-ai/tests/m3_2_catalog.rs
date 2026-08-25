@@ -515,6 +515,7 @@ impl AuthResolver for ProbeAuth {
             Ok(Some(ResolvedAuth {
                 api_key: None,
                 headers: HeaderMap::new(),
+                transport_headers: HeaderMap::new(),
                 base_url: None,
                 source: AuthSource::new("catalog-test"),
             }))
@@ -577,6 +578,7 @@ impl OAuthAuth for CatalogOAuth {
             Ok(ResolvedAuth {
                 api_key: Some(access),
                 headers: HeaderMap::new(),
+                transport_headers: HeaderMap::new(),
                 base_url: None,
                 source: AuthSource::new("OAuth"),
             })
@@ -624,6 +626,7 @@ impl LocalOAuthAuth for LocalCatalogOAuth {
             Ok(ResolvedAuth {
                 api_key: Some(access),
                 headers: HeaderMap::new(),
+                transport_headers: HeaderMap::new(),
                 base_url: None,
                 source: AuthSource::new("OAuth"),
             })

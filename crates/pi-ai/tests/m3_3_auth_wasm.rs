@@ -65,6 +65,7 @@ impl LocalOAuthAuth for DelayedLocalOAuth {
             Ok(ResolvedAuth {
                 api_key: Some(access),
                 headers: http::HeaderMap::new(),
+                transport_headers: http::HeaderMap::new(),
                 base_url: None,
                 source: AuthSource::new("OAuth"),
             })

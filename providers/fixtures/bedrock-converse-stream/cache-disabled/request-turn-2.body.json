@@ -1,0 +1,1 @@
+{"messages":[{"role":"user","content":[{"text":"Return a concise fixture response."}]},{"role":"assistant","content":[{"text":"fixture response turn 1"}]},{"role":"user","content":[{"text":"Deterministic turn-two follow-up."}]}],"system":[{"text":"Cache fixture."}],"inferenceConfig":{"maxTokens":8192}}

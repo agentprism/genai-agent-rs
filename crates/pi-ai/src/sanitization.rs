@@ -1,5 +1,38 @@
 //! Public-boundary sanitation required by Architecture v2 part 2 §10.1.
 
+/// Returns whether `character` is trimmed by ECMAScript string operations.
+///
+/// This is the union of ECMAScript's `WhiteSpace` and `LineTerminator`
+/// productions. It intentionally includes U+FEFF and excludes U+0085, unlike
+/// Rust's [`char::is_whitespace`] predicate.
+pub fn is_ecmascript_whitespace(character: char) -> bool {
+    matches!(
+        character,
+        '\u{0009}'
+            | '\u{000a}'
+            | '\u{000b}'
+            | '\u{000c}'
+            | '\u{000d}'
+            | '\u{0020}'
+            | '\u{00a0}'
+            | '\u{1680}'
+            | '\u{2000}'
+            ..='\u{200a}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202f}'
+                | '\u{205f}'
+                | '\u{3000}'
+                | '\u{feff}'
+    )
+}
+
+/// Trims the same leading and trailing characters as ECMAScript
+/// `String.prototype.trim()`.
+pub fn trim_ecmascript(value: &str) -> &str {
+    value.trim_matches(is_ecmascript_whitespace)
+}
+
 /// Replacement used when secret-bearing error data reaches a public boundary.
 const REDACTED: &str = "[REDACTED]";
 

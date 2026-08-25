@@ -799,6 +799,7 @@ impl Models {
                 None if header_only_auth => crate::ResolvedAuth {
                     api_key: None,
                     headers: http::HeaderMap::new(),
+                    transport_headers: http::HeaderMap::new(),
                     base_url: None,
                     source: crate::AuthSource::new("explicit_header"),
                 },
@@ -817,11 +818,14 @@ impl Models {
                 .unwrap_or_else(|| model.common.base_url.clone());
 
             // Keep credential-derived transport invariants distinct from the
-            // mutable logical header overlay. Typed session state travels on
-            // the encoded payload rather than through this header map.
-            let auth_headers = auth.headers.clone();
+            // mutable logical header overlay while also retaining ordinary
+            // auth headers for transports that must reassert them.
+            let mut auth_headers = auth.transport_headers.clone();
+            merge_header_map(&mut auth_headers, &auth.headers);
 
-            // provider/auth -> model -> explicit request
+            // Provider/auth -> model -> explicit request. HeaderValue's
+            // sensitivity bit controls diagnostics only; it does not alter
+            // logical-header precedence.
             let mut headers =
                 provider_default_headers(&provider).map_err(AiError::into_request_start)?;
             merge_header_map(&mut headers, &auth.headers);
@@ -1906,6 +1910,7 @@ impl LocalModels {
                 None if header_only_auth => crate::ResolvedAuth {
                     api_key: None,
                     headers: http::HeaderMap::new(),
+                    transport_headers: http::HeaderMap::new(),
                     base_url: None,
                     source: crate::AuthSource::new("explicit_header"),
                 },
@@ -1923,7 +1928,8 @@ impl LocalModels {
                 .or_else(|| provider.descriptor.base_url.clone())
                 .unwrap_or_else(|| model.common.base_url.clone());
 
-            let auth_headers = auth.headers.clone();
+            let mut auth_headers = auth.transport_headers.clone();
+            merge_header_map(&mut auth_headers, &auth.headers);
 
             let mut headers =
                 local_provider_default_headers(&provider).map_err(AiError::into_request_start)?;

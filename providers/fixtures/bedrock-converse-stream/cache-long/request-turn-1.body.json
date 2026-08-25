@@ -1,0 +1,1 @@
+{"messages":[{"role":"user","content":[{"text":"Return a concise fixture response."},{"cachePoint":{"type":"default","ttl":"1h"}}]}],"system":[{"text":"Cache fixture."},{"cachePoint":{"type":"default","ttl":"1h"}}],"inferenceConfig":{"maxTokens":8192}}

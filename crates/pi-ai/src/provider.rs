@@ -96,6 +96,11 @@ pub struct ResolvedAuth {
     pub api_key: Option<SecretString>,
     /// Provider/auth logical headers.
     pub headers: HeaderMap,
+    /// Credential-derived transport invariants that are not logical request
+    /// headers. Specialized SDK transports may consume this private channel;
+    /// values here never participate in model, explicit, or transform header
+    /// precedence.
+    pub transport_headers: HeaderMap,
     /// Credential-specific endpoint override.
     pub base_url: Option<Url>,
     /// Source label for status and diagnostics.
@@ -108,6 +113,7 @@ impl fmt::Debug for ResolvedAuth {
             .debug_struct("ResolvedAuth")
             .field("api_key", &self.api_key)
             .field("headers", &"<redacted logical headers>")
+            .field("transport_headers", &"<redacted transport invariants>")
             .field(
                 "base_url",
                 &self.base_url.as_ref().map(|_| "<redacted endpoint>"),
@@ -304,6 +310,7 @@ impl AuthResolver for AnonymousAuthResolver {
             Ok(Some(ResolvedAuth {
                 api_key: None,
                 headers: HeaderMap::new(),
+                transport_headers: HeaderMap::new(),
                 base_url: None,
                 source: AuthSource::new("ambient"),
             }))
@@ -321,6 +328,7 @@ impl LocalAuthResolver for AnonymousAuthResolver {
             Ok(Some(ResolvedAuth {
                 api_key: None,
                 headers: HeaderMap::new(),
+                transport_headers: HeaderMap::new(),
                 base_url: None,
                 source: AuthSource::new("ambient"),
             }))
@@ -599,6 +607,10 @@ pub struct ApiExecutionContext<'a> {
     pub endpoint: &'a Url,
     /// Final logical headers.
     pub headers: &'a HeaderMap,
+    /// Credential-derived invariant headers retained ahead of caller overlays.
+    /// Specialized SDK transports may use these to carry non-wire request
+    /// configuration without trusting mutable logical headers.
+    pub auth_headers: &'a HeaderMap,
     /// Resolved retry policy.
     pub retry_policy: &'a RetryPolicy,
     /// Provider-selected retry classifier.
@@ -820,6 +832,7 @@ impl HttpChatApi {
             context: &request.context,
             endpoint: &request.endpoint,
             headers: &request.headers,
+            auth_headers: &request.auth_headers,
             retry_policy: &request.retry_policy,
             retry_classifier: request.retry_classifier.as_ref(),
             transport: self.transport.as_ref(),
@@ -999,12 +1012,21 @@ impl HttpChatApi {
             diagnostics.append(&mut response.diagnostics);
             response.diagnostics = std::mem::take(&mut *diagnostics);
         }
+        sanitize_send_body_errors(
+            &mut response,
+            request_error_secret_values(
+                &request.headers,
+                &request.auth_headers,
+                request.api_key.as_ref(),
+            ),
+        );
 
         let execution = ApiExecutionContext {
             model: &request.model,
             context: &request.context,
             endpoint: &request.endpoint,
             headers: &request.headers,
+            auth_headers: &request.auth_headers,
             retry_policy: &request.retry_policy,
             retry_classifier: request.retry_classifier.as_ref(),
             transport: self.transport.as_ref(),
@@ -1106,6 +1128,8 @@ pub struct LocalApiExecutionContext<'a> {
     pub endpoint: &'a Url,
     /// Final logical headers.
     pub headers: &'a HeaderMap,
+    /// Credential-derived invariant headers retained ahead of caller overlays.
+    pub auth_headers: &'a HeaderMap,
     /// Resolved retry policy.
     pub retry_policy: &'a RetryPolicy,
     /// Provider-selected retry classifier.
@@ -1282,6 +1306,7 @@ impl LocalHttpChatApi {
             context: &request.context,
             endpoint: &request.endpoint,
             headers: &request.headers,
+            auth_headers: &request.auth_headers,
             retry_policy: &request.retry_policy,
             retry_classifier: request.retry_classifier.as_ref(),
             transport: self.transport.as_ref(),
@@ -1467,12 +1492,21 @@ impl LocalHttpChatApi {
             diagnostics.append(&mut response.diagnostics);
             response.diagnostics = std::mem::take(&mut *diagnostics);
         }
+        sanitize_local_body_errors(
+            &mut response,
+            request_error_secret_values(
+                &request.headers,
+                &request.auth_headers,
+                request.api_key.as_ref(),
+            ),
+        );
 
         let execution = LocalApiExecutionContext {
             model: &request.model,
             context: &request.context,
             endpoint: &request.endpoint,
             headers: &request.headers,
+            auth_headers: &request.auth_headers,
             retry_policy: &request.retry_policy,
             retry_classifier: request.retry_classifier.as_ref(),
             transport: self.transport.as_ref(),
@@ -1702,15 +1736,30 @@ fn attempt_ai_error_with_decision(
     secret_values: &[String],
 ) -> AiError {
     let original = error.original();
-    let kind = match original {
-        AttemptFailure::Cancelled => AiErrorKind::Cancelled,
-        AttemptFailure::Http { status: 401, .. } => AiErrorKind::Authentication,
-        AttemptFailure::Http { status: 403, .. } => AiErrorKind::Authorization,
-        AttemptFailure::Http { status: 429, .. } => AiErrorKind::RateLimited,
-        AttemptFailure::Http { .. } => AiErrorKind::ProviderRejected,
-        AttemptFailure::Transport { .. } | AttemptFailure::Timeout { .. } => AiErrorKind::Transport,
-        AttemptFailure::Middleware { .. } => AiErrorKind::Internal,
-        AttemptFailure::RetryDelayTooLong { .. } => unreachable!("original failure is unwrapped"),
+    let kind = match (original, original.status()) {
+        (AttemptFailure::Cancelled, None) => AiErrorKind::Cancelled,
+        (_, Some(401)) => AiErrorKind::Authentication,
+        (_, Some(403)) => AiErrorKind::Authorization,
+        (_, Some(429)) => AiErrorKind::RateLimited,
+        (AttemptFailure::Http { .. } | AttemptFailure::Transport { .. }, Some(_)) => {
+            AiErrorKind::ProviderRejected
+        }
+        (AttemptFailure::Transport { .. } | AttemptFailure::Timeout { .. }, None) => {
+            AiErrorKind::Transport
+        }
+        (AttemptFailure::Middleware { .. }, None) => AiErrorKind::Internal,
+        (AttemptFailure::Http { .. }, None) => {
+            unreachable!("HTTP failures always retain a status")
+        }
+        (AttemptFailure::Cancelled, Some(_)) => {
+            unreachable!("cancelled failures do not retain a status")
+        }
+        (AttemptFailure::Middleware { .. } | AttemptFailure::Timeout { .. }, Some(_)) => {
+            unreachable!("middleware and timeout failures do not retain a status")
+        }
+        (AttemptFailure::RetryDelayTooLong { .. }, _) => {
+            unreachable!("original failure is unwrapped")
+        }
     };
     let (retryable, retry_after) = match decision {
         RetryDecision::DoNotRetry => (false, None),
@@ -1729,7 +1778,11 @@ fn attempt_ai_error_with_decision(
             result.request_id = request_id_from_headers(headers);
         }
         AttemptFailure::Transport { source, .. } => {
-            result.provider_code = Some(source.code.clone());
+            result.provider_code = source
+                .provider_code
+                .clone()
+                .or_else(|| Some(source.code.clone()));
+            result.request_id.clone_from(&source.request_id);
         }
         AttemptFailure::Timeout { .. } => {
             result.provider_code = Some("timeout".into());
@@ -1769,6 +1822,18 @@ fn request_error_secret_values(
     values.sort_unstable();
     values.dedup();
     values
+}
+
+fn sanitize_send_body_errors(response: &mut crate::HttpResponse, secret_values: Vec<String>) {
+    let body = std::mem::replace(&mut response.body, Box::pin(futures_util::stream::empty()));
+    response.body =
+        Box::pin(body.map(move |item| item.map_err(|error| error.sanitized(&secret_values))));
+}
+
+fn sanitize_local_body_errors(response: &mut crate::LocalHttpResponse, secret_values: Vec<String>) {
+    let body = std::mem::replace(&mut response.body, Box::pin(futures_util::stream::empty()));
+    response.body =
+        Box::pin(body.map(move |item| item.map_err(|error| error.sanitized(&secret_values))));
 }
 
 fn sensitive_header_name(name: &str) -> bool {

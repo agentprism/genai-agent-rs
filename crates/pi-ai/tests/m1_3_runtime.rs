@@ -1117,6 +1117,30 @@ fn simple_options_and_erased_patch_round_trip() {
     assert_eq!(value["api_options"]["schemaVersion"], 1);
     let restored: SimpleGenerationOptions = serde_json::from_value(value).unwrap();
     assert_eq!(restored, options);
+
+    // Part 2 §3.3 requires typed and erased patches to be alternate
+    // representations of one family schema. Bedrock's native choices include
+    // both Pi string modes and its named-tool object form.
+    for (choice, expected) in [
+        (BedrockToolChoice::Auto, json!("auto")),
+        (BedrockToolChoice::Any, json!("any")),
+        (BedrockToolChoice::None, json!("none")),
+        (
+            BedrockToolChoice::Tool {
+                name: "lookup".to_owned(),
+            },
+            json!({"type":"tool","name":"lookup"}),
+        ),
+    ] {
+        let typed = BedrockSimplePatch {
+            tool_choice: Some(choice),
+            ..BedrockSimplePatch::default()
+        };
+        let erased_value = serde_json::to_value(&typed).unwrap();
+        assert_eq!(erased_value["toolChoice"], expected);
+        let restored: BedrockSimplePatch = serde_json::from_value(erased_value).unwrap();
+        assert_eq!(restored, typed);
+    }
 }
 
 #[test]

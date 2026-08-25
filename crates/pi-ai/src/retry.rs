@@ -179,6 +179,7 @@ impl AttemptFailure {
     pub fn status(&self) -> Option<u16> {
         match self {
             Self::Http { status, .. } => Some(*status),
+            Self::Transport { source, .. } => source.status,
             Self::RetryDelayTooLong { source, .. } => source.status(),
             _ => None,
         }
@@ -395,7 +396,10 @@ impl DefaultRetryClassifier {
 impl RetryClassifier for DefaultRetryClassifier {
     fn classify(&self, failure: &AttemptFailure, policy: &RetryPolicy) -> RetryDecision {
         let retryable = match failure {
-            AttemptFailure::Transport { .. } | AttemptFailure::Timeout { .. } => true,
+            AttemptFailure::Transport { source, .. } => source
+                .status
+                .is_none_or(|status| matches!(status, 408 | 409 | 429) || status >= 500),
+            AttemptFailure::Timeout { .. } => true,
             AttemptFailure::Http {
                 status, headers, ..
             } => match header_text(headers, "x-should-retry") {
@@ -479,7 +483,10 @@ impl LocalDefaultRetryClassifier {
 impl LocalRetryClassifier for LocalDefaultRetryClassifier {
     fn classify(&self, failure: &AttemptFailure, policy: &RetryPolicy) -> RetryDecision {
         let retryable = match failure {
-            AttemptFailure::Transport { .. } | AttemptFailure::Timeout { .. } => true,
+            AttemptFailure::Transport { source, .. } => source
+                .status
+                .is_none_or(|status| matches!(status, 408 | 409 | 429) || status >= 500),
+            AttemptFailure::Timeout { .. } => true,
             AttemptFailure::Http {
                 status, headers, ..
             } => match header_text(headers, "x-should-retry") {

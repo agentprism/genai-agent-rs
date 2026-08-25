@@ -13,6 +13,7 @@
 mod anthropic_messages;
 mod async_types;
 mod auth;
+mod bedrock;
 mod cancellation;
 mod catalog;
 mod estimate;
@@ -42,6 +43,7 @@ mod usage;
 pub use anthropic_messages::*;
 pub use async_types::*;
 pub use auth::*;
+pub use bedrock::*;
 pub use cancellation::*;
 pub use catalog::*;
 pub use estimate::*;

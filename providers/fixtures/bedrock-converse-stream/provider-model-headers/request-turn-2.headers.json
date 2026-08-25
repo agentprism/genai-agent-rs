@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "method": "POST",
+  "path": "/model/us.anthropic.claude-sonnet-4-5-20250929-v1%3A0/converse-stream",
+  "headers": {
+    "accept": "*/*",
+    "authorization": "[REDACTED]",
+    "content-type": "application/json",
+    "x-fixture-request": "request-value"
+  },
+  "omittedRuntimeHeaders": [
+    "amz-sdk-invocation-id",
+    "amz-sdk-request",
+    "connection",
+    "content-length",
+    "host",
+    "user-agent",
+    "x-amz-content-sha256",
+    "x-amz-date",
+    "x-amz-user-agent"
+  ]
+}

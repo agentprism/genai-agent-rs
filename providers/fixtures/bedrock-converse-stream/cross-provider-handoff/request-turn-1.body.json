@@ -1,0 +1,1 @@
+{"messages":[{"role":"user","content":[{"text":"Think about the fixture."}]},{"role":"assistant","content":[{"text":"Foreign visible reasoning."},{"text":"Foreign answer."}]},{"role":"user","content":[{"text":"Continue on the target model."},{"cachePoint":{"type":"default"}}]}],"inferenceConfig":{"maxTokens":8192}}

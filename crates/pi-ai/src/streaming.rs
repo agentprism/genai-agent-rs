@@ -472,6 +472,14 @@ pub enum AssistantEvent {
         operation: ReplayDataOperation,
     },
 
+    /// Discards a replay artifact that the provider superseded before the
+    /// content block completed. Bedrock uses this when a reasoning block first
+    /// streams a signature and then switches to authoritative redacted bytes.
+    ReplayItemDiscarded {
+        /// Stable replay item that is no longer part of the provider output.
+        item_id: ReplayItemId,
+    },
+
     /// Marks one replay item complete and eligible for applicable replay.
     ReplayItemFinished {
         /// Stable replay-item identifier.
@@ -1075,6 +1083,19 @@ impl AssistantAssembler {
                     .get_mut(item_id)
                     .ok_or_else(|| AssemblyError::UnknownReplayItem(item_id.clone()))?
                     .apply(operation)?;
+            }
+            AssistantEvent::ReplayItemDiscarded { item_id } => {
+                self.require_started()?;
+                self.replay
+                    .shift_remove(item_id)
+                    .ok_or_else(|| AssemblyError::UnknownReplayItem(item_id.clone()))?;
+                for block in self.blocks.values_mut() {
+                    if let BlockBuilder::Thinking { replay_item, .. } = block
+                        && replay_item.as_ref() == Some(item_id)
+                    {
+                        *replay_item = None;
+                    }
+                }
             }
             AssistantEvent::ReplayItemFinished { item_id } => {
                 self.require_started()?;

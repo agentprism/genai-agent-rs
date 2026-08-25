@@ -1114,6 +1114,7 @@ fn resolved_codex_token(
     Ok(ResolvedAuth {
         api_key: Some(token),
         headers,
+        transport_headers: HeaderMap::new(),
         base_url: None,
         source: AuthSource::new(source),
     })

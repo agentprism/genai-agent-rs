@@ -1473,6 +1473,7 @@ impl ApiKeyAuth for EnvironmentApiKeyAuth {
                 return Ok(Some(ResolvedAuth {
                     api_key: Some(key),
                     headers: HeaderMap::new(),
+                    transport_headers: HeaderMap::new(),
                     base_url: None,
                     source: AuthSource::new("stored credential"),
                 }));
@@ -1496,6 +1497,7 @@ impl ApiKeyAuth for EnvironmentApiKeyAuth {
                     return Ok(Some(ResolvedAuth {
                         api_key: Some(SecretString::new(value)),
                         headers: HeaderMap::new(),
+                        transport_headers: HeaderMap::new(),
                         base_url: None,
                         source: AuthSource::new(variable),
                     }));
@@ -1556,6 +1558,7 @@ impl LocalApiKeyAuth for EnvironmentApiKeyAuth {
                 return Ok(Some(ResolvedAuth {
                     api_key: Some(key),
                     headers: HeaderMap::new(),
+                    transport_headers: HeaderMap::new(),
                     base_url: None,
                     source: AuthSource::new("stored credential"),
                 }));
@@ -1579,6 +1582,7 @@ impl LocalApiKeyAuth for EnvironmentApiKeyAuth {
                     return Ok(Some(ResolvedAuth {
                         api_key: Some(SecretString::new(value)),
                         headers: HeaderMap::new(),
+                        transport_headers: HeaderMap::new(),
                         base_url: None,
                         source: AuthSource::new(variable),
                     }));

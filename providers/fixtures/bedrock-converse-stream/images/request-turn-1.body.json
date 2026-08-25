@@ -1,0 +1,1 @@
+{"messages":[{"role":"user","content":[{"text":"Describe this fixture image."},{"image":{"format":"png","source":{"bytes":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="}}},{"cachePoint":{"type":"default"}}]}],"inferenceConfig":{"maxTokens":8192}}

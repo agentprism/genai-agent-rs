@@ -1186,6 +1186,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-ai-bedrock"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "futures-executor",
+ "futures-util",
+ "http",
+ "pi-ai",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "pi-ai-google"
 version = "0.1.0"
 dependencies = [

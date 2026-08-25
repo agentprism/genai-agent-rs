@@ -1,0 +1,1 @@
+{"messages":[{"role":"user","content":[{"text":"Return a concise fixture response."},{"cachePoint":{"type":"default"}}]}],"inferenceConfig":{"maxTokens":8192},"additionalModelRequestFields":{"thinking":{"type":"enabled","budget_tokens":7168,"display":"summarized"},"anthropic_beta":["interleaved-thinking-2025-05-14"]}}

@@ -140,6 +140,7 @@ impl OAuthAuth for FakeOAuth {
             Ok(ResolvedAuth {
                 api_key: Some(access),
                 headers: http::HeaderMap::new(),
+                transport_headers: http::HeaderMap::new(),
                 base_url: None,
                 source: AuthSource::new("OAuth"),
             })
@@ -200,6 +201,7 @@ impl LocalOAuthAuth for FakeLocalOAuth {
             Ok(ResolvedAuth {
                 api_key: Some(access),
                 headers: http::HeaderMap::new(),
+                transport_headers: http::HeaderMap::new(),
                 base_url: None,
                 source: AuthSource::new("OAuth"),
             })
@@ -312,6 +314,7 @@ impl LocalAuthResolver for CapturingLocalAuth {
             Ok(Some(ResolvedAuth {
                 api_key: key,
                 headers: http::HeaderMap::new(),
+                transport_headers: http::HeaderMap::new(),
                 base_url: None,
                 source: AuthSource::new("local explicit override"),
             }))

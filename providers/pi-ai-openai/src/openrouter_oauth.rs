@@ -677,6 +677,7 @@ fn resolved_oauth(access: SecretString) -> ResolvedAuth {
     ResolvedAuth {
         api_key: Some(access),
         headers: HeaderMap::new(),
+        transport_headers: HeaderMap::new(),
         base_url: None,
         source: AuthSource::new("OAuth"),
     }

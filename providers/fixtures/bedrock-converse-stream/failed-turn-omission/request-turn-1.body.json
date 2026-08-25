@@ -1,0 +1,1 @@
+{"messages":[{"role":"user","content":[{"text":"First attempt."}]},{"role":"user","content":[{"text":"Retry cleanly."},{"cachePoint":{"type":"default"}}]}],"inferenceConfig":{"maxTokens":8192}}

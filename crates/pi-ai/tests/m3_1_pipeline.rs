@@ -531,6 +531,7 @@ fn request_debug_redacts_secrets() {
         &ResolvedAuth {
             api_key: Some(SecretString::new(SECRET_SENTINEL)),
             headers: secret_headers,
+            transport_headers: HeaderMap::new(),
             base_url: Some(secret_url.clone()),
             source: AuthSource::new("fixture"),
         },
@@ -1229,6 +1230,17 @@ impl AuthResolver for StaticAuth {
     }
 }
 
+impl LocalAuthResolver for StaticAuth {
+    fn resolve(
+        &self,
+        _request: LocalResolveAuthRequest,
+        _cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<Option<ResolvedAuth>, AuthError>> {
+        let auth = self.auth.clone();
+        Box::pin(async move { Ok(Some(auth)) })
+    }
+}
+
 #[derive(Clone)]
 struct CapturedRequest {
     headers: HeaderMap,
@@ -1255,6 +1267,27 @@ impl ChatApi for RecordingChatApi {
             timeout: request.timeout,
         });
         Box::pin(async { Ok(AssistantStream::new(futures_util::stream::empty())) })
+    }
+}
+
+#[derive(Default)]
+struct LocalRecordingChatApi {
+    captured: RefCell<Vec<CapturedRequest>>,
+}
+
+impl LocalChatApi for LocalRecordingChatApi {
+    fn stream(
+        &self,
+        request: LocalResolvedApiRequest,
+        _cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<LocalAssistantStream, AiError>> {
+        self.captured.borrow_mut().push(CapturedRequest {
+            headers: request.headers,
+            endpoint: request.endpoint,
+            max_retries: request.retry_policy.max_retries,
+            timeout: request.timeout,
+        });
+        Box::pin(async { Ok(LocalAssistantStream::new(futures_util::stream::empty())) })
     }
 }
 
@@ -1287,6 +1320,28 @@ impl HeaderTransform for HeaderEditor {
     }
 }
 
+impl LocalHeaderTransform for HeaderEditor {
+    fn transform<'a>(
+        &'a self,
+        _context: HeaderTransformContext<'a>,
+        headers: &'a mut HeaderMap,
+    ) -> LocalBoxFuture<'a, Result<(), MiddlewareError>> {
+        Box::pin(async move {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            if let Some((name, value)) = &self.expected {
+                assert_eq!(headers.get(name), Some(value));
+            }
+            if let Some(name) = &self.remove {
+                headers.remove(name);
+            }
+            if let Some((name, value)) = &self.insert {
+                headers.insert(name, value.clone());
+            }
+            Ok(())
+        })
+    }
+}
+
 fn routed_request(
     model_headers: HeaderMapSpec,
     explicit_headers: HeaderMapSpec,
@@ -1303,6 +1358,7 @@ fn routed_request(
             auth: ResolvedAuth {
                 api_key: None,
                 headers: auth_headers,
+                transport_headers: HeaderMap::new(),
                 base_url: Some(Url::parse("https://auth.example/v1").unwrap()),
                 source: AuthSource::new("fixture"),
             },
@@ -1334,6 +1390,232 @@ fn routed_request(
     .unwrap();
     let captured = lock(&chat.captured)[0].clone();
     (chat, captured)
+}
+
+fn routed_local_request(
+    model_headers: HeaderMapSpec,
+    explicit_headers: HeaderMapSpec,
+    auth_headers: HeaderMap,
+    provider_headers: HeaderMapSpec,
+    transforms: Vec<Rc<dyn LocalHeaderTransform>>,
+) -> (Rc<LocalRecordingChatApi>, CapturedRequest) {
+    let mut descriptor = model();
+    descriptor.common.headers = model_headers;
+    let chat = Rc::new(LocalRecordingChatApi::default());
+    let registration = LocalProviderRegistration::builder("test-provider")
+        .headers(provider_headers)
+        .auth(Rc::new(StaticAuth {
+            auth: ResolvedAuth {
+                api_key: None,
+                headers: auth_headers,
+                transport_headers: HeaderMap::new(),
+                base_url: Some(Url::parse("https://auth.example/v1").unwrap()),
+                source: AuthSource::new("fixture"),
+            },
+        }))
+        .models(vec![descriptor])
+        .api(ApiId::new("test-api"), chat.clone())
+        .build()
+        .unwrap();
+    let mut builder = LocalModels::builder().provider(registration);
+    for transform in transforms {
+        builder = builder.header_transform(transform);
+    }
+    let models = builder.build().unwrap();
+    let options = SimpleGenerationOptions {
+        headers: explicit_headers,
+        max_retries: Some(2),
+        timeout_ms: Some(321),
+        ..SimpleGenerationOptions::default()
+    };
+    block_on(LocalModelRuntime::stream(
+        &models,
+        ModelRequest {
+            model: ModelRef::new("test-provider", "test-model"),
+            context: pi_ai::Context::new(None),
+            options,
+        },
+        CancellationToken::new(),
+    ))
+    .unwrap();
+    let captured = chat.captured.borrow()[0].clone();
+    (chat, captured)
+}
+
+struct SensitiveAuthTransform;
+
+impl HeaderTransform for SensitiveAuthTransform {
+    fn transform<'a>(
+        &'a self,
+        _context: HeaderTransformContext<'a>,
+        headers: &'a mut HeaderMap,
+    ) -> SendBoxFuture<'a, Result<(), MiddlewareError>> {
+        Box::pin(async move {
+            assert_eq!(headers[http::header::AUTHORIZATION], "Bearer explicit");
+            assert_eq!(headers["x-api-key"], "explicit-key");
+            headers.insert(
+                http::header::AUTHORIZATION,
+                HeaderValue::from_static("Bearer transform"),
+            );
+            headers.insert("x-api-key", HeaderValue::from_static("transform-key"));
+            Ok(())
+        })
+    }
+}
+
+impl LocalHeaderTransform for SensitiveAuthTransform {
+    fn transform<'a>(
+        &'a self,
+        _context: HeaderTransformContext<'a>,
+        headers: &'a mut HeaderMap,
+    ) -> LocalBoxFuture<'a, Result<(), MiddlewareError>> {
+        Box::pin(async move {
+            assert_eq!(headers[http::header::AUTHORIZATION], "Bearer explicit");
+            assert_eq!(headers["x-api-key"], "explicit-key");
+            headers.insert(
+                http::header::AUTHORIZATION,
+                HeaderValue::from_static("Bearer transform"),
+            );
+            headers.insert("x-api-key", HeaderValue::from_static("transform-key"));
+            Ok(())
+        })
+    }
+}
+
+fn sensitive_auth_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    let mut authorization = HeaderValue::from_static("Bearer auth");
+    authorization.set_sensitive(true);
+    headers.insert(http::header::AUTHORIZATION, authorization);
+    let mut api_key = HeaderValue::from_static("auth-key");
+    api_key.set_sensitive(true);
+    headers.insert("x-api-key", api_key);
+    headers
+}
+
+/// Architecture v2 part 2 §2.6 and §10.4
+/// `headers_auth_before_model`, `headers_model_before_explicit`, and
+/// `headers_explicit_before_transform`. `HeaderValue::is_sensitive()` is a
+/// logging property, not provenance; ordinary sensitive auth headers retain
+/// the same precedence in both trait families.
+#[test]
+fn headers_sensitive_auth_follows_precedence_send_and_local() {
+    let model_headers = header_spec(&[
+        ("authorization", Some("Bearer model")),
+        ("x-api-key", Some("model-key")),
+    ]);
+    let explicit_headers = header_spec(&[
+        ("authorization", Some("Bearer explicit")),
+        ("x-api-key", Some("explicit-key")),
+    ]);
+
+    let (_, send_auth) = routed_request(
+        HeaderMapSpec::new(),
+        HeaderMapSpec::new(),
+        sensitive_auth_headers(),
+        HeaderMapSpec::new(),
+        Vec::new(),
+    );
+    assert_eq!(
+        send_auth.headers[http::header::AUTHORIZATION],
+        "Bearer auth"
+    );
+    assert_eq!(send_auth.headers["x-api-key"], "auth-key");
+    assert!(send_auth.headers[http::header::AUTHORIZATION].is_sensitive());
+    assert!(send_auth.headers["x-api-key"].is_sensitive());
+
+    let (_, send_model) = routed_request(
+        model_headers.clone(),
+        HeaderMapSpec::new(),
+        sensitive_auth_headers(),
+        HeaderMapSpec::new(),
+        Vec::new(),
+    );
+    assert_eq!(
+        send_model.headers[http::header::AUTHORIZATION],
+        "Bearer model"
+    );
+    assert_eq!(send_model.headers["x-api-key"], "model-key");
+
+    let (_, send_explicit) = routed_request(
+        model_headers.clone(),
+        explicit_headers.clone(),
+        sensitive_auth_headers(),
+        HeaderMapSpec::new(),
+        Vec::new(),
+    );
+    assert_eq!(
+        send_explicit.headers[http::header::AUTHORIZATION],
+        "Bearer explicit"
+    );
+    assert_eq!(send_explicit.headers["x-api-key"], "explicit-key");
+
+    let (_, send_transform) = routed_request(
+        model_headers.clone(),
+        explicit_headers.clone(),
+        sensitive_auth_headers(),
+        HeaderMapSpec::new(),
+        vec![Arc::new(SensitiveAuthTransform)],
+    );
+    assert_eq!(
+        send_transform.headers[http::header::AUTHORIZATION],
+        "Bearer transform"
+    );
+    assert_eq!(send_transform.headers["x-api-key"], "transform-key");
+
+    let (_, local_auth) = routed_local_request(
+        HeaderMapSpec::new(),
+        HeaderMapSpec::new(),
+        sensitive_auth_headers(),
+        HeaderMapSpec::new(),
+        Vec::new(),
+    );
+    assert_eq!(
+        local_auth.headers[http::header::AUTHORIZATION],
+        "Bearer auth"
+    );
+    assert_eq!(local_auth.headers["x-api-key"], "auth-key");
+    assert!(local_auth.headers[http::header::AUTHORIZATION].is_sensitive());
+    assert!(local_auth.headers["x-api-key"].is_sensitive());
+
+    let (_, local_model) = routed_local_request(
+        model_headers.clone(),
+        HeaderMapSpec::new(),
+        sensitive_auth_headers(),
+        HeaderMapSpec::new(),
+        Vec::new(),
+    );
+    assert_eq!(
+        local_model.headers[http::header::AUTHORIZATION],
+        "Bearer model"
+    );
+    assert_eq!(local_model.headers["x-api-key"], "model-key");
+
+    let (_, local_explicit) = routed_local_request(
+        model_headers.clone(),
+        explicit_headers.clone(),
+        sensitive_auth_headers(),
+        HeaderMapSpec::new(),
+        Vec::new(),
+    );
+    assert_eq!(
+        local_explicit.headers[http::header::AUTHORIZATION],
+        "Bearer explicit"
+    );
+    assert_eq!(local_explicit.headers["x-api-key"], "explicit-key");
+
+    let (_, local_transform) = routed_local_request(
+        model_headers,
+        explicit_headers,
+        sensitive_auth_headers(),
+        HeaderMapSpec::new(),
+        vec![Rc::new(SensitiveAuthTransform)],
+    );
+    assert_eq!(
+        local_transform.headers[http::header::AUTHORIZATION],
+        "Bearer transform"
+    );
+    assert_eq!(local_transform.headers["x-api-key"], "transform-key");
 }
 
 #[test]
@@ -1927,6 +2209,7 @@ impl AuthResolver for RegistryProbeAuth {
             Ok(Some(ResolvedAuth {
                 api_key: None,
                 headers: HeaderMap::new(),
+                transport_headers: HeaderMap::new(),
                 base_url: None,
                 source: AuthSource::new("probe"),
             }))
@@ -1994,6 +2277,7 @@ impl LocalAuthResolver for RcLocalAuth {
             Ok(Some(ResolvedAuth {
                 api_key: None,
                 headers: HeaderMap::new(),
+                transport_headers: HeaderMap::new(),
                 base_url: None,
                 source: AuthSource::new("local"),
             }))

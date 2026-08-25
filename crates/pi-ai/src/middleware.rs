@@ -185,6 +185,13 @@ pub struct TransportError {
     pub code: String,
     /// Secret-free diagnostic text.
     pub message: String,
+    /// Provider exception/code retained by SDK-backed transports.
+    pub provider_code: Option<String>,
+    /// HTTP status retained when an SDK converts a non-success response into
+    /// an error before the generic HTTP pipeline can observe it.
+    pub status: Option<u16>,
+    /// Provider request identifier retained by SDK-backed transports.
+    pub request_id: Option<String>,
     /// Redacted diagnostics that must be committed if this failure terminates
     /// an already-established semantic stream.
     pub diagnostics: Vec<AssistantMessageDiagnostic>,
@@ -196,13 +203,49 @@ impl TransportError {
         Self {
             code: code.into(),
             message: message.into(),
+            provider_code: None,
+            status: None,
+            request_id: None,
             diagnostics: Vec::new(),
         }
+    }
+
+    /// Retains the provider's modeled exception/code.
+    pub fn with_provider_code(mut self, provider_code: impl Into<String>) -> Self {
+        self.provider_code = Some(provider_code.into());
+        self
+    }
+
+    /// Retains the HTTP status hidden by an SDK error boundary.
+    pub fn with_status(mut self, status: u16) -> Self {
+        self.status = Some(status);
+        self
+    }
+
+    /// Retains the provider request identifier hidden by an SDK error boundary.
+    pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
+        self.request_id = Some(request_id.into());
+        self
     }
 
     /// Attaches one redacted diagnostic to an established-body failure.
     pub fn with_diagnostic(mut self, diagnostic: AssistantMessageDiagnostic) -> Self {
         self.diagnostics.push(diagnostic);
+        self
+    }
+
+    /// Redacts named secret fields and the supplied request-secret values from
+    /// every public text field before the failure crosses a transport boundary.
+    pub fn sanitized(mut self, secret_values: &[String]) -> Self {
+        let secret_values = secret_values.iter().map(String::as_str).collect::<Vec<_>>();
+        self.code = crate::sanitization::redact_public_text(self.code, &secret_values);
+        self.message = crate::sanitization::redact_public_text(self.message, &secret_values);
+        self.provider_code = self
+            .provider_code
+            .map(|value| crate::sanitization::redact_public_text(value, &secret_values));
+        self.request_id = self
+            .request_id
+            .map(|value| crate::sanitization::redact_public_text(value, &secret_values));
         self
     }
 }

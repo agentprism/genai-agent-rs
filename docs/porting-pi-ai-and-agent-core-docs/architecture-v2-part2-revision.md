@@ -967,6 +967,8 @@ For redacted Bedrock reasoning, Pi:
 
 See `packages/ai/src/api/bedrock-converse-stream.ts:650–860`.
 
+> Correction: Pinned Pi can receive a reasoning signature before the first `redactedContent` chunk for the same block; at that transition it clears the accumulated signature and retains only the redacted payload. The immutable Rust protocol therefore also includes `ReplayItemDiscarded { item_id }`, allowing the decoder to supersede the started signature item before starting the redacted-reasoning item without leaving an incomplete or stale artifact (`packages/ai/src/api/bedrock-converse-stream.ts:635–657`).
+
 On replay, it base64-decodes that signature and emits:
 
 ```text
@@ -1480,6 +1482,8 @@ pub struct ApiExecutionContext<'a> {
 
 > Correction: Pinned Codex Responses pricing must distinguish a response-echoed `service_tier: "default"` from the caller's requested `flex` or `priority`, and request payload middleware must not silently change the pricing contract after lowering. The Rust `ApiExecutionContext` and local counterpart therefore also retain a borrowed `ApiCallOptions` view of the original simple or full call options for request-scoped decoder configuration (`packages/ai/src/api/openai-codex-responses.ts:623–630,655–665,1508–1519`; `packages/ai/test/openai-codex-stream.test.ts`).
 
+> Correction: Pinned Bedrock request encoding consumes provider-environment values with request-scoped-over-ambient precedence, including region, `PI_CACHE_RETENTION`, and `AWS_BEDROCK_FORCE_CACHE`. `getProviderEnvValue` uses JavaScript truthiness, so every non-empty value, including whitespace-only text, is present and prevents ambient fallback. Because the portable core does not read process globals and auth resolution precedes API lowering, the Rust `ApiExecutionContext` and local counterpart also retain borrowed credential-derived invariant headers. The Bedrock leaf uses that non-wire channel to carry the resolved request decisions into encoding; mutable logical-header overlays cannot replace it (`packages/ai/src/api/bedrock-converse-stream.ts:792–840,1156,1206–1227`; `packages/ai/src/utils/provider-env.ts:45–50`).
+
 ### Cancellable retry loop
 
 ```rust
@@ -1710,7 +1714,13 @@ Pi inserts caller headers at the Smithy build step, after serialization but befo
 
 > Correction: Pinned Pi suppresses those reserved Bedrock headers silently; it does not report their names through diagnostics. Rust parity therefore inserts allowed logical headers at the signer-compatible build stage and silently suppresses reserved names (`packages/ai/src/api/bedrock-converse-stream.ts:452–485`; `packages/ai/test/bedrock-custom-headers.test.ts`).
 
+> Correction: Pinned Pi resolves `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` for the effective request target before constructing the Bedrock client, with request-scoped lowercase/uppercase aliases ahead of ambient aliases, and selects an HTTP/1 proxy-capable handler whenever a proxy applies. The injected Rust signer therefore receives the resolved request-scoped proxy URL and HTTP/1 requirement rather than consulting process globals itself (`packages/ai/src/api/bedrock-converse-stream.ts:207–219`; `packages/ai/src/utils/node-http-proxy.ts`; `packages/ai/test/node-http-proxy.test.ts`).
+
+> Correction: The private Rust auth-to-signer carrier is not a new reserved logical header. It is suppressed only while its value remains the untouched credential-derived carrier; a model, explicit-request, or `HeaderTransform` overlay using that name is forwarded like every other non-reserved caller header (`packages/ai/src/api/bedrock-converse-stream.ts:440–473`; `packages/ai/test/bedrock-custom-headers.test.ts`).
+
 The generic header pipeline therefore produces **logical headers**. The Bedrock transport adapter is responsible for inserting them at the signer-compatible stage and reporting any suppressed names through diagnostics.
+
+> Correction: The preceding reporting clause is superseded: pinned Pi silently suppresses reserved Bedrock header names and emits no suppression diagnostic. The adapter inserts only allowed logical headers before signing (`packages/ai/src/api/bedrock-converse-stream.ts:452–485`; `packages/ai/test/bedrock-custom-headers.test.ts`).
 
 ---
 

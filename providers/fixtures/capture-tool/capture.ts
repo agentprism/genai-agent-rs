@@ -33,6 +33,7 @@ const strictTool = {
 type Family =
 	| "openai-completions"
 	| "anthropic-messages"
+	| "bedrock-converse-stream"
 	| "openai-responses"
 	| "openai-codex-responses"
 	| "google-generative-ai"
@@ -96,6 +97,10 @@ function isGoogleFamily(family: Family): boolean {
 
 function isResponsesFamily(family: Family): boolean {
 	return family === "openai-responses" || family === "openai-codex-responses";
+}
+
+function isBedrockFamily(family: Family): boolean {
+	return family === "bedrock-converse-stream";
 }
 
 function user(content: unknown): Record<string, unknown> {
@@ -347,7 +352,9 @@ function commonCases(api: Family, provider: string, model: string): FixtureCase[
 				? { compat: { supportsStrictMode: true } }
 				: isGoogleFamily(api)
 					? {}
-				: { compat: { supportsStrictTools: true } },
+					: isBedrockFamily(api)
+						? { compat: { supportsStrictMode: true } }
+						: { compat: { supportsStrictTools: true } },
 		},
 		{
 			name: "provider-model-headers",
@@ -377,8 +384,10 @@ function commonCases(api: Family, provider: string, model: string): FixtureCase[
 				? { compat: { requiresAssistantAfterToolResult: true, requiresToolResultName: true } }
 				: api === "anthropic-messages"
 					? { compat: { allowEmptySignature: true, supportsEagerToolInputStreaming: false } }
-					: isGoogleFamily(api)
-						? {}
+				: isGoogleFamily(api)
+					? {}
+					: isBedrockFamily(api)
+						? { compat: { supportsStrictMode: false } }
 						: { compat: { supportsStrictMode: false } },
 		},
 		{
@@ -425,15 +434,20 @@ function modelFor(family: Family, baseUrl: string, patch: Record<string, unknown
 	const responses = isResponsesFamily(family);
 	const codex = family === "openai-codex-responses";
 	const google = isGoogleFamily(family);
+	const bedrock = isBedrockFamily(family);
 	const base: Record<string, unknown> = {
-		id: codex
+		id: bedrock
+			? "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+			: codex
 			? "fixture-codex-model"
 			: google
 				? "gemini-3-fixture"
 			: openAi
 				? "fixture-openai-model"
 				: "fixture-anthropic-model",
-		name: codex
+		name: bedrock
+			? "Fixture Bedrock Claude Sonnet 4.5"
+			: codex
 			? "Fixture Codex Model"
 			: google
 				? "Fixture Google Model"
@@ -441,7 +455,9 @@ function modelFor(family: Family, baseUrl: string, patch: Record<string, unknown
 					? "Fixture OpenAI Model"
 					: "Fixture Anthropic Model",
 		api: family,
-		provider: codex
+		provider: bedrock
+			? "amazon-bedrock"
+			: codex
 			? "openai-codex"
 			: family === "google-generative-ai"
 				? "fixture-google"
@@ -465,7 +481,12 @@ function modelFor(family: Family, baseUrl: string, patch: Record<string, unknown
 			xhigh: google ? "high" : "xhigh",
 			max: google ? "high" : "max",
 		},
-		compat: responses
+		compat: bedrock
+			? {
+				supportsLongCacheRetention: true,
+				supportsStrictMode: true,
+			}
+			: responses
 			? {
 					supportsDeveloperRole: true,
 					supportsReasoningEffort: true,
@@ -998,9 +1019,136 @@ function googleFrames(kind: ResponseKind, model: string, turn: number): string {
 	return `data: ${JSON.stringify(response)}\n\n`;
 }
 
-function responseFrames(family: Family, kind: ResponseKind, model: string, turn: number): string {
+function crc32(bytes: Uint8Array): number {
+	let crc = 0xffffffff;
+	for (const byte of bytes) {
+		crc ^= byte;
+		for (let bit = 0; bit < 8; bit += 1) {
+			crc = (crc >>> 1) ^ ((crc & 1) === 1 ? 0xedb88320 : 0);
+		}
+	}
+	return (crc ^ 0xffffffff) >>> 0;
+}
+
+function writeU32(target: Uint8Array, offset: number, value: number): void {
+	new DataView(target.buffer, target.byteOffset, target.byteLength).setUint32(offset, value >>> 0, false);
+}
+
+function smithyStringHeader(name: string, value: string): Uint8Array {
+	const encoder = new TextEncoder();
+	const nameBytes = encoder.encode(name);
+	const valueBytes = encoder.encode(value);
+	const bytes = new Uint8Array(1 + nameBytes.length + 1 + 2 + valueBytes.length);
+	bytes[0] = nameBytes.length;
+	bytes.set(nameBytes, 1);
+	bytes[1 + nameBytes.length] = 7;
+	new DataView(bytes.buffer).setUint16(2 + nameBytes.length, valueBytes.length, false);
+	bytes.set(valueBytes, 4 + nameBytes.length);
+	return bytes;
+}
+
+function joinBytes(parts: Uint8Array[]): Uint8Array {
+	const result = new Uint8Array(parts.reduce((length, part) => length + part.length, 0));
+	let offset = 0;
+	for (const part of parts) {
+		result.set(part, offset);
+		offset += part.length;
+	}
+	return result;
+}
+
+function bedrockEventFrame(eventType: string, payload: Record<string, unknown>): Uint8Array {
+	const headers = joinBytes([
+		smithyStringHeader(":message-type", "event"),
+		smithyStringHeader(":event-type", eventType),
+		smithyStringHeader(":content-type", "application/json"),
+	]);
+	const body = new TextEncoder().encode(JSON.stringify(payload));
+	const totalLength = 16 + headers.length + body.length;
+	const frame = new Uint8Array(totalLength);
+	writeU32(frame, 0, totalLength);
+	writeU32(frame, 4, headers.length);
+	writeU32(frame, 8, crc32(frame.subarray(0, 8)));
+	frame.set(headers, 12);
+	frame.set(body, 12 + headers.length);
+	writeU32(frame, totalLength - 4, crc32(frame.subarray(0, totalLength - 4)));
+	return frame;
+}
+
+function bedrockFrames(kind: ResponseKind, turn: number): Uint8Array {
+	const events: Array<[string, Record<string, unknown>]> = [
+		["messageStart", { role: "assistant" }],
+	];
+	if (kind === "text") {
+		events.push(
+			["contentBlockDelta", { contentBlockIndex: 0, delta: { text: `fixture response turn ${turn}` } }],
+			["contentBlockStop", { contentBlockIndex: 0 }],
+		);
+	} else {
+		let index = 0;
+		if (kind === "signed-reasoning") {
+			events.push(
+				["contentBlockDelta", {
+					contentBlockIndex: index,
+					delta: { reasoningContent: { text: "Inspect the requested fixture." } },
+				}],
+				["contentBlockDelta", {
+					contentBlockIndex: index,
+					delta: { reasoningContent: { signature: "signed-fixture-reasoning" } },
+				}],
+				["contentBlockStop", { contentBlockIndex: index }],
+			);
+			index += 1;
+		} else if (kind === "redacted-reasoning") {
+			events.push(
+				["contentBlockDelta", {
+					contentBlockIndex: index,
+					delta: { reasoningContent: { redactedContent: "AQID/w==" } },
+				}],
+				["contentBlockStop", { contentBlockIndex: index }],
+			);
+			index += 1;
+		}
+		const paths = kind === "multiple-tools" ? ["Cargo.toml", "README.md"] : ["Cargo.toml"];
+		for (const [offset, path] of paths.entries()) {
+			const contentBlockIndex = index + offset;
+			events.push(
+				["contentBlockStart", {
+					contentBlockIndex,
+					start: {
+						toolUse: {
+							toolUseId: offset === 0 ? TOOL_CALL_1 : TOOL_CALL_2,
+							name: "read_file",
+						},
+					},
+				}],
+				["contentBlockDelta", {
+					contentBlockIndex,
+					delta: { toolUse: { input: JSON.stringify({ path }) } },
+				}],
+				["contentBlockStop", { contentBlockIndex }],
+			);
+		}
+	}
+	events.push(
+		["messageStop", { stopReason: kind === "text" ? "end_turn" : "tool_use" }],
+		["metadata", {
+			usage: {
+				inputTokens: 12,
+				outputTokens: 8,
+				totalTokens: 20,
+				cacheReadInputTokens: 0,
+				cacheWriteInputTokens: 0,
+			},
+		}],
+	);
+	return joinBytes(events.map(([eventType, payload]) => bedrockEventFrame(eventType, payload)));
+}
+
+function responseFrames(family: Family, kind: ResponseKind, model: string, turn: number): string | Uint8Array {
 	if (family === "openai-completions") return openAiFrames(kind, model, turn);
 	if (family === "anthropic-messages") return anthropicFrames(kind, model, turn);
+	if (family === "bedrock-converse-stream") return bedrockFrames(kind, turn);
 	if (isGoogleFamily(family)) return googleFrames(kind, model, turn);
 	return responsesFrames(family, kind, model, turn);
 }
@@ -1131,7 +1279,13 @@ function startCaptureServer(state: CaptureServerState): ReturnType<typeof Bun.se
 			state.responseBodies.push(responseBody);
 			return new Response(responseBody, {
 				status: 200,
-				headers: { "content-type": "text/event-stream", "x-request-id": "request-fixture-0001" },
+				headers: {
+					"content-type": requestUrl.pathname.endsWith("/converse-stream")
+						? "application/vnd.amazon.eventstream"
+						: "text/event-stream",
+					"x-amzn-requestid": "request-fixture-0001",
+					"x-request-id": "request-fixture-0001",
+				},
 			});
 		},
 	});
@@ -1210,6 +1364,28 @@ function assertRetainedTurnTwoLowering(
 	if (!fixture.simple) return;
 	const turnOne = parseRequestBody(requestOne);
 	const turnTwo = parseRequestBody(requestTwo);
+	if (family === "bedrock-converse-stream") {
+		const one = turnOne.inferenceConfig as Record<string, unknown> | undefined;
+		const two = turnTwo.inferenceConfig as Record<string, unknown> | undefined;
+		if (typeof one?.maxTokens !== "number" || typeof two?.maxTokens !== "number") {
+			throw new Error(`${family}/${fixture.name} did not retain positive inferenceConfig.maxTokens`);
+		}
+		if (fixture.name === "max-output-clamp") {
+			const requested = fixture.options?.maxTokens;
+			if (typeof requested !== "number" || one.maxTokens >= requested || two.maxTokens >= requested) {
+				throw new Error(`${family}/${fixture.name} bypassed streamSimple max-output clamping on turn two`);
+			}
+		} else if (one.maxTokens !== two.maxTokens) {
+			throw new Error(`${family}/${fixture.name} lost maxTokens lowering on turn two`);
+		}
+		if (Object.hasOwn(one, "temperature") && one.temperature !== two.temperature) {
+			throw new Error(`${family}/${fixture.name} lost temperature lowering on turn two`);
+		}
+		if (fixture.options?.reasoning) {
+			assertSameJsonField(family, fixture, turnOne, turnTwo, "additionalModelRequestFields");
+		}
+		return;
+	}
 
 	const maxTokenField = family === "anthropic-messages"
 		? "max_tokens"
@@ -1350,6 +1526,8 @@ async function captureCase(
 		const localBasePath = credentialTarget?.upstream.localBasePath ??
 			(family === "openai-codex-responses"
 				? ""
+				: family === "bedrock-converse-stream"
+					? ""
 				: family === "google-generative-ai"
 					? "/v1beta"
 					: "/v1");
@@ -1362,8 +1540,10 @@ async function captureCase(
 		const modelId = String(model.id);
 		const turnOneKind = fixture.responseKind ?? "text";
 		if (mode === "hermetic") {
-			state.scriptedResponses.push(new TextEncoder().encode(responseFrames(family, turnOneKind, modelId, 1)));
-			state.scriptedResponses.push(new TextEncoder().encode(responseFrames(family, "text", modelId, 2)));
+			const responseOne = responseFrames(family, turnOneKind, modelId, 1);
+			const responseTwo = responseFrames(family, "text", modelId, 2);
+			state.scriptedResponses.push(typeof responseOne === "string" ? new TextEncoder().encode(responseOne) : responseOne);
+			state.scriptedResponses.push(typeof responseTwo === "string" ? new TextEncoder().encode(responseTwo) : responseTwo);
 		}
 
 		const fixtureHeaders = fixture.options?.headers as Record<string, string> | undefined;
@@ -1373,7 +1553,9 @@ async function captureCase(
 				? { headers: { ...credentialTarget?.optionHeaders, ...fixtureHeaders } }
 				: {}),
 			...(mode === "hermetic"
-				? { apiKey: family === "openai-codex-responses" ? FIXTURE_CODEX_API_KEY : FIXTURE_API_KEY }
+				? family === "bedrock-converse-stream"
+					? { env: { AWS_BEDROCK_SKIP_AUTH: "1", AWS_BEDROCK_FORCE_HTTP1: "1" } }
+					: { apiKey: family === "openai-codex-responses" ? FIXTURE_CODEX_API_KEY : FIXTURE_API_KEY }
 				: credentialTarget?.apiKey
 					? { apiKey: credentialTarget.apiKey }
 					: {}),
@@ -1525,6 +1707,9 @@ async function main(): Promise<void> {
 	const anthropicModule = await import(
 		`${pathToFileURL(join(workRoot, "src", "api", "anthropic-messages.ts")).href}?pin=${PINNED_COMMIT}`
 	);
+	const bedrockModule = await import(
+		`${pathToFileURL(join(workRoot, "src", "api", "bedrock-converse-stream.ts")).href}?pin=${PINNED_COMMIT}`
+	);
 	const openAiResponsesModule = await import(
 		`${pathToFileURL(join(workRoot, "src", "api", "openai-responses.ts")).href}?pin=${PINNED_COMMIT}`
 	);
@@ -1554,6 +1739,12 @@ async function main(): Promise<void> {
 			provider: "fixture-anthropic",
 			model: "fixture-anthropic-model",
 			module: anthropicModule,
+		},
+		{
+			family: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+			model: "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+			module: bedrockModule,
 		},
 		{
 			family: "openai-responses",
