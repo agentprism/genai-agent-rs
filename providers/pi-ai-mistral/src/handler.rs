@@ -767,11 +767,13 @@ fn normalize_mistral_terminal_failure(failure: AttemptFailure) -> AttemptFailure
             };
             AttemptFailure::Transport {
                 attempt,
-                source: pi_ai::TransportError::new(
-                    "mistral_api_error",
-                    format!("Mistral API error ({status}): {detail}"),
-                )
-                .with_status(status),
+                source: Box::new(
+                    pi_ai::TransportError::new(
+                        "mistral_api_error",
+                        format!("Mistral API error ({status}): {detail}"),
+                    )
+                    .with_status(status),
+                ),
             }
         }
         other => other,
