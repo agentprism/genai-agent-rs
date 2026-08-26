@@ -1146,3 +1146,82 @@ correction to Part 1.
   publication.
 
 M8.3 added no correction note to either architecture document.
+
+## 2026-08-26 — M9: native session durability and parity completion
+
+M9 completed the native Session gate with a file-backed durable session store
+and backend-generic storage/recovery conformance, then eliminated every remaining
+planned parity mapping. The final manifest maps the complete pinned upstream test
+inventory only to implemented semantic parity or documented deliberate
+divergences. All tests remain hermetic.
+
+### Approved packages
+
+- M9.1 — file-backed native session storage, serialized append, sequence
+  validation, torn-tail recovery, atomic rewrite, operation recovery, native
+  session search/context coverage, and retirement of the Pi-v4 compatibility
+  crate — `efaa5ef107bdce6ead5e3b752b9a1784ae038709`
+- M9.2 — parity-manifest burn-down, remaining pinned provider/core/harness
+  behavior coverage, assistant-call retry parity, and prohibition of future
+  `planned` mappings — `5b46de240287bca940b21c1b42e73aa3af014738`
+
+### Architecture v2 Part 2 §10 conformance now passing
+
+The final M9 tree continues to pass the 344 exact §10 conformance names recorded
+at M8. M9.1 additionally certifies all 16 §10.10 reducer and session-tree
+behaviors through the backend-generic storage/recovery harness against both the
+in-memory and native file-backed backends, for both Send and Local trait
+families:
+
+```text
+session_sequence_starts_at_one
+session_sequence_is_global_across_mutation_kinds
+session_sequence_gap_is_corruption
+session_entry_parent_must_exist
+session_lane_head_moves_on_append
+session_lane_can_move_to_ancestor
+session_multiple_lanes_share_entry_tree
+session_branch_scan_leaf_to_root
+session_global_entry_query_sequence_order
+session_fact_latest_value_wins
+session_label_is_global_not_branch_scoped
+session_stats_derive_from_usage_records
+session_open_operation_detected
+session_multiple_open_operations_is_corruption
+session_operation_recovery_reconstructs_intent
+session_reducer_replay_equals_live_state
+```
+
+The native Session gate also passes dedicated serialized-concurrent-append,
+bounded-log, detached-snapshot, failed-batch atomicity, repository
+create/open/list, branch/tree fork, persistence round-trip, sequence-gap,
+torn/unterminated-tail repair, mid-file corruption rejection, atomic rewrite,
+schema-version, and crash-recovery checks. M9.2 removes the last
+`[[planned_test]]`; failed-assistant omission is mapped to the already passing
+exact §10.6 test `handoff_failed_assistant_omitted`. No new exact §10 row name
+was introduced by M9.
+
+### Parity manifest coverage
+
+- Pinned upstream test files mapped: 160/160 — 147 `semantic-parity`, 13
+  `deliberate-divergence`, and 0 `planned`.
+- Status-bearing mappings: 252 total — 230 `semantic-parity`, 22
+  `deliberate-divergence`, and 0 `planned`.
+- Future named conformance tests: 0 `planned_test` entries; the checker forbids
+  adding them after M9.2.
+- Architecture §10.11 allowlist rows mapped: 10/10.
+- Rust test inventory discovered by the parity checker: 938 unique tests.
+
+### Architecture correction notes
+
+M9 added two corrections, both from M9.2 to Architecture v2 Part 2. M9.1 added
+no correction note, and neither package added a correction to Part 1.
+
+- §2.4 now records pinned Pi's separate post-terminal assistant-call retry
+  helper: it classifies completed assistant errors, performs bounded cancellable
+  retries with scheduled/start/finished callbacks, and remains distinct from
+  transparent pre-semantic transport retry and from `retry_last_turn`.
+- §3.3 now records that optional `telemetryContext` passes unchanged through
+  common options, simple lowering, provider/`Models` dispatch, and deferred
+  fetch/cancel surfaces; Rust retains it as redacted, non-serializable
+  request-scoped scratch state so replay invariant R8 remains intact.
