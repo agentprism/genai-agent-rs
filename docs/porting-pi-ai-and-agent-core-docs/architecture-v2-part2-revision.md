@@ -1891,7 +1891,7 @@ LoweringError::ConflictingApiOptions {
 
 There is no "typed wins" or "extension wins" rule.
 
-> Correction: Pinned Pi also carries an optional `telemetryContext` unchanged through common request options, simple-option lowering, provider and `Models` dispatch, and deferred fetch/cancel surfaces. Rust represents it as an opaque, cloneable `TelemetryContextHandle` on `SimpleGenerationOptions` and `ApiRequestOptions`; it is request-scoped scratch state, is redacted from diagnostics, and is skipped by serialization so replay invariant R8 remains intact (`packages/ai/src/types.ts`; `packages/ai/src/api/simple-options.ts`; `packages/ai/test/telemetry-options.test.ts`). The separately owner-excluded image-generation surface is unaffected.
+> Correction: Pinned Pi also carries an optional `telemetryContext` unchanged through common request options, simple-option lowering, provider and `Models` dispatch, and deferred fetch/cancel surfaces. Rust represents it as an opaque, cloneable `TelemetryContextHandle` on `SimpleGenerationOptions` and `ApiRequestOptions`; it is request-scoped scratch state, is redacted from diagnostics, and is skipped by serialization so replay invariant R8 remains intact (`packages/ai/src/types.ts`; `packages/ai/src/api/simple-options.ts`; `packages/ai/test/telemetry-options.test.ts`). The image-generation surface is unaffected (owner ruling 2026-08-26: in scope, deferred to Milestone 10; an earlier note here overstated it as excluded).
 
 ### Precedence
 

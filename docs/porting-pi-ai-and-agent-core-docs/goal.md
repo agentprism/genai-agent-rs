@@ -8,7 +8,7 @@
 
 ## What parity means
 
-Parity is **contract and invariant parity with pi at the pinned commit** (`8fa7eebd235355522c8104166b4f1f959b4e2f10`, `earendil-works/pi`), defined operationally — not by reproducing the bytes a JavaScript runtime happens to emit:
+Parity is **contract and invariant parity with pi at the current tracked pin** (recorded as `upstream_commit` in `parity/manifest.toml`; `earendil-works/pi`), defined operationally — not by reproducing the bytes a JavaScript runtime happens to emit:
 
 1. **The parity manifest** (Part 2 §10): every upstream `packages/ai/test/**/*.test.ts` and `packages/agent/test/**/*.test.ts` file maps to named Rust tests, with status `semantic-parity` or `deliberate-divergence` plus a reason. CI fails on an unmapped upstream test, a mapped Rust test that does not exist, a divergence without a reason, or a pin change without regenerating the manifest.
 2. **The conformance suites** (Part 2 §10.1–§10.10) are the definition of correct behavior for streams, replay, retry, middleware, lowering, handoff, catalogs, auth, the agent loop, and the harness. Each test names its pi basis.
@@ -31,6 +31,10 @@ Part 1 §10's milestones, in order: contracts and `ScriptedRuntime` → agent lo
 ## Authority
 
 pi's pinned source is the reference implementation for every behavior the manifest maps. The architecture documents are the authority for *shape*. Where an architecture document and pi source disagree about a behavior that is not on the divergence allowlist, pi is right and the document gets a correction note. The other documents in this folder are background. The previous standard — byte-observable parity with pi's JavaScript behavior, including its runtime semantics — was retired on 2026-08-22; work produced under it lives in the `ai/` crate and on `wip/parity-remediation-p01`, and may be mined for wire encoders, SSE decoders, OAuth flows, and fixtures, but it is not a baseline.
+
+## Pin tracking
+
+The pin is a tracked cursor, not a freeze (owner decision, 2026-08-26). It is kept current with pi `main` by the recurring pi-sync process (`workflows/pi-sync.workflow.js`): each sync moves the pin worktree to latest, regenerates the manifest inventory, and produces an owner divergence report classifying every behavioral change in pi against the port. **Remediation is owner-gated** — only divergences the owner approves after reviewing the report are remediated; the rest remain tracked in the report. Pin SHAs in milestone records and mappings are ported-at references. Owner ruling 2026-08-26: image generation (`openrouter-images`, the image-model catalog, `generateImage` surfaces) is in scope and ports as Milestone 10 now that the core delivery has shipped; its upstream tests are `planned`/M10 in the manifest until then.
 
 ## Crate naming
 

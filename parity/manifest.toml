@@ -796,10 +796,11 @@ status = "semantic-parity"
 [[mapping]]
 source = "packages/ai/test/fetch-option.test.ts"
 rust = ["injected_http_transport_receives_final_request", "local_provider_components_accept_rc_state"]
-status = "deliberate-divergence"
+status = "planned"
+milestone = "M10"
 owner_ruling = "provider-api-implementations.mdx#not-ported"
 replacement = "Every chat API uses the injected Send/Local HttpTransport capability; the standalone image-generation fetch scenario has no Rust surface."
-reason = "The named Rust tests cover the file's chat transport scenarios, but its final generateImage scenario belongs to the owner-excluded standalone image-generation subsystem."
+reason = "Owner ruling 2026-08-26: image generation is in scope and ports as Milestone 10 after the core delivery; chat scenarios in this file that already have parity keep their listed Rust tests, and the image scenarios complete in M10."
 
 [[mapping]]
 source = "packages/ai/test/fireworks-models.test.ts"
@@ -874,10 +875,11 @@ status = "semantic-parity"
 [[mapping]]
 source = "packages/ai/test/image-model-data.test.ts"
 rust = []
-status = "deliberate-divergence"
+status = "planned"
+milestone = "M10"
 owner_ruling = "provider-api-implementations.mdx#not-ported"
 replacement = "Chat-model image input/output remains supported through canonical ContentBlock values and the §10.8 provider fixture corpus; the separate image-generation control plane is not shipped."
-reason = "The standing owner ruling in provider-api-implementations.mdx keeps openrouter-images and its generated image-model catalog out of this port."
+reason = "Owner ruling 2026-08-26: image generation is in scope and ports as Milestone 10 after the core delivery; chat scenarios in this file that already have parity keep their listed Rust tests, and the image scenarios complete in M10."
 
 [[mapping]]
 source = "packages/ai/test/image-tool-result.test.ts"
@@ -887,18 +889,20 @@ status = "semantic-parity"
 [[mapping]]
 source = "packages/ai/test/images-models.test.ts"
 rust = []
-status = "deliberate-divergence"
+status = "planned"
+milestone = "M10"
 owner_ruling = "provider-api-implementations.mdx#not-ported"
 replacement = "Models remains the chat model/provider/auth/catalog control plane; no parallel ImagesModels control plane is exposed."
-reason = "The standing owner ruling in provider-api-implementations.mdx excludes the separate image-generation model registry and OpenRouter Images provider."
+reason = "Owner ruling 2026-08-26: image generation is in scope and ports as Milestone 10 after the core delivery; chat scenarios in this file that already have parity keep their listed Rust tests, and the image scenarios complete in M10."
 
 [[mapping]]
 source = "packages/ai/test/images.test.ts"
 rust = []
-status = "deliberate-divergence"
+status = "planned"
+milestone = "M10"
 owner_ruling = "provider-api-implementations.mdx#not-ported"
 replacement = "Canonical image blocks are supported for chat requests, responses, tool results, and handoff; standalone image generation is not exposed."
-reason = "The standing owner ruling in provider-api-implementations.mdx excludes openrouter-images and standalone image generation."
+reason = "Owner ruling 2026-08-26: image generation is in scope and ports as Milestone 10 after the core delivery; chat scenarios in this file that already have parity keep their listed Rust tests, and the image scenarios complete in M10."
 
 [[mapping]]
 source = "packages/ai/test/interleaved-thinking.test.ts"
@@ -1125,10 +1129,11 @@ status = "semantic-parity"
 [[mapping]]
 source = "packages/ai/test/openrouter-images.test.ts"
 rust = []
-status = "deliberate-divergence"
+status = "planned"
+milestone = "M10"
 owner_ruling = "provider-api-implementations.mdx#not-ported"
 replacement = "No standalone OpenRouter Images API is exposed; OpenRouter chat image blocks remain covered by the OpenAI-compatible wire and handoff suites."
-reason = "The standing owner ruling in provider-api-implementations.mdx explicitly excludes openrouter-images from the port."
+reason = "Owner ruling 2026-08-26: image generation is in scope and ports as Milestone 10 after the core delivery; chat scenarios in this file that already have parity keep their listed Rust tests, and the image scenarios complete in M10."
 
 [[mapping]]
 source = "packages/ai/test/openrouter-oauth.test.ts"
@@ -1153,10 +1158,11 @@ status = "semantic-parity"
 [[mapping]]
 source = "packages/ai/test/provider-error-body-passthrough.test.ts"
 rust = []
-status = "deliberate-divergence"
+status = "planned"
+milestone = "M10"
 owner_ruling = "provider-api-implementations.mdx#not-ported"
 replacement = "Supported chat providers preserve structured HTTP status/body diagnostics in their family conformance suites; the standalone OpenRouter Images call is absent."
-reason = "This upstream file tests only generateImage through the owner-excluded OpenRouter Images API, so chat-provider error tests cannot truthfully claim whole-file semantic parity."
+reason = "Owner ruling 2026-08-26: image generation is in scope and ports as Milestone 10 after the core delivery; chat scenarios in this file that already have parity keep their listed Rust tests, and the image scenarios complete in M10."
 
 [[mapping]]
 source = "packages/ai/test/provider-error-body-regression.test.ts"
@@ -1246,10 +1252,11 @@ status = "semantic-parity"
 [[mapping]]
 source = "packages/ai/test/telemetry-options.test.ts"
 rust = ["deferred_models_request_options_reach_handler_send_and_local", "telemetry_context_survives_models_dispatch_send_and_local_pi_exact", "telemetry_context_survives_simple_option_conversion_pi_exact"]
-status = "deliberate-divergence"
+status = "planned"
+milestone = "M10"
 owner_ruling = "provider-api-implementations.mdx#not-ported"
 replacement = "Chat and deferred request telemetry contexts use the opaque non-persisted TelemetryContextHandle; the separately excluded image-generation dispatch has no Rust surface."
-reason = "The file's chat/simple/Models/deferred scenarios have semantic parity in the named tests, but its final ImagesModels scenario belongs to the owner-excluded standalone image-generation subsystem."
+reason = "Owner ruling 2026-08-26: image generation is in scope and ports as Milestone 10 after the core delivery; chat scenarios in this file that already have parity keep their listed Rust tests, and the image scenarios complete in M10."
 
 [[mapping]]
 source = "packages/ai/test/text.test.ts"

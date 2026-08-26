@@ -358,6 +358,25 @@ const MILESTONES = {
       },
     ],
   },
+  M10: {
+    title: "Milestone 10 — image generation (owner ruling 2026-08-26: in scope, ports after the core delivery)",
+    packages: [
+      {
+        id: "M10.1",
+        title: "openrouter-images: family, decoder, image-model catalog, fixtures, manifest completion",
+        crate: "crates/agentprism-ai (family module) + providers/agentprism-openrouter",
+        read: "pi api/openrouter-images.ts in full (non-streaming chat-completions request with image modalities via the OpenAI SDK, base64 data-URL extraction, retryProviderRequest wrapping, maxRetries: 0); the image-model catalog generation (scripts/generate-models.ts image paths, image-model data); the seven upstream test files currently planned/M10 in parity/manifest.toml, in full.",
+        deliver: [
+          "The openrouter-images API family: lowering, the non-streaming request encoder (byte-identical per the wire discipline), response decoding with pi's text and base64 data-URL image extraction, error passthrough per provider-error-body-passthrough.test.ts.",
+          "Image-model catalog data and registration on the openrouter provider matching pi's published data; generateImage-equivalent surface on Models per pi types.",
+          "Captured fixtures for the family via the capture tool (deterministic corpus; live acceptance where credentials allow, recorded honestly) and wire_openrouter_images_pi_exact.",
+          "Manifest: the seven planned/M10 files flipped to semantic-parity with scenario-complete mappings (chat scenarios keep their existing tests; image scenarios now covered).",
+          "A dated addendum to the gates report recording that the wire gate now includes openrouter-images.",
+        ],
+        accept: ["wire_openrouter_images_pi_exact passes for the captured corpus; the seven files are semantic-parity with scenario-complete coverage; parity/check.sh shows zero planned; all workspace gates green."],
+      },
+    ],
+  },
   GATES: {
     title: "Commitment gates — verify all four (part 2 'Commitment gates')",
     packages: [
