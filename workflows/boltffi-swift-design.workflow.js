@@ -10,6 +10,7 @@ const A = typeof args === "string" ? JSON.parse(args) : args || {};
 const REPO = A.repo || "/home/vikash/genai-agent/genai-agent-rs-boltffi";
 const BRANCH = A.branch || "boltffi-design";
 const MAX_ROUNDS = A.maxRounds || 6;
+const INITIAL_FEEDBACK = typeof A.initialFeedback === "string" && A.initialFeedback.trim() ? A.initialFeedback : null;
 const MODEL = "codex/gpt-5.6-sol";
 const XHIGH = { reasoning_effort: "xhigh" };
 const OUT = "docs/boltffi-swift-bindings";
@@ -83,7 +84,7 @@ async function build(id, implText, reviewText, commitMsg) {
   const outcome = await gate(
     (feedback, attempt) =>
       agent(
-        implText + (feedback ? "\n\nA REVIEWER REJECTED the previous attempt (round " + attempt + "). Your files are still on disk; fix every point without discarding what was correct:\n" + feedback : ""),
+        implText + ((feedback = feedback || (attempt === 0 && id === "Design" ? INITIAL_FEEDBACK : null)) ? "\n\nA REVIEWER REJECTED the previous attempt (round " + attempt + "). Your files are still on disk; fix every point without discarding what was correct:\n" + feedback : ""),
         { label: "impl:" + id + ":r" + (attempt + 1), phase: id, model: MODEL, mode: "agent-full-access", cwd: REPO, configOptions: XHIGH, retries: 1 }
       ),
     (result) =>
