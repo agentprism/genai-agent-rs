@@ -12,6 +12,7 @@ const BRANCH = A.branch || "main";
 const PI_GIT = A.piGit || "/home/vikash/pi";
 const DATE = A.date || "undated";
 const MAX_ROUNDS = A.maxRounds || 6;
+const INITIAL_FEEDBACK = typeof A.initialFeedback === "string" && A.initialFeedback.trim() ? A.initialFeedback : null;
 const MODEL = "codex/gpt-5.6-sol";
 const XHIGH = { reasoning_effort: "xhigh" };
 const OUT = "docs/pi-sync";
@@ -87,7 +88,7 @@ const outcome = await gate(
         "5. Bookkeeping: set parity/manifest.toml upstream_commit to " + pf.latest + "; regenerate parity/upstream-tests.txt from the new worktree; add [[mapping]] entries for NEW upstream test files as status planned, milestone \"SYNC-" + DATE + "\"; for existing mappings whose upstream file CHANGED, do not change their status — list them in the report as needs-reverification. Update the PIN and piRoot defaults in workflows/architecture-v2-milestones.workflow.js to the new sha/worktree. Run `bash parity/check.sh` against the new worktree and make it pass.\n" +
         "6. Write " + OUT + "/report-" + DATE + ".md — the OWNER DIVERGENCE REPORT: header (old pin, new pin, commit count, date); a DECISIONS-NEEDED table first (every DIVERGES and UNCLEAR item: upstream change, our behavior, impact, your recommendation, effort estimate); then ALREADY-CONFORMS; then needs-reverification mappings; then MECHANICAL/TEST/OUT-OF-SCOPE inventories. The report must be complete — every changed file appears exactly once. NO REMEDIATION: do not change crate code; the owner decides what gets remediated.\n" +
         "Report in plaintext what you did, the classification counts, and the DECISIONS-NEEDED count." +
-        (feedback ? "\n\nA REVIEWER REJECTED the previous attempt (round " + attempt + "). Files are on disk; fix every point:\n" + feedback : ""),
+        ((feedback = feedback || (attempt === 0 ? INITIAL_FEEDBACK : null)) ? "\n\nA REVIEWER REJECTED the previous attempt (round " + attempt + "). Files are on disk; fix every point:\n" + feedback : ""),
       { label: "sync:r" + (attempt + 1), phase: "Sync", model: MODEL, mode: "agent-full-access", cwd: REPO, configOptions: XHIGH, retries: 1 }
     ),
   (result) =>
