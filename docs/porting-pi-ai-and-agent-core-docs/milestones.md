@@ -1225,3 +1225,83 @@ no correction note, and neither package added a correction to Part 1.
   common options, simple lowering, provider/`Models` dispatch, and deferred
   fetch/cancel surfaces; Rust retains it as redacted, non-serializable
   request-scoped scratch state so replay invariant R8 remains intact.
+
+## 2026-08-26 — GATES: commitment-gate closeout
+
+GATES closes the adopted architecture's four commitment gates on the governing
+Pi pin `8fa7eebd235355522c8104166b4f1f959b4e2f10`: replay, byte-exact provider
+wire requests, agent behavior, and native durable sessions. The package also
+hardens fixture provenance and deterministic Azure regeneration, and replaces
+the last indirect failed-turn projection check with an end-to-end agent
+regression.
+
+### Approved packages
+
+- G.1 — replay, wire, agent, and native session commitment gates, including
+  deterministic fixture regeneration and the final gate report —
+  `c6591c3eaab3c1982d490f0c45eef11ca460932f`
+
+### Architecture v2 Part 2 §10 conformance now passing
+
+The GATES tree passes all 345 exact §10.1–§10.10 conformance names. G.1 adds
+the one exact name that was still absent at M9 closeout:
+
+```text
+agent_failed_assistant_is_omitted_from_next_provider_projection
+```
+
+The commitment-gate subsets were re-exercised as follows:
+
+- Replay gate — all seven required §10.8 turn-two replay goldens pass after
+  event assembly and a persistence round-trip:
+
+  ```text
+  anthropic_signed_thinking_turn_two_pi_exact
+  anthropic_redacted_thinking_turn_two_pi_exact
+  openai_chat_reasoning_details_turn_two_pi_exact
+  openai_responses_encrypted_reasoning_turn_two_pi_exact
+  bedrock_redacted_reasoning_turn_two_pi_exact
+  google_tool_thought_signature_turn_two_pi_exact
+  google_empty_signed_part_turn_two_pi_exact
+  ```
+
+- Wire gate — all ten §10.8 API-family byte-exact request tests pass across
+  their complete 28-case fixture matrices, for 280 family/case combinations:
+
+  ```text
+  wire_anthropic_messages_pi_exact
+  wire_openai_completions_pi_exact
+  wire_openai_responses_pi_exact
+  wire_openai_codex_responses_pi_exact
+  wire_azure_openai_responses_pi_exact
+  wire_google_generative_ai_pi_exact
+  wire_google_vertex_pi_exact
+  wire_bedrock_converse_stream_pi_exact
+  wire_mistral_conversations_pi_exact
+  wire_pi_messages_pi_exact
+  ```
+
+- Agent gate — all 82 exact §10.9 lifecycle, failure/cancellation, context,
+  tool, queue, and state-management names pass.
+- Session gate — all 16 exact §10.10 reducer/session-tree names pass against
+  memory Send, memory Local, native-file Send, and native-file Local backends.
+  The 26-case backend-generic suite passes on all four combinations, and the
+  native-file edge suite passes torn-tail recovery, mid-file corruption
+  rejection, serialized append, sequence validation, atomic fork rewrite,
+  schema-version, and operation-recovery checks.
+
+### Parity manifest coverage
+
+- Pinned upstream test files mapped: 160/160 — 147 `semantic-parity`, 13
+  `deliberate-divergence`, and 0 `planned`.
+- Status-bearing mappings: 252 total — 230 `semantic-parity`, 22
+  `deliberate-divergence`, and 0 `planned`.
+- Future named conformance tests: 0 `planned_test` entries.
+- Architecture §10.11 allowlist rows mapped: 10/10.
+- Rust test inventory discovered by the parity checker: 941 unique tests.
+
+### Architecture correction notes
+
+G.1 added no correction note to either architecture document. Its full pinned
+source audit found no architecture/Pi behavior disagreement outside the §10.11
+allowlist, so there are no GATES correction notes to enumerate.
