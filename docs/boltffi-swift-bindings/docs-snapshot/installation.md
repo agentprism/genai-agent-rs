@@ -1,0 +1,97 @@
+# Installation
+
+## Prerequisites
+
+- **Rust 1.70+** - Install from [rustup.rs](https://rustup.rs)
+- **For iOS**: Xcode 15+ with command line tools
+- **For Android**: Android Studio with NDK installed
+- **For Java**: JDK 8+ with `javac` and a C compiler for the JNI bridge
+- **For C#**: .NET SDK 10.0+ for the current C# demo and generated binding tests
+- **For Python**: Python 3.10+ with pip
+
+## Install the CLI
+
+```bash
+cargo install boltffi_cli
+```
+
+### Download a prebuilt CLI
+
+Each [GitHub release](https://github.com/boltffi/boltffi/releases) includes a CLI archive and a matching SHA-256 checksum file:
+
+| Platform             | Archive                             | Checksum                                   |
+| -------------------- | ----------------------------------- | ------------------------------------------ |
+| Linux x86\_64        | `boltffi-linux-x86_64.tar.gz`       | `boltffi-linux-x86_64.tar.gz.sha256`       |
+| Linux x86\_64 (musl) | `boltffi-linux-x86_64-musl.tar.gz`  | `boltffi-linux-x86_64-musl.tar.gz.sha256`  |
+| Linux ARM64          | `boltffi-linux-aarch64.tar.gz`      | `boltffi-linux-aarch64.tar.gz.sha256`      |
+| Linux ARM64 (musl)   | `boltffi-linux-aarch64-musl.tar.gz` | `boltffi-linux-aarch64-musl.tar.gz.sha256` |
+| macOS x86\_64        | `boltffi-darwin-x86_64.tar.gz`      | `boltffi-darwin-x86_64.tar.gz.sha256`      |
+| macOS ARM64          | `boltffi-darwin-aarch64.tar.gz`     | `boltffi-darwin-aarch64.tar.gz.sha256`     |
+| Windows x86\_64      | `boltffi-windows-x86_64.zip`        | `boltffi-windows-x86_64.zip.sha256`        |
+| Windows ARM64        | `boltffi-windows-arm64.zip`         | `boltffi-windows-arm64.zip.sha256`         |
+
+For example, download and verify the Windows ARM64 build in PowerShell. Replace `<VERSION>` with the release version without the leading `v`:
+
+```powershell
+$version = "<VERSION>"
+$asset = "boltffi-windows-arm64.zip"
+$release = "https://github.com/boltffi/boltffi/releases/download/v$version"
+
+Invoke-WebRequest "$release/$asset" -OutFile $asset
+Invoke-WebRequest "$release/$asset.sha256" -OutFile "$asset.sha256"
+
+$expected = (Get-Content "$asset.sha256" -Raw).Trim().Split()[0]
+$actual = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) {
+    throw "Checksum verification failed"
+}
+
+Expand-Archive $asset -DestinationPath .
+.\boltffi.exe check
+```
+
+## Add to your project
+
+Add BoltFFI to your library crate:
+
+```bash
+cargo add boltffi
+cargo add --build boltffi
+```
+
+Then configure your library crate:
+
+```toml
+[package]
+name = "mylib"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib"]
+```
+
+Add `cdylib` if you also need a standalone Rust shared library outside BoltFFI packaging, including the current C# generate-and-integrate flow:
+
+```toml
+[lib]
+crate-type = ["staticlib", "cdylib"]
+```
+
+## Create build.rs
+
+Create a `build.rs` file in your project root:
+
+```rust
+fn main() {
+    boltffi::build::generate();
+}
+```
+
+## Verify installation
+
+```bash
+boltffi check
+```
+
+This verifies you have the required tools and Rust targets installed. Run `boltffi check --fix` to auto-install missing targets.
