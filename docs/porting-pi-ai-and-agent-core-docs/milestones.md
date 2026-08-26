@@ -1023,3 +1023,126 @@ M7 added three corrections, all from M7.1 to Architecture v2 Part 2:
   while whole-tree forks remain unrestricted.
 
 M7.0 and M7.2 added no correction notes to either architecture document.
+
+## 2026-08-26 — M8: harness policies, resources, and orchestration
+
+M8 refreshed the parity baseline to pinned Pi commit
+`8fa7eebd235355522c8104166b4f1f959b4e2f10`, completed the harness compaction
+and branch-summary policies, added skills, prompt templates, reference tools,
+truncation, and telemetry, and established durable harness orchestration over
+`pi-agent-core`, `pi-agent-session`, and the environment seams. All provider
+and harness tests remain hermetic.
+
+### Approved packages
+
+- M8.0 — pin refresh, pi-ai re-verification, manifest regeneration, OpenAI
+  Completions reasoning-detail replay corrections, and refreshed fixtures and
+  catalogs — `308c2c59cfcd1b64629929610d82fae11e5c8f4a`
+- M8.1 — compaction, branch summarization, `HarnessContextPolicy`, and overflow
+  retry — `e58e678b1a40321d1b056173f82f99e895ceab5b`
+- M8.2 — skills, prompt templates, reference tools, file mutation queue,
+  truncation, and telemetry — `036bcd62f8206cd7b35fc25c172d2a233b89a7d6`
+- M8.3 — durable harness orchestration over agent-core, session, and
+  environment, including recovery, queue ingress, tool replay policy, events,
+  and Send/Local execution — `f1006437cc361ec5fab899825f19df80e4f36f71`
+
+### Architecture v2 Part 2 §10 conformance now passing
+
+M8 adds 38 previously absent exact §10.10 conformance names, bringing the
+cumulative exact §10 total to 344.
+
+§10.10 compaction and branch-summary conformance (14 new):
+
+```text
+compaction_threshold_decision
+compaction_manual_reason
+compaction_overflow_reason
+compaction_retains_configured_tail
+compaction_records_tokens_before
+compaction_records_summary_usage
+compaction_failure_does_not_move_branch_head
+compaction_operation_can_resume
+compaction_context_uses_latest_compaction_entry
+branch_summary_finds_common_ancestor
+branch_summary_summarizes_abandoned_segment
+branch_summary_records_from_id
+branch_summary_navigation_is_durable
+branch_summary_failure_leaves_navigation_recoverable
+```
+
+§10.10 environment and reference-tool conformance (9 new):
+
+```text
+mutation_queue_same_path_serializes
+mutation_queue_different_paths_concurrent
+edit_requires_exact_match
+edit_rejects_multiple_matches
+edit_rejects_noop
+truncate_never_splits_utf8
+truncate_respects_byte_limit
+truncate_respects_line_limit
+bash_truncated_output_has_full_artifact
+```
+
+§10.10 skills, prompt-template, and telemetry conformance (15 new):
+
+```text
+skill_catalog_discovers_valid_skills
+skill_invalid_metadata_is_reported
+skill_content_digest_is_stable
+skill_resume_uses_recorded_digest
+prompt_template_argument_substitution
+prompt_template_missing_argument_rejected
+prompt_template_output_is_deterministic
+telemetry_schema_validates_every_event
+telemetry_schema_version_is_required
+telemetry_default_excludes_content
+telemetry_default_excludes_auth
+telemetry_default_excludes_replay_payload
+telemetry_correlates_session_run_operation
+telemetry_durable_event_follows_commit
+telemetry_sink_failure_is_best_effort_by_default
+```
+
+M8.3 additionally re-exercises the §10.9 Agent gate through durable harness
+orchestration, covering lifecycle and event ordering, failed-assistant
+commitment, queue persistence and polling boundaries, tool scheduling and
+recovery, cancellation, operation recovery, and both Send and Local families.
+M8.0 re-verifies pi-ai stream/replay behavior and all existing replay and wire
+goldens against the refreshed pin.
+
+### Parity manifest coverage
+
+- Pinned upstream test files mapped: 160/160 — 68 `semantic-parity`, 1
+  `deliberate-divergence`, and 91 `planned`.
+- Status-bearing mappings: 251 total — 150 `semantic-parity`, 10
+  `deliberate-divergence`, and 91 `planned`.
+- Future named conformance tests: 1 `planned_test` entry,
+  `agent_failed_assistant_is_omitted_from_next_provider_projection`, assigned
+  to M3.4.
+
+### Architecture correction notes
+
+M8 added six corrections, all to Architecture v2 Part 2. No M8 package added a
+correction to Part 1.
+
+- M8.0 corrected §1.5: OpenAI-compatible reasoning-detail replay merges
+  consecutive text and summary deltas, keeps encrypted details discrete, and
+  follows Pi's exact metadata assignment and JSON omission behavior.
+- M8.1 corrected §7.7: automatic threshold and overflow compaction reuse the
+  already-open run operation; only standalone manual compaction starts and
+  finishes its own operation.
+- M8.1 corrected §7.8: `BranchSummaryEntry::from_id` records the navigation
+  operation's source leaf, including summaries appended under the empty root.
+- M8.1 corrected §7.8: Send and Local custom-entry projectors run for normal
+  durable context reconstruction after latest-compaction transformation, but
+  never participate in compaction usage, tail selection, or summary prompts.
+- M8.2 corrected §7.9: missing prompt-template positional arguments substitute
+  an empty string in Pi-compatible mode; the named strict-policy conformance
+  test exercises explicit rejection instead.
+- M8.2 corrected §7.11: reference edits support Pi's multi-replacement,
+  same-original-file matching, ambiguity and overlap checks, BOM and line-ending
+  preservation, and normalized Unicode/whitespace fallback before atomic
+  publication.
+
+M8.3 added no correction note to either architecture document.

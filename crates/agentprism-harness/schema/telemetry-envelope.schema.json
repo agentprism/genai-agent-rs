@@ -1,0 +1,409 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TelemetryEnvelope",
+  "description": "Versioned correlation envelope distinct from agent and session events.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "description": "Required schema version.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "event_id": {
+      "description": "Stable telemetry event identity.",
+      "type": "string"
+    },
+    "timestamp": {
+      "description": "Wall-clock event timestamp in Unix milliseconds.",
+      "type": "integer",
+      "format": "int64"
+    },
+    "session_id": {
+      "description": "Durable session correlation, when available.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "lane": {
+      "description": "Durable lane correlation, when available.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "run_id": {
+      "description": "Agent run correlation, when available.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "operation_id": {
+      "description": "Durable harness-operation correlation, when available.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "sequence": {
+      "description": "Accepted session sequence, when available.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "event": {
+      "description": "Content-free event payload.",
+      "$ref": "#/$defs/TelemetryEvent"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "timestamp",
+    "event"
+  ],
+  "$defs": {
+    "TelemetryEvent": {
+      "description": "Published telemetry event vocabulary from Architecture v2 part 2 §7.12.\n\nThe vocabulary intentionally has no prompt, response, tool argument, tool\noutput, authentication, header, or replay-payload field.",
+      "oneOf": [
+        {
+          "description": "One admitted run began.",
+          "type": "object",
+          "properties": {
+            "model": {
+              "description": "Selected model.",
+              "$ref": "#/$defs/TelemetryModelRefSchema"
+            },
+            "type": {
+              "type": "string",
+              "const": "run_started"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "model"
+          ]
+        },
+        {
+          "description": "One logical model request attempt began.",
+          "type": "object",
+          "properties": {
+            "attempt": {
+              "description": "Zero-based transport or harness attempt number supplied by the caller.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "model_request_started"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "attempt"
+          ]
+        },
+        {
+          "description": "One logical model request completed.",
+          "type": "object",
+          "properties": {
+            "finish": {
+              "description": "Normalized terminal reason.",
+              "$ref": "#/$defs/AssistantFinishReasonSchema"
+            },
+            "usage": {
+              "description": "Content-free cumulative token usage.",
+              "$ref": "#/$defs/UsageSchema"
+            },
+            "duration": {
+              "description": "Wall-clock request duration, serialized as integer milliseconds.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "model_request_finished"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "finish",
+            "usage",
+            "duration"
+          ]
+        },
+        {
+          "description": "One tool execution began.",
+          "type": "object",
+          "properties": {
+            "tool_name": {
+              "description": "Stable tool name; arguments are deliberately excluded.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "tool_started"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "tool_name"
+          ]
+        },
+        {
+          "description": "One tool execution completed.",
+          "type": "object",
+          "properties": {
+            "tool_name": {
+              "description": "Stable tool name; output is deliberately excluded.",
+              "type": "string"
+            },
+            "success": {
+              "description": "Whether execution succeeded.",
+              "type": "boolean"
+            },
+            "duration": {
+              "description": "Wall-clock tool duration, serialized as integer milliseconds.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "tool_finished"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "tool_name",
+            "success",
+            "duration"
+          ]
+        },
+        {
+          "description": "Compaction summary generation began.",
+          "type": "object",
+          "properties": {
+            "reason": {
+              "description": "Trigger for this compaction.",
+              "$ref": "#/$defs/CompactionReasonSchema"
+            },
+            "type": {
+              "type": "string",
+              "const": "compaction_started"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "reason"
+          ]
+        },
+        {
+          "description": "Compaction summary generation completed.",
+          "type": "object",
+          "properties": {
+            "usage": {
+              "description": "Content-free cumulative summary-model usage.",
+              "$ref": "#/$defs/UsageSchema"
+            },
+            "type": {
+              "type": "string",
+              "const": "compaction_finished"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "usage"
+          ]
+        },
+        {
+          "description": "A session mutation was accepted by durable storage.",
+          "type": "object",
+          "properties": {
+            "mutation_kind": {
+              "description": "Low-cardinality mutation kind such as `entry` or `record`.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "session_mutation_committed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "mutation_kind"
+          ]
+        },
+        {
+          "description": "A provider context handoff was performed.",
+          "type": "object",
+          "properties": {
+            "report": {
+              "description": "Content-free report summary.",
+              "$ref": "#/$defs/HandoffTelemetrySummary"
+            },
+            "type": {
+              "type": "string",
+              "const": "handoff_performed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "report"
+          ]
+        }
+      ]
+    },
+    "TelemetryModelRefSchema": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "model"
+      ]
+    },
+    "AssistantFinishReasonSchema": {
+      "type": "string",
+      "enum": [
+        "stop",
+        "length",
+        "tool_use",
+        "deferred",
+        "error",
+        "aborted"
+      ]
+    },
+    "UsageSchema": {
+      "type": "object",
+      "properties": {
+        "input_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "reasoning_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cache_read_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cache_write_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cache_write_one_hour_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "total_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "source": {
+          "$ref": "#/$defs/UsageSourceSchema"
+        }
+      },
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "source"
+      ]
+    },
+    "UsageSourceSchema": {
+      "type": "string",
+      "enum": [
+        "provider_reported",
+        "estimated",
+        "mixed",
+        "unknown"
+      ]
+    },
+    "CompactionReasonSchema": {
+      "type": "string",
+      "enum": [
+        "manual",
+        "threshold",
+        "overflow"
+      ]
+    },
+    "HandoffTelemetrySummary": {
+      "description": "Low-cardinality, content-free handoff report summary.",
+      "type": "object",
+      "properties": {
+        "source_model_count": {
+          "description": "Number of distinct source model fingerprints.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "change_count": {
+          "description": "Number of reported projection changes.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "lossy": {
+          "description": "Whether any reported change was lossy.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source_model_count",
+        "change_count",
+        "lossy"
+      ]
+    }
+  }
+}

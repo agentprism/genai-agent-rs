@@ -3,6 +3,659 @@
 version = 4
 
 [[package]]
+name = "agentprism-ai"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "base64",
+ "fastrand",
+ "futures-core",
+ "futures-executor",
+ "futures-timer",
+ "futures-util",
+ "getrandom 0.3.4",
+ "http",
+ "httpdate",
+ "indexmap",
+ "regex",
+ "ryu-js",
+ "serde",
+ "serde_json",
+ "sha2",
+ "static_assertions",
+ "tempfile",
+ "url",
+ "wasm-bindgen-test",
+]
+
+[[package]]
+name = "agentprism-ant-ling"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-anthropic"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "futures-executor",
+ "futures-util",
+ "http",
+ "rustix",
+ "serde",
+ "serde_json",
+ "url",
+ "windows-sys",
+]
+
+[[package]]
+name = "agentprism-azure-openai-responses"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+ "futures-executor",
+ "http",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "agentprism-baseten"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-bedrock"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "base64",
+ "futures-executor",
+ "futures-util",
+ "http",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "agentprism-cerebras"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-cloudflare-ai-gateway"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-anthropic",
+ "agentprism-openai",
+ "agentprism-provider-common",
+ "futures-executor",
+ "http",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "agentprism-cloudflare-workers-ai"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+ "futures-executor",
+ "http",
+ "url",
+]
+
+[[package]]
+name = "agentprism-compat-pi-jsonl"
+version = "0.1.0"
+
+[[package]]
+name = "agentprism-core"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "async-stream",
+ "futures-channel",
+ "futures-executor",
+ "futures-util",
+ "indexmap",
+ "jsonschema",
+ "num-bigint",
+ "num-traits",
+ "proptest",
+ "ryu-js",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "agentprism-deepseek"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-env"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "bytes",
+]
+
+[[package]]
+name = "agentprism-ffi"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-core",
+ "agentprism-runtime-tokio",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uniffi",
+ "url",
+]
+
+[[package]]
+name = "agentprism-fireworks"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-anthropic",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-github-copilot"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-anthropic",
+ "agentprism-openai",
+ "agentprism-provider-common",
+ "futures-executor",
+ "futures-timer",
+ "futures-util",
+ "http",
+ "httpdate",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "agentprism-google"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-google-vertex",
+ "base64",
+ "futures-executor",
+ "futures-util",
+ "http",
+ "rustix",
+ "serde",
+ "serde_json",
+ "url",
+ "windows-sys",
+]
+
+[[package]]
+name = "agentprism-google-vertex"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-google",
+ "agentprism-provider-common",
+ "base64",
+ "futures-util",
+ "http",
+ "rsa",
+ "serde",
+ "serde_json",
+ "sha2",
+ "url",
+]
+
+[[package]]
+name = "agentprism-groq"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-harness"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-core",
+ "agentprism-env",
+ "agentprism-session",
+ "async-stream",
+ "bytes",
+ "dashmap",
+ "futures-channel",
+ "futures-executor",
+ "futures-util",
+ "ignore",
+ "jsonschema",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "agentprism-huggingface"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-kimi-coding"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-anthropic",
+ "agentprism-provider-common",
+ "futures-executor",
+ "futures-util",
+ "http",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "agentprism-minimax"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-anthropic",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-minimax-cn"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-anthropic",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-mistral"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "futures-executor",
+ "futures-timer",
+ "futures-util",
+ "http",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "agentprism-moonshotai"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-moonshotai-cn"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-nvidia"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-openai"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-deepseek",
+ "agentprism-openai-codex",
+ "agentprism-openrouter",
+ "base64",
+ "futures-executor",
+ "futures-timer",
+ "futures-util",
+ "http",
+ "serde",
+ "serde_json",
+ "url",
+ "zstd",
+]
+
+[[package]]
+name = "agentprism-openai-codex"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+ "base64",
+ "futures-util",
+ "http",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "agentprism-opencode"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-anthropic",
+ "agentprism-google",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-opencode-go"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-anthropic",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-openrouter"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+ "futures-timer",
+ "futures-util",
+ "http",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "agentprism-pi-messages"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "base64",
+ "futures-executor",
+ "futures-util",
+ "http",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "agentprism-provider-common"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "futures-util",
+ "http",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "agentprism-providers-all"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-ant-ling",
+ "agentprism-anthropic",
+ "agentprism-azure-openai-responses",
+ "agentprism-baseten",
+ "agentprism-bedrock",
+ "agentprism-cerebras",
+ "agentprism-cloudflare-ai-gateway",
+ "agentprism-cloudflare-workers-ai",
+ "agentprism-deepseek",
+ "agentprism-fireworks",
+ "agentprism-github-copilot",
+ "agentprism-google",
+ "agentprism-google-vertex",
+ "agentprism-groq",
+ "agentprism-huggingface",
+ "agentprism-kimi-coding",
+ "agentprism-minimax",
+ "agentprism-minimax-cn",
+ "agentprism-mistral",
+ "agentprism-moonshotai",
+ "agentprism-moonshotai-cn",
+ "agentprism-nvidia",
+ "agentprism-openai",
+ "agentprism-openai-codex",
+ "agentprism-opencode",
+ "agentprism-opencode-go",
+ "agentprism-openrouter",
+ "agentprism-provider-common",
+ "agentprism-qwen-token-plan",
+ "agentprism-qwen-token-plan-cn",
+ "agentprism-qwen-token-plan-individual",
+ "agentprism-radius",
+ "agentprism-together",
+ "agentprism-vercel-ai-gateway",
+ "agentprism-xai",
+ "agentprism-xiaomi",
+ "agentprism-xiaomi-token-plan-ams",
+ "agentprism-xiaomi-token-plan-cn",
+ "agentprism-xiaomi-token-plan-sgp",
+ "agentprism-zai",
+ "agentprism-zai-coding-cn",
+ "futures-executor",
+ "serde_json",
+]
+
+[[package]]
+name = "agentprism-qwen-token-plan"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-qwen-token-plan-cn"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-qwen-token-plan-individual"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-radius"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-pi-messages",
+ "agentprism-provider-common",
+ "futures-executor",
+ "futures-util",
+ "http",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "agentprism-runtime-tokio"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-core",
+ "agentprism-env",
+ "async-stream",
+ "bytes",
+ "futures-util",
+ "libc",
+ "tempfile",
+ "tokio",
+ "url",
+ "windows-sys",
+]
+
+[[package]]
+name = "agentprism-session"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-core",
+ "futures-executor",
+ "serde",
+ "serde_json",
+ "static_assertions",
+]
+
+[[package]]
+name = "agentprism-together"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-vercel-ai-gateway"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-anthropic",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-xai"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+ "futures-executor",
+ "futures-util",
+ "http",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "agentprism-xiaomi"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-xiaomi-token-plan-ams"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-xiaomi-token-plan-cn"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-xiaomi-token-plan-sgp"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-zai"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-zai-coding-cn"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -202,6 +855,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
 
 [[package]]
+name = "bstr"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
+dependencies = [
+ "memchr",
+ "serde_core",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -331,6 +994,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-deque"
+version = "0.8.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5181e0de7b61eb03a81e347d6dd8797bae9da5146707b51077e2d71a54ec0ceb"
+dependencies = [
+ "crossbeam-epoch",
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-epoch"
+version = "0.9.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-utils"
+version = "0.8.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "61803da095bee82a81bb1a452ecc25d3b2f1416d1897eb86430c6159ef717c17"
+
+[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -338,6 +1026,20 @@ checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
 dependencies = [
  "generic-array",
  "typenum",
+]
+
+[[package]]
+name = "dashmap"
+version = "6.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6361d5c062261c78a176addb82d4c821ae42bed6089de0e12603cd25de2059c"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
 ]
 
 [[package]]
@@ -603,6 +1305,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
+name = "globset"
+version = "0.4.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07c34a9410465b45bd9787443bc7370f37735bad04b0f0cd57ff1a3186c98988"
+dependencies = [
+ "aho-corasick",
+ "bstr",
+ "log",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "gloo-timers"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -624,6 +1339,12 @@ dependencies = [
  "plain",
  "scroll",
 ]
+
+[[package]]
+name = "hashbrown"
+version = "0.14.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
 
 [[package]]
 name = "hashbrown"
@@ -763,13 +1484,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "ignore"
+version = "0.4.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00b69833ed729dc5aa7d19541d96d6cf8e9137194207a04916d658e43168402f"
+dependencies = [
+ "crossbeam-deque",
+ "globset",
+ "log",
+ "memchr",
+ "regex-automata",
+ "same-file",
+ "walkdir",
+ "winapi-util",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
 dependencies = [
  "equivalent",
- "hashbrown",
+ "hashbrown 0.17.1",
  "serde",
  "serde_core",
 ]
@@ -1111,638 +1848,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
-name = "pi-agent-compat-pi-jsonl"
-version = "0.1.0"
-
-[[package]]
-name = "pi-agent-core"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "futures-channel",
- "futures-executor",
- "futures-util",
- "indexmap",
- "jsonschema",
- "num-bigint",
- "num-traits",
- "pi-ai",
- "proptest",
- "ryu-js",
- "schemars",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "pi-agent-env"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "pi-ai",
-]
-
-[[package]]
-name = "pi-agent-harness"
-version = "0.1.0"
-
-[[package]]
-name = "pi-agent-runtime-tokio"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "bytes",
- "futures-util",
- "libc",
- "pi-agent-core",
- "pi-agent-env",
- "pi-ai",
- "tempfile",
- "tokio",
- "url",
- "windows-sys",
-]
-
-[[package]]
-name = "pi-agent-session"
-version = "0.1.0"
-dependencies = [
- "futures-executor",
- "pi-agent-core",
- "pi-ai",
- "serde",
- "serde_json",
- "static_assertions",
-]
-
-[[package]]
-name = "pi-ai"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "base64",
- "fastrand",
- "futures-core",
- "futures-executor",
- "futures-timer",
- "futures-util",
- "getrandom 0.3.4",
- "http",
- "httpdate",
- "indexmap",
- "regex",
- "ryu-js",
- "serde",
- "serde_json",
- "sha2",
- "static_assertions",
- "tempfile",
- "url",
- "wasm-bindgen-test",
-]
-
-[[package]]
-name = "pi-ai-ant-ling"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-anthropic"
-version = "0.1.0"
-dependencies = [
- "futures-executor",
- "futures-util",
- "http",
- "pi-ai",
- "rustix",
- "serde",
- "serde_json",
- "url",
- "windows-sys",
-]
-
-[[package]]
-name = "pi-ai-azure-openai-responses"
-version = "0.1.0"
-dependencies = [
- "futures-executor",
- "http",
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "pi-ai-baseten"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-bedrock"
-version = "0.1.0"
-dependencies = [
- "base64",
- "futures-executor",
- "futures-util",
- "http",
- "pi-ai",
- "serde",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "pi-ai-cerebras"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-cloudflare-ai-gateway"
-version = "0.1.0"
-dependencies = [
- "futures-executor",
- "http",
- "pi-ai",
- "pi-ai-anthropic",
- "pi-ai-openai",
- "pi-ai-provider-common",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "pi-ai-cloudflare-workers-ai"
-version = "0.1.0"
-dependencies = [
- "futures-executor",
- "http",
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
- "url",
-]
-
-[[package]]
-name = "pi-ai-deepseek"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-fireworks"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-anthropic",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-github-copilot"
-version = "0.1.0"
-dependencies = [
- "futures-executor",
- "futures-timer",
- "futures-util",
- "http",
- "httpdate",
- "pi-ai",
- "pi-ai-anthropic",
- "pi-ai-openai",
- "pi-ai-provider-common",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "pi-ai-google"
-version = "0.1.0"
-dependencies = [
- "base64",
- "futures-executor",
- "futures-util",
- "http",
- "pi-ai",
- "pi-ai-google-vertex",
- "rustix",
- "serde",
- "serde_json",
- "url",
- "windows-sys",
-]
-
-[[package]]
-name = "pi-ai-google-vertex"
-version = "0.1.0"
-dependencies = [
- "base64",
- "futures-util",
- "http",
- "pi-ai",
- "pi-ai-google",
- "pi-ai-provider-common",
- "rsa",
- "serde",
- "serde_json",
- "sha2",
- "url",
-]
-
-[[package]]
-name = "pi-ai-groq"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-huggingface"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-kimi-coding"
-version = "0.1.0"
-dependencies = [
- "futures-executor",
- "futures-util",
- "http",
- "pi-ai",
- "pi-ai-anthropic",
- "pi-ai-provider-common",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "pi-ai-minimax"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-anthropic",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-minimax-cn"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-anthropic",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-mistral"
-version = "0.1.0"
-dependencies = [
- "futures-executor",
- "futures-timer",
- "futures-util",
- "http",
- "pi-ai",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "pi-ai-moonshotai"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-moonshotai-cn"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-nvidia"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-openai"
-version = "0.1.0"
-dependencies = [
- "base64",
- "futures-executor",
- "futures-timer",
- "futures-util",
- "http",
- "pi-ai",
- "pi-ai-deepseek",
- "pi-ai-openai-codex",
- "pi-ai-openrouter",
- "serde",
- "serde_json",
- "url",
- "zstd",
-]
-
-[[package]]
-name = "pi-ai-openai-codex"
-version = "0.1.0"
-dependencies = [
- "base64",
- "futures-util",
- "http",
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "pi-ai-opencode"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-anthropic",
- "pi-ai-google",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-opencode-go"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-anthropic",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-openrouter"
-version = "0.1.0"
-dependencies = [
- "futures-timer",
- "futures-util",
- "http",
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "pi-ai-pi-messages"
-version = "0.1.0"
-dependencies = [
- "base64",
- "futures-executor",
- "futures-util",
- "http",
- "pi-ai",
- "serde",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "pi-ai-provider-common"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "http",
- "pi-ai",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "pi-ai-providers-all"
-version = "0.1.0"
-dependencies = [
- "futures-executor",
- "pi-ai",
- "pi-ai-ant-ling",
- "pi-ai-anthropic",
- "pi-ai-azure-openai-responses",
- "pi-ai-baseten",
- "pi-ai-bedrock",
- "pi-ai-cerebras",
- "pi-ai-cloudflare-ai-gateway",
- "pi-ai-cloudflare-workers-ai",
- "pi-ai-deepseek",
- "pi-ai-fireworks",
- "pi-ai-github-copilot",
- "pi-ai-google",
- "pi-ai-google-vertex",
- "pi-ai-groq",
- "pi-ai-huggingface",
- "pi-ai-kimi-coding",
- "pi-ai-minimax",
- "pi-ai-minimax-cn",
- "pi-ai-mistral",
- "pi-ai-moonshotai",
- "pi-ai-moonshotai-cn",
- "pi-ai-nvidia",
- "pi-ai-openai",
- "pi-ai-openai-codex",
- "pi-ai-opencode",
- "pi-ai-opencode-go",
- "pi-ai-openrouter",
- "pi-ai-provider-common",
- "pi-ai-qwen-token-plan",
- "pi-ai-qwen-token-plan-cn",
- "pi-ai-qwen-token-plan-individual",
- "pi-ai-radius",
- "pi-ai-together",
- "pi-ai-vercel-ai-gateway",
- "pi-ai-xai",
- "pi-ai-xiaomi",
- "pi-ai-xiaomi-token-plan-ams",
- "pi-ai-xiaomi-token-plan-cn",
- "pi-ai-xiaomi-token-plan-sgp",
- "pi-ai-zai",
- "pi-ai-zai-coding-cn",
- "serde_json",
-]
-
-[[package]]
-name = "pi-ai-qwen-token-plan"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-qwen-token-plan-cn"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-qwen-token-plan-individual"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-radius"
-version = "0.1.0"
-dependencies = [
- "futures-executor",
- "futures-util",
- "http",
- "pi-ai",
- "pi-ai-pi-messages",
- "pi-ai-provider-common",
- "serde",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "pi-ai-together"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-vercel-ai-gateway"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-anthropic",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-xai"
-version = "0.1.0"
-dependencies = [
- "futures-executor",
- "futures-util",
- "http",
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "pi-ai-xiaomi"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-xiaomi-token-plan-ams"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-xiaomi-token-plan-cn"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-xiaomi-token-plan-sgp"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-zai"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-zai-coding-cn"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ffi"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "pi-agent-core",
- "pi-agent-runtime-tokio",
- "pi-ai",
- "serde",
- "serde_json",
- "tokio",
- "uniffi",
- "url",
-]
-
-[[package]]
 name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1959,7 +2064,7 @@ dependencies = [
  "ahash",
  "fluent-uri",
  "getrandom 0.3.4",
- "hashbrown",
+ "hashbrown 0.17.1",
  "itoa",
  "micromap",
  "parking_lot",
@@ -2053,6 +2158,12 @@ dependencies = [
  "tempfile",
  "wait-timeout",
 ]
+
+[[package]]
+name = "ryu"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "ryu-js"
@@ -2198,6 +2309,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "serde_yaml"
+version = "0.9.34+deprecated"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
 ]
 
 [[package]]
@@ -2408,6 +2532,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinyvec"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb4ebadaa0af04fab11ae01eb5f9fdb5f9c5b875506e210e71c07873528baa7f"
+dependencies = [
+ "tinyvec_macros",
+]
+
+[[package]]
+name = "tinyvec_macros"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
+
+[[package]]
 name = "tokio"
 version = "1.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2495,6 +2634,15 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "uniffi"
@@ -2616,6 +2764,12 @@ dependencies = [
  "uniffi_meta",
  "weedle2",
 ]
+
+[[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "url"

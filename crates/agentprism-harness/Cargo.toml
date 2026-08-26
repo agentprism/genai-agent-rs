@@ -1,0 +1,32 @@
+[package]
+name = "agentprism-harness"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/agentprism/genai-agent-rs"
+description = "agentprism-harness: compaction and branch summarization, skills and prompt templates, reference tools, telemetry, and orchestration over agent-core + session + environment."
+publish = false
+
+[dependencies]
+async-stream = "0.3.6"
+bytes = "1.10.1"
+dashmap = "6.1.0"
+futures-util = { version = "0.3.31", default-features = false, features = ["alloc", "async-await", "std"] }
+ignore = "0.4.25"
+agentprism-core = { path = "../agentprism-core" }
+agentprism-env = { path = "../agentprism-env" }
+agentprism-session = { path = "../agentprism-session" }
+agentprism-ai = { path = "../agentprism-ai" }
+schemars = "1.2.2"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.145", features = ["raw_value"] }
+serde_yaml = "0.9.34"
+sha2 = "0.10.9"
+unicode-normalization = "0.1.25"
+
+[dev-dependencies]
+futures-channel = "0.3.31"
+futures-executor = "0.3.31"
+jsonschema = { version = "0.50.1", default-features = false }
+tempfile = "3.23.0"

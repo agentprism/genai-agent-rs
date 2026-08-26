@@ -1,0 +1,57 @@
+[package]
+name = "agentprism-providers-all"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/agentprism/genai-agent-rs"
+description = "All pinned built-in agentprism-ai provider catalogs and registrations."
+publish = false
+
+[dependencies]
+agentprism-ai = { path = "../../crates/agentprism-ai" }
+agentprism-anthropic = { path = "../agentprism-anthropic" }
+agentprism-bedrock = { path = "../agentprism-bedrock" }
+agentprism-google = { path = "../agentprism-google" }
+agentprism-google-vertex = { path = "../agentprism-google-vertex" }
+agentprism-mistral = { path = "../agentprism-mistral" }
+agentprism-openai = { path = "../agentprism-openai" }
+agentprism-openai-codex = { path = "../agentprism-openai-codex" }
+agentprism-openrouter = { path = "../agentprism-openrouter" }
+agentprism-deepseek = { path = "../agentprism-deepseek" }
+agentprism-provider-common = { path = "../agentprism-provider-common" }
+agentprism-ant-ling = { path = "../agentprism-ant-ling" }
+agentprism-azure-openai-responses = { path = "../agentprism-azure-openai-responses" }
+agentprism-baseten = { path = "../agentprism-baseten" }
+agentprism-cerebras = { path = "../agentprism-cerebras" }
+agentprism-cloudflare-ai-gateway = { path = "../agentprism-cloudflare-ai-gateway" }
+agentprism-cloudflare-workers-ai = { path = "../agentprism-cloudflare-workers-ai" }
+agentprism-fireworks = { path = "../agentprism-fireworks" }
+agentprism-github-copilot = { path = "../agentprism-github-copilot" }
+agentprism-groq = { path = "../agentprism-groq" }
+agentprism-huggingface = { path = "../agentprism-huggingface" }
+agentprism-kimi-coding = { path = "../agentprism-kimi-coding" }
+agentprism-minimax = { path = "../agentprism-minimax" }
+agentprism-minimax-cn = { path = "../agentprism-minimax-cn" }
+agentprism-moonshotai = { path = "../agentprism-moonshotai" }
+agentprism-moonshotai-cn = { path = "../agentprism-moonshotai-cn" }
+agentprism-nvidia = { path = "../agentprism-nvidia" }
+agentprism-opencode = { path = "../agentprism-opencode" }
+agentprism-opencode-go = { path = "../agentprism-opencode-go" }
+agentprism-qwen-token-plan = { path = "../agentprism-qwen-token-plan" }
+agentprism-qwen-token-plan-cn = { path = "../agentprism-qwen-token-plan-cn" }
+agentprism-qwen-token-plan-individual = { path = "../agentprism-qwen-token-plan-individual" }
+agentprism-radius = { path = "../agentprism-radius" }
+agentprism-together = { path = "../agentprism-together" }
+agentprism-vercel-ai-gateway = { path = "../agentprism-vercel-ai-gateway" }
+agentprism-xai = { path = "../agentprism-xai" }
+agentprism-xiaomi = { path = "../agentprism-xiaomi" }
+agentprism-xiaomi-token-plan-ams = { path = "../agentprism-xiaomi-token-plan-ams" }
+agentprism-xiaomi-token-plan-cn = { path = "../agentprism-xiaomi-token-plan-cn" }
+agentprism-xiaomi-token-plan-sgp = { path = "../agentprism-xiaomi-token-plan-sgp" }
+agentprism-zai = { path = "../agentprism-zai" }
+agentprism-zai-coding-cn = { path = "../agentprism-zai-coding-cn" }
+
+[dev-dependencies]
+futures-executor = "0.3.31"
+serde_json = "1.0.149"

@@ -1,7 +1,7 @@
 # Parity inventory for architecture v2 part 2 §10, pinned to the source commit
 # below. Planned mappings name the milestone that will port the complete file.
 upstream_repository = "earendil-works/pi"
-upstream_commit = "c49906ec77788625aacbdc53ebca6fbe65bd20f5"
+upstream_commit = "8fa7eebd235355522c8104166b4f1f959b4e2f10"
 
 [[mapping]]
 source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part1-proposal.md#6-lossless-ffi-event-envelope"
@@ -51,7 +51,7 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#10.8-openai-completions"
-rust = ["openai_chat_reasoning_details_turn_two_pi_exact", "wire_openai_completions_pi_exact"]
+rust = ["openai_chat_reasoning_detail_deltas_merge_before_replay_pi_exact", "openai_chat_reasoning_detail_nullish_metadata_omission_survives_round_trip_pi_exact", "openai_chat_reasoning_details_turn_two_pi_exact", "openai_tool_choice_is_omitted_without_active_tools_pi_exact", "wire_openai_completions_pi_exact"]
 status = "semantic-parity"
 
 [[mapping]]
@@ -191,7 +191,7 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/api/openai-completions.ts"
-rust = ["openai_chat_block_signature_precedes_legacy_tool_signature", "openai_chat_finish_reason_contract", "openai_chat_incomplete_reasoning_detail_is_not_replayed", "openai_chat_legacy_tool_signature_imports_as_replay_item", "openai_chat_raw_stop_reason_is_preserved", "openai_chat_reasoning_content_required_compat", "openai_chat_reasoning_details_preserve_array_order", "openai_chat_reasoning_details_replay_exact_json", "openai_chat_reasoning_details_survive_round_trip", "openai_chat_reasoning_field_name_is_preserved", "openai_chat_template_budget_variable_uses_clamped_simple_budget", "openai_chat_thinking_as_text_compat", "openai_grammar_constrained_tool_uses_custom_wire_shape", "openai_grammar_custom_input_escapes_json_string_deltas", "openai_grammar_custom_input_fragments_are_append_only_json", "openai_grammar_custom_terminal_events_follow_content_order", "openai_invalid_reasoning_details_rejected", "openai_kimi_deferred_tools_are_filtered_then_reintroduced", "openai_local_stream_body_error_preserves_partial_content", "openai_max_tokens_field_matches_compat", "openai_reasoning_format_matches_compat", "openai_sampling_params_merge_after_named_fields", "openai_strict_schema_normalization_and_error_policy_match_pi", "openai_thinking_budget_field_matches_compat", "openai_tool_delta_correlation_by_index_then_id", "openai_usage_cache_subtraction_and_reasoning_subset", "openai_usage_null_chunk_falls_back_and_explicit_cached_zero_wins", "persisted_openai_chat_reasoning_detail_json_matches_architecture", "stream_cancellation_is_terminal_message", "stream_cancellation_preserves_partial_tool_arguments", "stream_failure_is_terminal_message", "stream_failure_preserves_partial_tool_arguments", "stream_failure_preserves_partial_tool_with_incomplete_metadata", "stream_length_preserves_truncated_tool_arguments", "stream_response_id_is_preserved", "stream_response_model_is_preserved"]
+rust = ["openai_chat_block_signature_precedes_legacy_tool_signature", "openai_chat_finish_reason_contract", "openai_chat_incomplete_reasoning_detail_is_not_replayed", "openai_chat_legacy_tool_signature_imports_as_replay_item", "openai_chat_partial_reasoning_detail_is_not_replayable", "openai_chat_raw_stop_reason_is_preserved", "openai_chat_reasoning_content_required_compat", "openai_chat_reasoning_detail_deltas_merge_before_replay_pi_exact", "openai_chat_reasoning_detail_nullish_metadata_omission_survives_round_trip_pi_exact", "openai_chat_reasoning_details_preserve_array_order", "openai_chat_reasoning_details_replay_exact_json", "openai_chat_reasoning_details_survive_round_trip", "openai_chat_reasoning_field_name_is_preserved", "openai_chat_template_budget_variable_uses_clamped_simple_budget", "openai_chat_thinking_as_text_compat", "openai_grammar_constrained_tool_uses_custom_wire_shape", "openai_grammar_custom_input_escapes_json_string_deltas", "openai_grammar_custom_input_fragments_are_append_only_json", "openai_grammar_custom_terminal_events_follow_content_order", "openai_invalid_reasoning_details_rejected", "openai_kimi_deferred_tools_are_filtered_then_reintroduced", "openai_local_stream_body_error_preserves_partial_content", "openai_max_tokens_field_matches_compat", "openai_reasoning_format_matches_compat", "openai_sampling_params_merge_after_named_fields", "openai_strict_schema_normalization_and_error_policy_match_pi", "openai_thinking_budget_field_matches_compat", "openai_tool_choice_is_omitted_without_active_tools_pi_exact", "openai_tool_delta_correlation_by_index_then_id", "openai_usage_cache_subtraction_and_reasoning_subset", "openai_usage_null_chunk_falls_back_and_explicit_cached_zero_wins", "persisted_openai_chat_reasoning_detail_json_matches_architecture", "stream_cancellation_is_terminal_message", "stream_cancellation_preserves_partial_tool_arguments", "stream_failure_is_terminal_message", "stream_failure_preserves_partial_tool_arguments", "stream_failure_preserves_partial_tool_with_incomplete_metadata", "stream_length_preserves_truncated_tool_arguments", "stream_response_id_is_preserved", "stream_response_model_is_preserved"]
 status = "semantic-parity"
 
 [[mapping]]
@@ -211,7 +211,17 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/providers/openrouter.ts"
-rust = ["openai_completions_providers_share_api_implementation", "openai_provider_catalogs_match_pinned_counts_and_profiles", "openrouter_provider_registers_oauth_alongside_api_key"]
+rust = ["openai_completions_providers_share_api_implementation", "openai_provider_catalogs_match_pinned_counts_and_profiles", "openrouter_provider_registers_oauth_alongside_api_key", "openrouter_reasoning_metadata_and_payloads_pi_exact"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/ai/scripts/openrouter-reasoning-options.ts"
+rust = ["openrouter_reasoning_metadata_and_payloads_pi_exact"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/ai/scripts/generate-models.ts#cloudflare-workers-ai-gateway-mirroring"
+rust = ["cloudflare_gateway_catalog_mirrors_workers_ai_tool_models_pi_exact"]
 status = "semantic-parity"
 
 [[mapping]]
@@ -466,12 +476,46 @@ replacement = "Native versioned log plus explicit Pi-v4 compatibility backend."
 reason = "The native log must represent replay completeness and other Rust state losslessly; the Pi-v4 writer rejects unrepresentable mutations."
 
 [[mapping]]
-source = "packages/agent/src/harness/agent-harness.ts"
-rust = []
+source = "packages/agent/test/harness/agent-harness-scaffold.test.ts"
+rust = [
+  "harness_abandon_recovery_clears_restored_core_queues",
+  "harness_acknowledged_next_run_enqueue_is_captured_by_prompt",
+  "harness_abort_and_ingress_are_serialized_without_queue_after_abort",
+  "harness_agent_gate_end_to_end",
+  "harness_cancel_persists_abort_request_before_aborted_terminal",
+  "harness_completed_resume_becomes_idle_without_replaying_assistant",
+  "harness_configured_safe_tool_replays_after_started_crash",
+  "harness_durable_queue_acknowledgement",
+  "harness_failed_assistant_is_committed_before_failed_operation_terminal",
+  "harness_failed_resume_closes_failed_operation_without_retry",
+  "harness_failed_terminal_recovery_clears_restored_core_queues",
+  "harness_incomplete_assistant_recovery_defers_later_queue_until_after_recovered_turn",
+  "harness_late_ingress_is_cancelled_before_operation_finish",
+  "harness_local_acknowledged_queue_survives_should_stop_for_continue",
+  "harness_local_acknowledged_next_run_enqueue_is_captured_by_prompt",
+  "harness_local_family_accepts_rc_state_and_matches_lifecycle",
+  "harness_local_tool_started_persists_final_authorized_arguments",
+  "harness_multi_turn_recovery_reconstructs_aggregate_usage_and_cost",
+  "harness_next_run_queue_survives_until_prompt_acceptance",
+  "harness_open_rejects_multiple_operations_as_corruption",
+  "harness_open_rejects_pinned_reducer_record_corruption",
+  "harness_open_rejects_provisioned_entry_payload_mismatch",
+  "harness_open_rejects_step_attempt_result_entry_type_mismatch",
+  "harness_operation_recovery_resumes_recorded_intent",
+  "harness_recovered_sequential_crash_does_not_mark_later_call_started",
+  "harness_recovered_sequential_tool_lifecycles_precede_next_start",
+  "harness_recovery_accepts_concurrent_durable_ingress_while_tools_execute",
+  "harness_recovery_continues_after_newest_consumed_input",
+  "harness_recovery_executes_unstarted_tool_batch_then_continues",
+  "harness_recovery_never_replays_started_unsafe_tool",
+  "harness_recovery_reapplies_complete_run_intent",
+  "harness_send_acknowledged_queue_survives_should_stop_for_continue",
+  "harness_tool_started_replays_final_authorized_arguments",
+]
 status = "deliberate-divergence"
 allowlist_row = "top-level-harness-scaffold"
 replacement = "Implement orchestration against the already-defined subsystem contracts and tests."
-reason = "The pinned top-level harness is a scaffold, so Rust derives orchestration from implemented session, reducer, compaction, environment, tool, and telemetry contracts."
+reason = "The pinned top-level harness and its scaffold test require unfinished operations to reject; Rust instead derives and tests working orchestration from the implemented session, reducer, compaction, environment, tool, and telemetry contracts, as Architecture v2 part 2 §7.1 requires."
 
 # M1.2 proves assembly and persistence. These encoder-dependent §10.2 names
 # remain explicit M4 work; planned tests may be absent until their milestone.
@@ -997,7 +1041,7 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/openai-completions-reasoning-details.test.ts"
-rust = ["openai_chat_block_signature_precedes_legacy_tool_signature", "openai_chat_legacy_tool_signature_imports_as_replay_item", "openai_chat_reasoning_details_preserve_array_order", "openai_chat_reasoning_details_replay_exact_json", "openai_chat_reasoning_details_survive_round_trip", "openai_chat_reasoning_details_turn_two_pi_exact"]
+rust = ["openai_chat_block_signature_precedes_legacy_tool_signature", "openai_chat_legacy_tool_signature_imports_as_replay_item", "openai_chat_reasoning_detail_deltas_merge_before_replay_pi_exact", "openai_chat_reasoning_detail_nullish_metadata_omission_survives_round_trip_pi_exact", "openai_chat_reasoning_details_preserve_array_order", "openai_chat_reasoning_details_replay_exact_json", "openai_chat_reasoning_details_survive_round_trip", "openai_chat_reasoning_details_turn_two_pi_exact"]
 status = "semantic-parity"
 
 [[mapping]]
@@ -1024,7 +1068,7 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/openai-completions-tool-choice.test.ts"
-rust = ["openai_chat_reasoning_field_name_is_preserved", "openai_grammar_custom_terminal_events_follow_content_order", "openai_reasoning_format_matches_compat", "wire_openai_completions_pi_exact"]
+rust = ["openai_chat_reasoning_field_name_is_preserved", "openai_grammar_custom_terminal_events_follow_content_order", "openai_reasoning_format_matches_compat", "openai_tool_choice_is_omitted_without_active_tools_pi_exact", "wire_openai_completions_pi_exact"]
 status = "planned"
 milestone = "M4"
 
@@ -1107,6 +1151,11 @@ source = "packages/ai/test/openrouter-oauth.test.ts"
 rust = ["openrouter_local_oauth_respects_manual_paste_capability_and_deadline", "openrouter_provider_registers_oauth_alongside_api_key", "openrouter_send_oauth_respects_manual_paste_capability_and_deadline"]
 status = "planned"
 milestone = "M4"
+
+[[mapping]]
+source = "packages/ai/test/openrouter-reasoning-options.test.ts"
+rust = ["openrouter_reasoning_metadata_and_payloads_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/overflow.test.ts"
@@ -1313,7 +1362,7 @@ milestone = "M4"
 
 [[mapping]]
 source = "packages/ai/test/zai-coding-plan-models.test.ts"
-rust = ["remaining_provider_catalogs_preserve_pinned_compat_and_headers_pi_exact", "wire_openai_completions_pi_exact"]
+rust = ["remaining_provider_catalogs_preserve_pinned_compat_and_headers_pi_exact", "wire_openai_completions_pi_exact", "zai_coding_plan_catalog_costs_match_new_pin_pi_exact"]
 status = "planned"
 milestone = "M7"
 
@@ -1352,6 +1401,8 @@ rust = [
   "agent_prepare_next_turn_can_replace_reasoning",
   "agent_prepare_next_turn_runs_after_turn_finished",
   "agent_projector_runs_once_per_model_turn",
+  "agent_recovered_completed_turn_runs_prepare_and_should_stop_local",
+  "agent_recovered_completed_turn_runs_prepare_and_should_stop_send",
   "agent_prompt_with_multiple_tools",
   "agent_prompt_with_one_tool",
   "agent_prompt_without_tools",
@@ -1362,6 +1413,8 @@ rust = [
   "agent_should_stop_failure_commits_assistant",
   "agent_transform_context_runs_before_projector",
   "queue_followup_polled_only_when_agent_would_stop",
+  "harness_local_acknowledged_queue_survives_should_stop_for_continue",
+  "harness_send_acknowledged_queue_survives_should_stop_for_continue",
   "queue_steering_not_polled_between_tools",
   "queue_steering_not_polled_when_should_stop_returns_true",
   "queue_steering_polled_after_completed_turn",
@@ -1435,6 +1488,8 @@ rust = [
   "queue_clear_followup",
   "queue_clear_steering",
   "queue_concurrent_producers_use_control_handle",
+  "harness_local_acknowledged_queue_survives_should_stop_for_continue",
+  "harness_send_acknowledged_queue_survives_should_stop_for_continue",
   "queue_ingress_order_is_stable",
   "queue_one_mode_drains_one",
 ]
@@ -1447,28 +1502,35 @@ status = "planned"
 milestone = "M2"
 
 [[mapping]]
-source = "packages/agent/test/harness/agent-harness-scaffold.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
-
-[[mapping]]
 source = "packages/agent/test/harness/branch-summarization.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = [
+  "branch_summary_finds_common_ancestor",
+  "branch_summary_summarizes_abandoned_segment",
+]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/harness/compaction.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = [
+  "compaction_context_uses_latest_compaction_entry",
+  "compaction_failure_does_not_move_branch_head",
+  "compaction_last_entry_suppresses_manual_and_forced_requests",
+  "compaction_projection_empty_nonempty_path_invokes_summary_local",
+  "compaction_projection_empty_nonempty_path_invokes_summary_send",
+  "compaction_records_summary_usage",
+  "compaction_records_tokens_before",
+  "compaction_retains_configured_tail",
+  "compaction_threshold_decision",
+]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/harness/events.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = [
+  "harness_event_watch_has_no_snapshot_gap",
+  "harness_events_deliver_matching_listeners_and_watchers",
+]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/harness/nodejs-env.test.ts"
@@ -1503,15 +1565,27 @@ milestone = "M8"
 
 [[mapping]]
 source = "packages/agent/test/harness/reducer.test.ts"
-rust = []
+rust = [
+  "harness_incomplete_assistant_recovery_defers_later_queue_until_after_recovered_turn",
+  "harness_local_tool_started_persists_final_authorized_arguments",
+  "harness_open_rejects_multiple_operations_as_corruption",
+  "harness_open_rejects_pinned_reducer_record_corruption",
+  "harness_open_rejects_provisioned_entry_payload_mismatch",
+  "harness_open_rejects_step_attempt_result_entry_type_mismatch",
+  "harness_tool_started_replays_final_authorized_arguments",
+]
 status = "planned"
-milestone = "M8"
+milestone = "M8.4"
 
 [[mapping]]
 source = "packages/agent/test/harness/resource-formatting.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["resource_formatting_matches_pinned_pi"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/agent/src/harness/messages.ts"
+rust = ["harness_bash_execution_message_formats_and_projects_per_pi"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/harness/session/context.test.ts"
@@ -1520,8 +1594,91 @@ status = "planned"
 milestone = "M7"
 
 [[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#7.7-7.8-and-10.10"
+rust = [
+  "branch_summary_failure_leaves_navigation_recoverable",
+  "branch_summary_finds_common_ancestor",
+  "branch_summary_navigation_is_durable",
+  "branch_summary_records_from_id",
+  "branch_summary_summarizes_abandoned_segment",
+  "branch_summary_uses_requested_model_after_response_echo",
+  "branch_summary_zero_context_window_uses_pi_fallback_budget",
+  "compaction_context_uses_latest_compaction_entry",
+  "compaction_context_uses_requested_model_after_response_echo",
+  "compaction_failure_does_not_move_branch_head",
+  "compaction_last_entry_suppresses_manual_and_forced_requests",
+  "compaction_manual_reason",
+  "compaction_operation_can_resume",
+  "compaction_overflow_reason",
+  "compaction_projection_empty_nonempty_path_invokes_summary_local",
+  "compaction_projection_empty_nonempty_path_invokes_summary_send",
+  "compaction_records_summary_usage",
+  "compaction_records_tokens_before",
+  "compaction_retains_configured_tail",
+  "compaction_threshold_decision",
+]
+status = "semantic-parity"
+
+[[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#7.9-7.12-and-10.10"
+rust = [
+  "bash_truncated_output_has_full_artifact",
+  "edit_rejects_multiple_matches",
+  "edit_rejects_noop",
+  "edit_requires_exact_match",
+  "mutation_queue_different_paths_concurrent",
+  "mutation_queue_same_path_serializes",
+  "prompt_template_argument_substitution",
+  "prompt_template_fallback_description_uses_utf16_units",
+  "prompt_template_missing_argument_rejected",
+  "prompt_template_output_is_deterministic",
+  "skill_catalog_discovers_valid_skills",
+  "skill_catalog_preserves_multi_root_order",
+  "skill_content_digest_is_stable",
+  "skill_invalid_metadata_is_reported",
+  "skill_resume_uses_recorded_digest",
+  "telemetry_correlates_session_run_operation",
+  "telemetry_default_excludes_auth",
+  "telemetry_default_excludes_content",
+  "telemetry_default_excludes_replay_payload",
+  "telemetry_durable_event_follows_commit",
+  "telemetry_schema_validates_every_event",
+  "telemetry_schema_version_is_required",
+  "telemetry_sink_failure_is_best_effort_by_default",
+  "truncate_never_splits_utf8",
+  "truncate_respects_byte_limit",
+  "truncate_respects_line_limit",
+]
+status = "semantic-parity"
+
+[[mapping]]
 source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#7.2-7.6-and-10.10"
 rust = [
+  "harness_abandon_recovery_clears_restored_core_queues",
+  "harness_acknowledged_next_run_enqueue_is_captured_by_prompt",
+  "harness_abort_and_ingress_are_serialized_without_queue_after_abort",
+  "harness_completed_resume_becomes_idle_without_replaying_assistant",
+  "harness_configured_safe_tool_replays_after_started_crash",
+  "harness_failed_resume_closes_failed_operation_without_retry",
+  "harness_failed_terminal_recovery_clears_restored_core_queues",
+  "harness_incomplete_assistant_recovery_defers_later_queue_until_after_recovered_turn",
+  "harness_late_ingress_is_cancelled_before_operation_finish",
+  "harness_local_acknowledged_queue_survives_should_stop_for_continue",
+  "harness_local_acknowledged_next_run_enqueue_is_captured_by_prompt",
+  "harness_local_tool_started_persists_final_authorized_arguments",
+  "harness_multi_turn_recovery_reconstructs_aggregate_usage_and_cost",
+  "harness_open_rejects_pinned_reducer_record_corruption",
+  "harness_open_rejects_provisioned_entry_payload_mismatch",
+  "harness_open_rejects_step_attempt_result_entry_type_mismatch",
+  "harness_recovered_sequential_crash_does_not_mark_later_call_started",
+  "harness_recovered_sequential_tool_lifecycles_precede_next_start",
+  "harness_recovery_accepts_concurrent_durable_ingress_while_tools_execute",
+  "harness_recovery_continues_after_newest_consumed_input",
+  "harness_recovery_executes_unstarted_tool_batch_then_continues",
+  "harness_recovery_never_replays_started_unsafe_tool",
+  "harness_recovery_reapplies_complete_run_intent",
+  "harness_send_acknowledged_queue_survives_should_stop_for_continue",
+  "harness_tool_started_replays_final_authorized_arguments",
   "session_branch_scan_leaf_to_root",
   "session_entry_parent_must_exist",
   "session_fact_latest_value_wins",
@@ -1586,7 +1743,13 @@ milestone = "M7"
 
 [[mapping]]
 source = "packages/agent/test/harness/skills.test.ts"
-rust = []
+rust = [
+  "skill_catalog_discovers_valid_skills",
+  "skill_catalog_preserves_multi_root_order",
+  "skill_content_digest_is_stable",
+  "skill_invalid_metadata_is_reported",
+  "skill_resume_uses_recorded_digest",
+]
 status = "planned"
 milestone = "M8"
 
@@ -1598,19 +1761,39 @@ milestone = "M8"
 
 [[mapping]]
 source = "packages/agent/test/harness/telemetry.test.ts"
-rust = []
+rust = [
+  "telemetry_correlates_session_run_operation",
+  "telemetry_default_excludes_auth",
+  "telemetry_default_excludes_content",
+  "telemetry_default_excludes_replay_payload",
+  "telemetry_durable_event_follows_commit",
+  "telemetry_schema_validates_every_event",
+  "telemetry_schema_version_is_required",
+  "telemetry_sink_failure_is_best_effort_by_default",
+]
 status = "planned"
 milestone = "M8"
 
 [[mapping]]
 source = "packages/agent/test/harness/tools.test.ts"
-rust = []
+rust = [
+  "bash_truncated_output_has_full_artifact",
+  "edit_rejects_multiple_matches",
+  "edit_rejects_noop",
+  "edit_requires_exact_match",
+  "mutation_queue_different_paths_concurrent",
+  "mutation_queue_same_path_serializes",
+]
 status = "planned"
 milestone = "M8"
 
 [[mapping]]
 source = "packages/agent/test/harness/truncate.test.ts"
-rust = []
+rust = [
+  "truncate_never_splits_utf8",
+  "truncate_respects_byte_limit",
+  "truncate_respects_line_limit",
+]
 status = "planned"
 milestone = "M8"
 

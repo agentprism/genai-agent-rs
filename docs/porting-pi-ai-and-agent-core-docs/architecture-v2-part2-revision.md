@@ -590,6 +590,8 @@ Pi remembers the field name in `thinkingSignature`.
 
 More importantly, endpoints such as OpenRouter can return a `reasoning_details` array. Pi appends each valid detail to an array, retains original order, and serializes the entire array into `thinkingSignature`. See `packages/ai/src/api/openai-completions.ts:500–790`.
 
+> Correction: At pin `8fa7eebd235355522c8104166b4f1f959b4e2f10`, Pi merges consecutive `reasoning.text` and consecutive `reasoning.summary` stream deltas into one logical detail before replay; encrypted details remain discrete. Text `signature` and common `id`/`format`/`index` metadata use Pi's `||=`/`??=` semantics, including omission after `JSON.stringify` when null/empty target metadata is followed by an omitted source field. The replay implementation therefore replaces the in-progress logical detail, completes it at a detail boundary or successful stream termination, and leaves it incomplete on failure. See `packages/ai/src/api/openai-completions.ts` (`appendOpenAIReasoningDetail` and the `reasoning_details` decoder branch) and `packages/ai/test/openai-completions-reasoning-details.test.ts`.
+
 On replay, Pi:
 
 1. first looks for structured reasoning details in a thinking block signature;
@@ -3704,6 +3706,8 @@ Preparation flow:
 7. Delegate final handoff projection to base ContextPolicy.
 ```
 
+> Correction: Pinned Pi's durable reducer corpus records automatic threshold compaction and overflow recovery as `step_attempt` records inside the already-open run operation; they do not start a nested compaction operation. Only standalone manual compaction owns its own `operation_started`/`operation_finished` pair. Rust therefore interprets step 6a as “ensure an owning operation”: reuse the open run for threshold/overflow compaction, and start a compaction operation only when no run already owns the work (`packages/agent/test/harness/reducer.test.ts`, `threshold auto-compaction`, `overflow compaction and retry`, and `manual compaction` valid prefixes).
+
 A failed compaction must not advance the branch head to a nonexistent or partial summary entry.
 
 ### Overflow retry
@@ -3745,6 +3749,10 @@ The summary input should include:
 
 The result is a durable `BranchSummaryEntry`, not an ephemeral system-prompt string.
 
+> Correction: Pinned Pi records a branch summary's `fromId` as the navigation operation's `sourceLeafId`, not the first entry in the abandoned segment. The Rust `BranchSummaryEntry::from_id` therefore identifies the source leaf, including when the summary is appended under the empty root (`packages/agent/test/harness/reducer.test.ts`, navigation fixtures with `sourceLeafId: "source"` and `fromId: "source"`).
+
+> Correction: Pinned Pi permits `SessionContextBuildOptions.entryProjectors` to project a matching `custom` session entry into ordinary model context; each projector receives the entry's index and path after the latest-compaction transform. Compaction preparation is stricter: it calls `buildSessionContext(pathEntries)` without projector options and its independent entry conversion unconditionally omits `custom` session entries. Rust therefore exposes explicit Send and Local custom-entry projector seams for normal durable context reconstruction, passes them the transformed path and index, and never runs them while calculating compaction usage, choosing the retained tail, or building a summary prompt (`packages/agent/src/harness/session/context.ts:52–100`; `packages/agent/src/harness/compaction/compaction.ts:55–70,613–680`).
+
 ## 7.9 Skills and prompt templates
 
 ```rust
@@ -3776,6 +3784,8 @@ pub trait PromptTemplateRegistry: Send + Sync {
     ) -> Result<RenderedPrompt, TemplateError>;
 }
 ```
+
+> Correction: Pinned Pi's `substituteArgs` replaces an absent positional placeholder with an empty string (`args[index] ?? ""`) rather than rejecting the invocation. The native registry therefore uses Pi-compatible empty substitution by default; the §10.10 test named `prompt_template_missing_argument_rejected` exercises the explicit strict policy rather than claiming that rejection is Pi's default (`packages/agent/src/harness/prompt-templates.ts:232–247`).
 
 The harness operation intent should record skill/template identities and content digests. A resumed operation must not silently pick up changed skill content unless the resume policy explicitly allows it.
 
@@ -3887,6 +3897,8 @@ This prevents concurrent assistant tool calls from racing on the same file while
 3. reject a no-op replacement;
 4. write atomically where supported;
 5. return a structured diff and resulting metadata.
+
+> Correction: Pinned Pi's reference `edit` accepts one or more replacements, matches every `oldText` against the same original file, and rejects ambiguous or overlapping regions before writing. It strips and restores a UTF-8 BOM, normalizes CRLF/CR to LF for matching and restores the original line-ending style, and falls back from raw matching to NFKC plus trailing-whitespace, smart-quote, Unicode-dash, and Unicode-space normalization while preserving unchanged line blocks. The Rust reference operation implements those semantics; the single raw `replace_exact` sketch above is only the atomic publication capability used after the full-file edit has been prepared (`packages/agent/src/harness/tools/edit.ts`; `packages/agent/src/harness/tools/edit-diff.ts`).
 
 ### Output truncation
 

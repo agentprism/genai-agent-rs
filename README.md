@@ -11,8 +11,8 @@ bodies, a divergence allowlist) and four commitment gates.
 
 | pi package | crates (adopted architecture) | status |
 |---|---|---|
-| `@earendil-works/pi-ai` | `pi-ai` + provider crates + `pi-ai-providers-all` | to be built (Milestone 1 first) |
-| `@earendil-works/pi-agent-core` | `pi-agent-core`, `pi-agent-session`, `pi-agent-harness`, `pi-agent-env`, `pi-agent-runtime-tokio`, `pi-agent-compat-pi-jsonl` | to be built |
+| `@earendil-works/pi-ai` | `pi-ai` + provider crates + `agentprism-providers-all` | to be built (Milestone 1 first) |
+| `@earendil-works/agentprism-core` | `agentprism-core`, `agentprism-session`, `agentprism-harness`, `agentprism-env`, `agentprism-runtime-tokio`, `agentprism-compat-pi-jsonl` | to be built |
 | bindings | `pi-ffi` | to be built |
 
 Reading order for anyone working on the port: `goal.md`, then the two architecture documents, then pi's
@@ -34,15 +34,15 @@ Unreviewed remediation work under the retired standard is on `wip/parity-remedia
 genai-agent-rs/
 ├── Cargo.toml                      # [workspace] — see members
 ├── crates/
-│   ├── pi-ai/                      # canonical model, replay/stream, lowering, Models control plane
-│   ├── pi-agent-core/              # agent state machine over ModelRuntime
-│   ├── pi-agent-session/           # entry tree, lanes, operation records, reducers, storage traits
-│   ├── pi-agent-harness/           # compaction, skills, templates, reference tools, telemetry
-│   ├── pi-agent-env/               # filesystem/process capability traits
-│   ├── pi-agent-runtime-tokio/     # Tokio environment, Send actor facade, process execution
-│   └── pi-agent-compat-pi-jsonl/   # pi v4 JSONL reader + constrained writer
-├── providers/                      # one crate per provider + pi-ai-providers-all (Milestone 4+)
-├── bindings/pi-ffi/                # opaque handles, versioned envelopes (Milestone 5)
+│   ├── agentprism-ai/                      # canonical model, replay/stream, lowering, Models control plane
+│   ├── agentprism-core/              # agent state machine over ModelRuntime
+│   ├── agentprism-session/           # entry tree, lanes, operation records, reducers, storage traits
+│   ├── agentprism-harness/           # compaction, skills, templates, reference tools, telemetry
+│   ├── agentprism-env/               # filesystem/process capability traits
+│   ├── agentprism-runtime-tokio/     # Tokio environment, Send actor facade, process execution
+│   └── agentprism-compat-pi-jsonl/   # pi v4 JSONL reader + constrained writer
+├── providers/                      # one crate per provider + agentprism-providers-all (Milestone 4+)
+├── bindings/agentprism-ffi/                # opaque handles, versioned envelopes (Milestone 5)
 ├── parity/                         # parity manifest + checker (Milestone 1)
 ├── docs/porting-pi-ai-and-agent-core-docs/
 └── workflows/                      # AgentPrism milestone workflow (archive/ holds retired runs)
@@ -85,11 +85,11 @@ After every pull, before committing the merge result:
    `genai/CHANGELOG.md` — upstream entries keep their `.`/`-`/`+`/`^`/`!` markers; add ours the
    same way.
 
-## Staying current with pi-agent-core (legacy `agent/` crate)
+## Staying current with agentprism-core (legacy `agent/` crate)
 
-*This section describes the legacy `rust-genai-agent` crate's own tracking mechanism. It is not the parity standard for the pi-agent-core port on `ai` — that standard is `goal.md`.*
+*This section describes the legacy `rust-genai-agent` crate's own tracking mechanism. It is not the parity standard for the agentprism-core port on `ai` — that standard is `goal.md`.*
 
-`rust-genai-agent` is an earlier, partial port of `@earendil-works/pi-agent-core` that **tracks
+`rust-genai-agent` is an earlier, partial port of `@earendil-works/agentprism-core` that **tracks
 the latest pi releases** — it is not a one-time snapshot. The tracking mechanism is the parity
 matrix in [`agent/tests/parity_manifest.toml`](agent/tests/parity_manifest.toml): it pins the
 `earendil-works/pi` commit the matrix was last synced against (`upstream_commit`) and maps every
@@ -102,7 +102,7 @@ sibling checkout there — the path is gitignored), fails when their concrete ca
 from the script's baseline (“update the parity baseline deliberately”), and verifies the
 aggregate manifest, its ordered fragments, and every mapped Rust test name.
 
-When a new pi-agent-core release lands upstream, the matrix is re-synced deliberately:
+When a new agentprism-core release lands upstream, the matrix is re-synced deliberately:
 
 1. Fast-forward the `pi/` checkout to the new release commit.
 2. Run `python3 agent/scripts/check_test_parity.py` — it reports the drifted case set by name.

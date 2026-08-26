@@ -1,6 +1,6 @@
 //! Shared parser for the captured §10.8 family corpora.
 
-use pi_ai::*;
+use agentprism_ai::*;
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fs;

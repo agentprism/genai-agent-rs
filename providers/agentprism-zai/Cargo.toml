@@ -1,0 +1,14 @@
+[package]
+name = "agentprism-zai"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/agentprism/genai-agent-rs"
+description = "Zai provider registration for agentprism-ai."
+publish = false
+
+[dependencies]
+agentprism-ai = { path = "../../crates/agentprism-ai" }
+agentprism-openai = { path = "../agentprism-openai" }
+agentprism-provider-common = { path = "../agentprism-provider-common" }
