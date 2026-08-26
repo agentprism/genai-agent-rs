@@ -1059,6 +1059,261 @@ fn agent_should_stop_runs_after_prepare_next_turn() {
     );
 }
 
+fn recovered_text_assistant(id: &str) -> AssistantMessage {
+    let provider = ProviderId::new("scripted");
+    let api = ApiId::new("scripted");
+    let model = ModelId::new("model-a");
+    AssistantMessage {
+        id: MessageId::new(id),
+        provider: provider.clone(),
+        api: api.clone(),
+        requested_model: model.clone(),
+        response_model: None,
+        response_id: None,
+        deferred: None,
+        end_turn: None,
+        diagnostics: Vec::new(),
+        content: vec![ContentBlock::Text {
+            id: ContentBlockId::new(format!("{id}-text")),
+            text: "committed before the crash".to_owned(),
+        }],
+        replay: ReplayEnvelope::new(ReplayScope::new(provider, api, model.clone(), model)),
+        usage: Usage::zero(UsageSource::Unknown),
+        cost: None,
+        finish: AssistantFinish {
+            reason: AssistantFinishReason::Stop,
+            raw_provider_reason: None,
+            error: None,
+        },
+        timestamp: Timestamp::default(),
+    }
+}
+
+struct ObservableRecoveredTurnPolicy {
+    control: AgentControl,
+    order: Arc<Mutex<Vec<&'static str>>>,
+    prepare_calls: AtomicUsize,
+    should_stop_calls: AtomicUsize,
+    replacement: ModelRef,
+}
+
+impl TurnPolicy for ObservableRecoveredTurnPolicy {
+    fn prepare_next_turn<'a>(
+        &'a self,
+        _turn: CompletedTurn<'a>,
+        _cancellation: CancellationToken,
+    ) -> SendBoxFuture<'a, Result<NextTurn, TurnPolicyError>> {
+        Box::pin(async move {
+            lock(&self.order).push("prepare_next_turn");
+            if self.prepare_calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                self.control
+                    .steer(user("recovered-steer", "continue recovered run"))
+                    .await
+                    .map_err(|error| TurnPolicyError::new(error.to_string()))?;
+                return Ok(NextTurn {
+                    context: None,
+                    model: Some(self.replacement.clone()),
+                    reasoning: None,
+                });
+            }
+            Ok(NextTurn::default())
+        })
+    }
+
+    fn should_stop<'a>(
+        &'a self,
+        _turn: CompletedTurn<'a>,
+        _cancellation: CancellationToken,
+    ) -> SendBoxFuture<'a, Result<bool, TurnPolicyError>> {
+        Box::pin(async move {
+            lock(&self.order).push("should_stop");
+            Ok(self.should_stop_calls.fetch_add(1, Ordering::AcqRel) > 0)
+        })
+    }
+}
+
+#[test]
+fn agent_recovered_completed_turn_runs_prepare_and_should_stop_send() {
+    // Architecture v2 part 2 §8.2 and §10.9. Pi basis:
+    // packages/agent/src/agent-loop.ts commits turn_end, applies
+    // prepareNextTurn, invokes shouldStopAfterTurn, then polls steering.
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let runtime = RecordingRuntime {
+        inner: ScriptedRuntime::new([text_response("after recovered turn")]),
+        requests: requests.clone(),
+    };
+    let assistant = recovered_text_assistant("recovered-assistant");
+    let records = vec![
+        user("recovered-user", "start"),
+        AgentRecord::Llm(Message::Assistant(assistant.clone())),
+    ];
+    let mut recovered_state = state();
+    recovered_state.transcript = records.clone();
+    let mut agent = Agent::new(Arc::new(runtime), recovered_state, ToolRegistry::new()).unwrap();
+    let replacement = ModelRef::new("alternate", "model-b");
+    agent
+        .set_turn_policy(Arc::new(ObservableRecoveredTurnPolicy {
+            control: agent.control(),
+            order: order.clone(),
+            prepare_calls: AtomicUsize::new(0),
+            should_stop_calls: AtomicUsize::new(0),
+            replacement: replacement.clone(),
+        }))
+        .unwrap();
+
+    let events = collect(agent.resume_completed_turn(
+        RecoveredCompletedTurn {
+            assistant,
+            tool_results: Vec::new(),
+            terminate_batch: false,
+            new_messages: records,
+            run_state: RecoveredRunState::default(),
+        },
+        CancellationToken::new(),
+    ));
+
+    assert!(matches!(events[0], AgentEvent::RunStarted { .. }));
+    assert!(matches!(events[1], AgentEvent::TurnFinished { .. }));
+    assert!(matches!(events[2], AgentEvent::TurnStarted { turn: 1, .. }));
+    assert_eq!(
+        lock(&order).as_slice(),
+        [
+            "prepare_next_turn",
+            "should_stop",
+            "prepare_next_turn",
+            "should_stop",
+        ]
+    );
+    assert_eq!(lock(&requests)[0].model, replacement);
+}
+
+#[derive(Clone)]
+struct LocalRecordingRuntime {
+    inner: ScriptedRuntime,
+    requests: Rc<RefCell<Vec<ModelRequest>>>,
+}
+
+impl LocalModelRuntime for LocalRecordingRuntime {
+    fn stream(
+        &self,
+        request: ModelRequest,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<LocalAssistantStream, RequestStartError>> {
+        Box::pin(async move {
+            self.requests.borrow_mut().push(request.clone());
+            LocalModelRuntime::stream(&self.inner, request, cancellation).await
+        })
+    }
+}
+
+struct LocalObservableRecoveredTurnPolicy {
+    control: AgentControl,
+    order: Rc<RefCell<Vec<&'static str>>>,
+    prepare_calls: RefCell<usize>,
+    should_stop_calls: RefCell<usize>,
+    replacement: ModelRef,
+}
+
+impl LocalTurnPolicy for LocalObservableRecoveredTurnPolicy {
+    fn prepare_next_turn<'a>(
+        &'a self,
+        _turn: LocalCompletedTurn<'a>,
+        _cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'a, Result<LocalNextTurn, TurnPolicyError>> {
+        Box::pin(async move {
+            self.order.borrow_mut().push("prepare_next_turn");
+            let first = *self.prepare_calls.borrow() == 0;
+            *self.prepare_calls.borrow_mut() += 1;
+            if first {
+                self.control
+                    .steer(user(
+                        "local-recovered-steer",
+                        "continue recovered local run",
+                    ))
+                    .await
+                    .map_err(|error| TurnPolicyError::new(error.to_string()))?;
+                return Ok(LocalNextTurn {
+                    context: None,
+                    model: Some(self.replacement.clone()),
+                    reasoning: None,
+                });
+            }
+            Ok(LocalNextTurn::default())
+        })
+    }
+
+    fn should_stop<'a>(
+        &'a self,
+        _turn: LocalCompletedTurn<'a>,
+        _cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'a, Result<bool, TurnPolicyError>> {
+        Box::pin(async move {
+            self.order.borrow_mut().push("should_stop");
+            let stop = *self.should_stop_calls.borrow() > 0;
+            *self.should_stop_calls.borrow_mut() += 1;
+            Ok(stop)
+        })
+    }
+}
+
+#[test]
+fn agent_recovered_completed_turn_runs_prepare_and_should_stop_local() {
+    // Architecture v2 part 2 §8.2, §9.2, and §10.9. Pi basis:
+    // packages/agent/src/agent-loop.ts post-turn policy and queue order, using
+    // the required Local capability family.
+    let order = Rc::new(RefCell::new(Vec::new()));
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let runtime = LocalRecordingRuntime {
+        inner: ScriptedRuntime::new([text_response("after local recovered turn")]),
+        requests: requests.clone(),
+    };
+    let assistant = recovered_text_assistant("local-recovered-assistant");
+    let records = vec![
+        user("local-recovered-user", "start"),
+        AgentRecord::Llm(Message::Assistant(assistant.clone())),
+    ];
+    let mut recovered_state = state();
+    recovered_state.transcript = records.clone();
+    let mut agent =
+        LocalAgent::new(Rc::new(runtime), recovered_state, LocalToolRegistry::new()).unwrap();
+    let replacement = ModelRef::new("local-alternate", "model-b");
+    agent
+        .set_turn_policy(Rc::new(LocalObservableRecoveredTurnPolicy {
+            control: agent.control(),
+            order: order.clone(),
+            prepare_calls: RefCell::new(0),
+            should_stop_calls: RefCell::new(0),
+            replacement: replacement.clone(),
+        }))
+        .unwrap();
+
+    let events = collect_local(agent.resume_completed_turn(
+        RecoveredCompletedTurn {
+            assistant,
+            tool_results: Vec::new(),
+            terminate_batch: false,
+            new_messages: records,
+            run_state: RecoveredRunState::default(),
+        },
+        CancellationToken::new(),
+    ));
+
+    assert!(matches!(events[0], AgentEvent::RunStarted { .. }));
+    assert!(matches!(events[1], AgentEvent::TurnFinished { .. }));
+    assert!(matches!(events[2], AgentEvent::TurnStarted { turn: 1, .. }));
+    assert_eq!(
+        order.borrow().as_slice(),
+        [
+            "prepare_next_turn",
+            "should_stop",
+            "prepare_next_turn",
+            "should_stop",
+        ]
+    );
+    assert_eq!(requests.borrow()[0].model, replacement);
+}
+
 struct StopBeforeQueuePolicy {
     control: AgentControl,
     order: Arc<Mutex<Vec<&'static str>>>,

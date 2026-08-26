@@ -476,12 +476,46 @@ replacement = "Native versioned log plus explicit Pi-v4 compatibility backend."
 reason = "The native log must represent replay completeness and other Rust state losslessly; the Pi-v4 writer rejects unrepresentable mutations."
 
 [[mapping]]
-source = "packages/agent/src/harness/agent-harness.ts"
-rust = []
+source = "packages/agent/test/harness/agent-harness-scaffold.test.ts"
+rust = [
+  "harness_abandon_recovery_clears_restored_core_queues",
+  "harness_acknowledged_next_run_enqueue_is_captured_by_prompt",
+  "harness_abort_and_ingress_are_serialized_without_queue_after_abort",
+  "harness_agent_gate_end_to_end",
+  "harness_cancel_persists_abort_request_before_aborted_terminal",
+  "harness_completed_resume_becomes_idle_without_replaying_assistant",
+  "harness_configured_safe_tool_replays_after_started_crash",
+  "harness_durable_queue_acknowledgement",
+  "harness_failed_assistant_is_committed_before_failed_operation_terminal",
+  "harness_failed_resume_closes_failed_operation_without_retry",
+  "harness_failed_terminal_recovery_clears_restored_core_queues",
+  "harness_incomplete_assistant_recovery_defers_later_queue_until_after_recovered_turn",
+  "harness_late_ingress_is_cancelled_before_operation_finish",
+  "harness_local_acknowledged_queue_survives_should_stop_for_continue",
+  "harness_local_acknowledged_next_run_enqueue_is_captured_by_prompt",
+  "harness_local_family_accepts_rc_state_and_matches_lifecycle",
+  "harness_local_tool_started_persists_final_authorized_arguments",
+  "harness_multi_turn_recovery_reconstructs_aggregate_usage_and_cost",
+  "harness_next_run_queue_survives_until_prompt_acceptance",
+  "harness_open_rejects_multiple_operations_as_corruption",
+  "harness_open_rejects_pinned_reducer_record_corruption",
+  "harness_open_rejects_provisioned_entry_payload_mismatch",
+  "harness_open_rejects_step_attempt_result_entry_type_mismatch",
+  "harness_operation_recovery_resumes_recorded_intent",
+  "harness_recovered_sequential_crash_does_not_mark_later_call_started",
+  "harness_recovered_sequential_tool_lifecycles_precede_next_start",
+  "harness_recovery_accepts_concurrent_durable_ingress_while_tools_execute",
+  "harness_recovery_continues_after_newest_consumed_input",
+  "harness_recovery_executes_unstarted_tool_batch_then_continues",
+  "harness_recovery_never_replays_started_unsafe_tool",
+  "harness_recovery_reapplies_complete_run_intent",
+  "harness_send_acknowledged_queue_survives_should_stop_for_continue",
+  "harness_tool_started_replays_final_authorized_arguments",
+]
 status = "deliberate-divergence"
 allowlist_row = "top-level-harness-scaffold"
 replacement = "Implement orchestration against the already-defined subsystem contracts and tests."
-reason = "The pinned top-level harness is a scaffold, so Rust derives orchestration from implemented session, reducer, compaction, environment, tool, and telemetry contracts."
+reason = "The pinned top-level harness and its scaffold test require unfinished operations to reject; Rust instead derives and tests working orchestration from the implemented session, reducer, compaction, environment, tool, and telemetry contracts, as Architecture v2 part 2 §7.1 requires."
 
 # M1.2 proves assembly and persistence. These encoder-dependent §10.2 names
 # remain explicit M4 work; planned tests may be absent until their milestone.
@@ -1367,6 +1401,8 @@ rust = [
   "agent_prepare_next_turn_can_replace_reasoning",
   "agent_prepare_next_turn_runs_after_turn_finished",
   "agent_projector_runs_once_per_model_turn",
+  "agent_recovered_completed_turn_runs_prepare_and_should_stop_local",
+  "agent_recovered_completed_turn_runs_prepare_and_should_stop_send",
   "agent_prompt_with_multiple_tools",
   "agent_prompt_with_one_tool",
   "agent_prompt_without_tools",
@@ -1377,6 +1413,8 @@ rust = [
   "agent_should_stop_failure_commits_assistant",
   "agent_transform_context_runs_before_projector",
   "queue_followup_polled_only_when_agent_would_stop",
+  "harness_local_acknowledged_queue_survives_should_stop_for_continue",
+  "harness_send_acknowledged_queue_survives_should_stop_for_continue",
   "queue_steering_not_polled_between_tools",
   "queue_steering_not_polled_when_should_stop_returns_true",
   "queue_steering_polled_after_completed_turn",
@@ -1450,6 +1488,8 @@ rust = [
   "queue_clear_followup",
   "queue_clear_steering",
   "queue_concurrent_producers_use_control_handle",
+  "harness_local_acknowledged_queue_survives_should_stop_for_continue",
+  "harness_send_acknowledged_queue_survives_should_stop_for_continue",
   "queue_ingress_order_is_stable",
   "queue_one_mode_drains_one",
 ]
@@ -1460,12 +1500,6 @@ source = "packages/agent/test/e2e.test.ts"
 rust = []
 status = "planned"
 milestone = "M2"
-
-[[mapping]]
-source = "packages/agent/test/harness/agent-harness-scaffold.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
 
 [[mapping]]
 source = "packages/agent/test/harness/branch-summarization.test.ts"
@@ -1492,9 +1526,11 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/harness/events.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = [
+  "harness_event_watch_has_no_snapshot_gap",
+  "harness_events_deliver_matching_listeners_and_watchers",
+]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/harness/nodejs-env.test.ts"
@@ -1523,26 +1559,33 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/harness/prompt-templates.test.ts"
-rust = [
-  "prompt_template_argument_substitution",
-  "prompt_template_fallback_description_uses_utf16_units",
-  "prompt_template_missing_argument_rejected",
-  "prompt_template_output_is_deterministic",
-]
+rust = []
 status = "planned"
 milestone = "M8"
 
 [[mapping]]
 source = "packages/agent/test/harness/reducer.test.ts"
-rust = []
+rust = [
+  "harness_incomplete_assistant_recovery_defers_later_queue_until_after_recovered_turn",
+  "harness_local_tool_started_persists_final_authorized_arguments",
+  "harness_open_rejects_multiple_operations_as_corruption",
+  "harness_open_rejects_pinned_reducer_record_corruption",
+  "harness_open_rejects_provisioned_entry_payload_mismatch",
+  "harness_open_rejects_step_attempt_result_entry_type_mismatch",
+  "harness_tool_started_replays_final_authorized_arguments",
+]
 status = "planned"
-milestone = "M8"
+milestone = "M8.4"
 
 [[mapping]]
 source = "packages/agent/test/harness/resource-formatting.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["resource_formatting_matches_pinned_pi"]
+status = "semantic-parity"
+
+[[mapping]]
+source = "packages/agent/src/harness/messages.ts"
+rust = ["harness_bash_execution_message_formats_and_projects_per_pi"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/harness/session/context.test.ts"
@@ -1611,6 +1654,31 @@ status = "semantic-parity"
 [[mapping]]
 source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#7.2-7.6-and-10.10"
 rust = [
+  "harness_abandon_recovery_clears_restored_core_queues",
+  "harness_acknowledged_next_run_enqueue_is_captured_by_prompt",
+  "harness_abort_and_ingress_are_serialized_without_queue_after_abort",
+  "harness_completed_resume_becomes_idle_without_replaying_assistant",
+  "harness_configured_safe_tool_replays_after_started_crash",
+  "harness_failed_resume_closes_failed_operation_without_retry",
+  "harness_failed_terminal_recovery_clears_restored_core_queues",
+  "harness_incomplete_assistant_recovery_defers_later_queue_until_after_recovered_turn",
+  "harness_late_ingress_is_cancelled_before_operation_finish",
+  "harness_local_acknowledged_queue_survives_should_stop_for_continue",
+  "harness_local_acknowledged_next_run_enqueue_is_captured_by_prompt",
+  "harness_local_tool_started_persists_final_authorized_arguments",
+  "harness_multi_turn_recovery_reconstructs_aggregate_usage_and_cost",
+  "harness_open_rejects_pinned_reducer_record_corruption",
+  "harness_open_rejects_provisioned_entry_payload_mismatch",
+  "harness_open_rejects_step_attempt_result_entry_type_mismatch",
+  "harness_recovered_sequential_crash_does_not_mark_later_call_started",
+  "harness_recovered_sequential_tool_lifecycles_precede_next_start",
+  "harness_recovery_accepts_concurrent_durable_ingress_while_tools_execute",
+  "harness_recovery_continues_after_newest_consumed_input",
+  "harness_recovery_executes_unstarted_tool_batch_then_continues",
+  "harness_recovery_never_replays_started_unsafe_tool",
+  "harness_recovery_reapplies_complete_run_intent",
+  "harness_send_acknowledged_queue_survives_should_stop_for_continue",
+  "harness_tool_started_replays_final_authorized_arguments",
   "session_branch_scan_leaf_to_root",
   "session_entry_parent_must_exist",
   "session_fact_latest_value_wins",

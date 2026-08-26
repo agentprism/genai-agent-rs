@@ -6,14 +6,15 @@ use pi_agent_env::{Clock, LocalClock};
 use pi_agent_session::{
     AppendReceipt, CompactionReason, EntryBase, EntryId, LaneName, LocalSessionStorage,
     OperationIntent, OperationOutcome, OperationRecord, OperationRecordBase, OperationRecordId,
-    OperationStep, ProvisionedEntry, Sequence, SessionEntry, SessionError, SessionErrorKind,
-    SessionMutation, SessionState, SessionStorage, UsageAttribution,
+    OperationStep, ProvisionedEntry, QueueKind, Sequence, SessionEntry, SessionError,
+    SessionErrorKind, SessionMutation, SessionState, SessionStorage, ToolCallIdentity,
+    ToolReplayPolicy, UsageAttribution,
 };
 use pi_ai::{
     AssistantFinishReason, AssistantMessage, Cost, Message, PublicError, RunId, Timestamp, Usage,
     VersionedExtension,
 };
-use std::{rc::Rc, sync::Arc};
+use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 
 /// Cloneable serialized facade over one durable session lane.
 ///
@@ -146,6 +147,157 @@ impl Session {
         Ok(())
     }
 
+    /// Durably acknowledges one queue item before the harness reports success.
+    pub(crate) async fn enqueue(
+        &self,
+        run_id: Option<RunId>,
+        queue: QueueKind,
+        target: ProvisionedEntry,
+    ) -> Result<AppendReceipt, SessionError> {
+        let _guard = self.mutation_lock.lock().await;
+        let state = self.storage.load_state().await?;
+        validate_queue_owner(&state, &self.lane, run_id.as_ref(), queue)?;
+        let sequence = state.next_sequence().map_err(SessionError::from)?;
+        self.storage
+            .append(
+                state.sequence(),
+                vec![SessionMutation::Record {
+                    record: OperationRecord::QueueEnqueued {
+                        base: self.record_base(sequence),
+                        run_id,
+                        queue,
+                        target,
+                    },
+                }],
+            )
+            .await
+    }
+
+    /// Cancels one durably pending queue item.
+    pub(crate) async fn cancel_queued(
+        &self,
+        run_id: Option<RunId>,
+        entry_id: EntryId,
+    ) -> Result<AppendReceipt, SessionError> {
+        let _guard = self.mutation_lock.lock().await;
+        let state = self.storage.load_state().await?;
+        validate_pending_queue(&state, &self.lane, run_id.as_ref(), &entry_id)?;
+        let sequence = state.next_sequence().map_err(SessionError::from)?;
+        self.storage
+            .append(
+                state.sequence(),
+                vec![SessionMutation::Record {
+                    record: OperationRecord::QueueCancelled {
+                        base: self.record_base(sequence),
+                        run_id,
+                        entry_id,
+                    },
+                }],
+            )
+            .await
+    }
+
+    /// Records a durable abort request for the current operation.
+    pub(crate) async fn request_abort(&self, run_id: RunId) -> Result<AppendReceipt, SessionError> {
+        let _guard = self.mutation_lock.lock().await;
+        let state = self.storage.load_state().await?;
+        validate_open_operation(&state, &self.lane, &run_id)?;
+        if operation_has_abort(&state, &self.lane, &run_id) {
+            return Err(SessionError::new(
+                SessionErrorKind::Storage,
+                format!("operation {run_id} already has an abort request"),
+            ));
+        }
+        let sequence = state.next_sequence().map_err(SessionError::from)?;
+        self.storage
+            .append(
+                state.sequence(),
+                vec![SessionMutation::Record {
+                    record: OperationRecord::AbortRequested {
+                        base: self.record_base(sequence),
+                        run_id,
+                    },
+                }],
+            )
+            .await
+    }
+
+    /// Records a started tool invocation before executing its side effects.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "fields mirror the adopted durable tool-start record"
+    )]
+    pub(crate) async fn append_tool_started(
+        &self,
+        run_id: RunId,
+        assistant_entry_id: EntryId,
+        tool_index: u32,
+        call: ToolCallIdentity,
+        effective_args: serde_json::Value,
+        result_entry_id: EntryId,
+        replay: ToolReplayPolicy,
+    ) -> Result<AppendReceipt, SessionError> {
+        self.append_record(|base| OperationRecord::ToolStarted {
+            base,
+            run_id,
+            assistant_entry_id,
+            tool_index,
+            call,
+            effective_args,
+            result_entry_id,
+            replay,
+        })
+        .await
+    }
+
+    /// Atomically commits one non-assistant agent record and optional tool usage.
+    pub(crate) async fn commit_agent_record(
+        &self,
+        run_id: RunId,
+        entry_id: EntryId,
+        message: pi_agent_core::AgentRecord,
+        terminate: bool,
+    ) -> Result<AppendReceipt, SessionError> {
+        let _guard = self.mutation_lock.lock().await;
+        let state = self.storage.load_state().await?;
+        validate_open_operation(&state, &self.lane, &run_id)?;
+        let parent_id = lane_leaf(&state, &self.lane)?;
+        let mut next = state.next_sequence().map_err(SessionError::from)?;
+        let mut mutations = Vec::new();
+        if let pi_agent_core::AgentRecord::Llm(Message::ToolResult(result)) = &message
+            && let Some(usage) = result.usage.clone()
+        {
+            mutations.push(SessionMutation::Record {
+                record: OperationRecord::Usage {
+                    base: self.record_base(next),
+                    attribution: UsageAttribution::Tool {
+                        run_id,
+                        entry_id: entry_id.clone(),
+                        tool_call_id: result.tool_call_id.clone(),
+                    },
+                    usage,
+                    cost: None,
+                    adjustment: None,
+                },
+            });
+            next = next.checked_next().ok_or_else(sequence_overflow)?;
+        }
+        mutations.push(SessionMutation::Entry {
+            lane: Some(self.lane.clone()),
+            entry: SessionEntry::Message {
+                base: EntryBase {
+                    id: entry_id,
+                    sequence: next,
+                    parent_id,
+                    timestamp: self.clock.now(),
+                },
+                message,
+                terminate,
+            },
+        });
+        self.storage.append(state.sequence(), mutations).await
+    }
+
     /// Appends one durable model-backed step attempt.
     pub(crate) async fn append_step_attempt(
         &self,
@@ -193,6 +345,7 @@ impl Session {
     ) -> Result<AppendReceipt, SessionError> {
         let _guard = self.mutation_lock.lock().await;
         let state = self.storage.load_state().await?;
+        validate_open_operation(&state, &self.lane, &run_id)?;
         let parent_id = lane_leaf(&state, &self.lane)?;
         let mut next = state.next_sequence().map_err(SessionError::from)?;
         let usage = message.usage.clone();
@@ -251,6 +404,7 @@ impl Session {
     ) -> Result<AppendReceipt, SessionError> {
         let _guard = self.mutation_lock.lock().await;
         let state = self.storage.load_state().await?;
+        validate_open_operation(&state, &self.lane, &run_id)?;
         let parent_id = lane_leaf(&state, &self.lane)?;
         let mut next = state.next_sequence().map_err(SessionError::from)?;
         let mut mutations = Vec::new();
@@ -311,6 +465,7 @@ impl Session {
     ) -> Result<AppendReceipt, SessionError> {
         let _guard = self.mutation_lock.lock().await;
         let state = self.storage.load_state().await?;
+        validate_open_operation(&state, &self.lane, &run_id)?;
         if let Some(target) = &target_id
             && state.entry(target).is_none()
         {
@@ -391,13 +546,35 @@ impl Session {
         outcome: OperationOutcome,
         error: Option<PublicError>,
     ) -> Result<AppendReceipt, SessionError> {
-        self.append_record(|base| OperationRecord::Finished {
-            base,
-            run_id,
-            outcome,
-            error,
-        })
-        .await
+        let _guard = self.mutation_lock.lock().await;
+        let state = self.storage.load_state().await?;
+        validate_open_operation(&state, &self.lane, &run_id)?;
+        let pending = if outcome == OperationOutcome::Completed {
+            Vec::new()
+        } else {
+            pending_operation_queues(&state, &self.lane, &run_id)
+        };
+        let mut sequence = state.next_sequence().map_err(SessionError::from)?;
+        let mut mutations = Vec::with_capacity(pending.len().saturating_add(1));
+        for entry_id in pending {
+            mutations.push(SessionMutation::Record {
+                record: OperationRecord::QueueCancelled {
+                    base: self.record_base(sequence),
+                    run_id: Some(run_id.clone()),
+                    entry_id,
+                },
+            });
+            sequence = sequence.checked_next().ok_or_else(sequence_overflow)?;
+        }
+        mutations.push(SessionMutation::Record {
+            record: OperationRecord::Finished {
+                base: self.record_base(sequence),
+                run_id,
+                outcome,
+                error,
+            },
+        });
+        self.storage.append(state.sequence(), mutations).await
     }
 
     async fn append_record(
@@ -407,9 +584,11 @@ impl Session {
         let _guard = self.mutation_lock.lock().await;
         let state = self.storage.load_state().await?;
         let sequence = state.next_sequence().map_err(SessionError::from)?;
-        let mutation = SessionMutation::Record {
-            record: build(self.record_base(sequence)),
-        };
+        let record = build(self.record_base(sequence));
+        if let Some(run_id) = record.run_id() {
+            validate_open_operation(&state, &self.lane, &run_id)?;
+        }
+        let mutation = SessionMutation::Record { record };
         self.storage.append(state.sequence(), vec![mutation]).await
     }
 
@@ -550,6 +729,152 @@ impl LocalSession {
         Ok(())
     }
 
+    pub(crate) async fn enqueue(
+        &self,
+        run_id: Option<RunId>,
+        queue: QueueKind,
+        target: ProvisionedEntry,
+    ) -> Result<AppendReceipt, SessionError> {
+        let _guard = self.mutation_lock.lock().await;
+        let state = self.storage.load_state().await?;
+        validate_queue_owner(&state, &self.lane, run_id.as_ref(), queue)?;
+        let sequence = state.next_sequence().map_err(SessionError::from)?;
+        self.storage
+            .append(
+                state.sequence(),
+                vec![SessionMutation::Record {
+                    record: OperationRecord::QueueEnqueued {
+                        base: self.record_base(sequence),
+                        run_id,
+                        queue,
+                        target,
+                    },
+                }],
+            )
+            .await
+    }
+
+    pub(crate) async fn cancel_queued(
+        &self,
+        run_id: Option<RunId>,
+        entry_id: EntryId,
+    ) -> Result<AppendReceipt, SessionError> {
+        let _guard = self.mutation_lock.lock().await;
+        let state = self.storage.load_state().await?;
+        validate_pending_queue(&state, &self.lane, run_id.as_ref(), &entry_id)?;
+        let sequence = state.next_sequence().map_err(SessionError::from)?;
+        self.storage
+            .append(
+                state.sequence(),
+                vec![SessionMutation::Record {
+                    record: OperationRecord::QueueCancelled {
+                        base: self.record_base(sequence),
+                        run_id,
+                        entry_id,
+                    },
+                }],
+            )
+            .await
+    }
+
+    pub(crate) async fn request_abort(&self, run_id: RunId) -> Result<AppendReceipt, SessionError> {
+        let _guard = self.mutation_lock.lock().await;
+        let state = self.storage.load_state().await?;
+        validate_open_operation(&state, &self.lane, &run_id)?;
+        if operation_has_abort(&state, &self.lane, &run_id) {
+            return Err(SessionError::new(
+                SessionErrorKind::Storage,
+                format!("operation {run_id} already has an abort request"),
+            ));
+        }
+        let sequence = state.next_sequence().map_err(SessionError::from)?;
+        self.storage
+            .append(
+                state.sequence(),
+                vec![SessionMutation::Record {
+                    record: OperationRecord::AbortRequested {
+                        base: self.record_base(sequence),
+                        run_id,
+                    },
+                }],
+            )
+            .await
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "fields mirror the adopted durable tool-start record"
+    )]
+    pub(crate) async fn append_tool_started(
+        &self,
+        run_id: RunId,
+        assistant_entry_id: EntryId,
+        tool_index: u32,
+        call: ToolCallIdentity,
+        effective_args: serde_json::Value,
+        result_entry_id: EntryId,
+        replay: ToolReplayPolicy,
+    ) -> Result<AppendReceipt, SessionError> {
+        self.append_record(|base| OperationRecord::ToolStarted {
+            base,
+            run_id,
+            assistant_entry_id,
+            tool_index,
+            call,
+            effective_args,
+            result_entry_id,
+            replay,
+        })
+        .await
+    }
+
+    pub(crate) async fn commit_agent_record(
+        &self,
+        run_id: RunId,
+        entry_id: EntryId,
+        message: pi_agent_core::AgentRecord,
+        terminate: bool,
+    ) -> Result<AppendReceipt, SessionError> {
+        let _guard = self.mutation_lock.lock().await;
+        let state = self.storage.load_state().await?;
+        validate_open_operation(&state, &self.lane, &run_id)?;
+        let parent_id = lane_leaf(&state, &self.lane)?;
+        let mut next = state.next_sequence().map_err(SessionError::from)?;
+        let mut mutations = Vec::new();
+        if let pi_agent_core::AgentRecord::Llm(Message::ToolResult(result)) = &message
+            && let Some(usage) = result.usage.clone()
+        {
+            mutations.push(SessionMutation::Record {
+                record: OperationRecord::Usage {
+                    base: self.record_base(next),
+                    attribution: UsageAttribution::Tool {
+                        run_id,
+                        entry_id: entry_id.clone(),
+                        tool_call_id: result.tool_call_id.clone(),
+                    },
+                    usage,
+                    cost: None,
+                    adjustment: None,
+                },
+            });
+            next = next.checked_next().ok_or_else(sequence_overflow)?;
+        }
+        mutations.push(SessionMutation::Entry {
+            lane: Some(self.lane.clone()),
+            entry: SessionEntry::Message {
+                base: EntryBase {
+                    id: entry_id,
+                    sequence: next,
+                    parent_id,
+                    timestamp: self.clock.now(),
+                },
+                message,
+                terminate,
+            },
+        });
+        self.storage.append(state.sequence(), mutations).await
+    }
+
     pub(crate) async fn append_step_attempt(
         &self,
         run_id: RunId,
@@ -594,6 +919,7 @@ impl LocalSession {
     ) -> Result<AppendReceipt, SessionError> {
         let _guard = self.mutation_lock.lock().await;
         let state = self.storage.load_state().await?;
+        validate_open_operation(&state, &self.lane, &run_id)?;
         let parent_id = lane_leaf(&state, &self.lane)?;
         let mut next = state.next_sequence().map_err(SessionError::from)?;
         let usage_record = SessionMutation::Record {
@@ -648,6 +974,7 @@ impl LocalSession {
     ) -> Result<AppendReceipt, SessionError> {
         let _guard = self.mutation_lock.lock().await;
         let state = self.storage.load_state().await?;
+        validate_open_operation(&state, &self.lane, &run_id)?;
         let parent_id = lane_leaf(&state, &self.lane)?;
         let mut next = state.next_sequence().map_err(SessionError::from)?;
         let mut mutations = Vec::new();
@@ -706,6 +1033,7 @@ impl LocalSession {
     ) -> Result<AppendReceipt, SessionError> {
         let _guard = self.mutation_lock.lock().await;
         let state = self.storage.load_state().await?;
+        validate_open_operation(&state, &self.lane, &run_id)?;
         if let Some(target) = &target_id
             && state.entry(target).is_none()
         {
@@ -788,13 +1116,35 @@ impl LocalSession {
         outcome: OperationOutcome,
         error: Option<PublicError>,
     ) -> Result<AppendReceipt, SessionError> {
-        self.append_record(|base| OperationRecord::Finished {
-            base,
-            run_id,
-            outcome,
-            error,
-        })
-        .await
+        let _guard = self.mutation_lock.lock().await;
+        let state = self.storage.load_state().await?;
+        validate_open_operation(&state, &self.lane, &run_id)?;
+        let pending = if outcome == OperationOutcome::Completed {
+            Vec::new()
+        } else {
+            pending_operation_queues(&state, &self.lane, &run_id)
+        };
+        let mut sequence = state.next_sequence().map_err(SessionError::from)?;
+        let mut mutations = Vec::with_capacity(pending.len().saturating_add(1));
+        for entry_id in pending {
+            mutations.push(SessionMutation::Record {
+                record: OperationRecord::QueueCancelled {
+                    base: self.record_base(sequence),
+                    run_id: Some(run_id.clone()),
+                    entry_id,
+                },
+            });
+            sequence = sequence.checked_next().ok_or_else(sequence_overflow)?;
+        }
+        mutations.push(SessionMutation::Record {
+            record: OperationRecord::Finished {
+                base: self.record_base(sequence),
+                run_id,
+                outcome,
+                error,
+            },
+        });
+        self.storage.append(state.sequence(), mutations).await
     }
 
     async fn append_record(
@@ -804,13 +1154,12 @@ impl LocalSession {
         let _guard = self.mutation_lock.lock().await;
         let state = self.storage.load_state().await?;
         let sequence = state.next_sequence().map_err(SessionError::from)?;
+        let record = build(self.record_base(sequence));
+        if let Some(run_id) = record.run_id() {
+            validate_open_operation(&state, &self.lane, &run_id)?;
+        }
         self.storage
-            .append(
-                state.sequence(),
-                vec![SessionMutation::Record {
-                    record: build(self.record_base(sequence)),
-                }],
-            )
+            .append(state.sequence(), vec![SessionMutation::Record { record }])
             .await
     }
 
@@ -847,6 +1196,159 @@ fn ensure_lane_idle(state: &SessionState, lane: &LaneName) -> Result<(), Session
             SessionErrorKind::Storage,
             format!("lane {lane} already has an open operation"),
         ))
+    }
+}
+
+fn validate_open_operation(
+    state: &SessionState,
+    lane: &LaneName,
+    run_id: &RunId,
+) -> Result<(), SessionError> {
+    let open = state.open_operations(lane);
+    if open.len() == 1 && open[0].run_id().as_ref() == Some(run_id) {
+        Ok(())
+    } else {
+        Err(SessionError::new(
+            SessionErrorKind::Storage,
+            format!("lane {lane} does not have active operation {run_id}"),
+        ))
+    }
+}
+
+fn operation_has_abort(state: &SessionState, lane: &LaneName, run_id: &RunId) -> bool {
+    state.records_in_sequence_order().iter().any(|record| {
+        matches!(
+            record,
+            OperationRecord::AbortRequested {
+                run_id: candidate,
+                ..
+            } if record.lane() == lane && candidate == run_id
+        )
+    })
+}
+
+fn pending_operation_queues(state: &SessionState, lane: &LaneName, run_id: &RunId) -> Vec<EntryId> {
+    let mut pending = BTreeMap::<EntryId, Option<RunId>>::new();
+    for record in state.records_in_sequence_order() {
+        if record.lane() != lane {
+            continue;
+        }
+        match record {
+            OperationRecord::QueueEnqueued {
+                run_id: owner,
+                queue: QueueKind::Steer | QueueKind::FollowUp,
+                target,
+                ..
+            } if owner.as_ref() == Some(run_id) => {
+                pending.insert(target.id().clone(), owner.clone());
+            }
+            OperationRecord::QueueCancelled {
+                run_id: owner,
+                entry_id,
+                ..
+            } if owner.as_ref() == Some(run_id) => {
+                pending.remove(entry_id);
+            }
+            OperationRecord::Started { .. }
+            | OperationRecord::AbortRequested { .. }
+            | OperationRecord::Finished { .. }
+            | OperationRecord::StepAttempt { .. }
+            | OperationRecord::ToolStarted { .. }
+            | OperationRecord::QueueEnqueued { .. }
+            | OperationRecord::QueueCancelled { .. }
+            | OperationRecord::WriteDeferred { .. }
+            | OperationRecord::Usage { .. } => {}
+        }
+    }
+    pending
+        .into_keys()
+        .filter(|entry_id| state.entry(entry_id).is_none())
+        .collect()
+}
+
+fn validate_pending_queue(
+    state: &SessionState,
+    lane: &LaneName,
+    run_id: Option<&RunId>,
+    entry_id: &EntryId,
+) -> Result<(), SessionError> {
+    if let Some(run_id) = run_id {
+        validate_open_operation(state, lane, run_id)?;
+    }
+    let pending = state
+        .records_in_sequence_order()
+        .iter()
+        .rev()
+        .find_map(|record| {
+            if record.lane() != lane {
+                return None;
+            }
+            match record {
+                OperationRecord::QueueCancelled {
+                    run_id: owner,
+                    entry_id: candidate,
+                    ..
+                } if candidate == entry_id && owner.as_ref() == run_id => Some(false),
+                OperationRecord::QueueEnqueued {
+                    run_id: owner,
+                    target,
+                    ..
+                } if target.id() == entry_id && owner.as_ref() == run_id => Some(true),
+                OperationRecord::Started { .. }
+                | OperationRecord::AbortRequested { .. }
+                | OperationRecord::Finished { .. }
+                | OperationRecord::StepAttempt { .. }
+                | OperationRecord::ToolStarted { .. }
+                | OperationRecord::QueueEnqueued { .. }
+                | OperationRecord::QueueCancelled { .. }
+                | OperationRecord::WriteDeferred { .. }
+                | OperationRecord::Usage { .. } => None,
+            }
+        });
+    if pending == Some(true) && state.entry(entry_id).is_none() {
+        Ok(())
+    } else {
+        Err(SessionError::new(
+            SessionErrorKind::Storage,
+            format!("queue entry {entry_id} is not pending for the requested owner"),
+        ))
+    }
+}
+
+fn validate_queue_owner(
+    state: &SessionState,
+    lane: &LaneName,
+    run_id: Option<&RunId>,
+    queue: QueueKind,
+) -> Result<(), SessionError> {
+    if state.lane_leaf(lane).is_none() {
+        return Err(SessionError::new(
+            SessionErrorKind::InvalidLane,
+            format!("lane {lane} does not exist"),
+        ));
+    }
+    match queue {
+        QueueKind::NextRun if run_id.is_none() => Ok(()),
+        QueueKind::Steer | QueueKind::FollowUp => {
+            let Some(run_id) = run_id else {
+                return Err(SessionError::new(
+                    SessionErrorKind::Storage,
+                    format!("{queue:?} queue requires an active operation"),
+                ));
+            };
+            validate_open_operation(state, lane, run_id)?;
+            if operation_has_abort(state, lane, run_id) {
+                return Err(SessionError::new(
+                    SessionErrorKind::Storage,
+                    format!("operation {run_id} no longer accepts queued input after abort"),
+                ));
+            }
+            Ok(())
+        }
+        QueueKind::NextRun => Err(SessionError::new(
+            SessionErrorKind::Storage,
+            "next-run queue records cannot belong to an active operation",
+        )),
     }
 }
 

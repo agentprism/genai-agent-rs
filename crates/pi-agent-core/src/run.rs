@@ -15,7 +15,7 @@ use futures_util::StreamExt;
 use pi_ai::{
     ApiId, AssistantAssembler, AssistantEvent, AssistantFinish, AssistantFinishReason,
     AssistantMessage, AssistantMessageSnapshot, CancellationReason, CancellationToken,
-    ContentBlock, ContentBlockId, Context, LocalBoxStream, Message, MessageId, ModelRequest,
+    ContentBlock, ContentBlockId, Context, Cost, LocalBoxStream, Message, MessageId, ModelRequest,
     ModelRuntime, PublicError, ReplayCompleteness, ReplayEnvelope, ReplayScope, RequestStartError,
     RequestStartErrorKind, RunId, SendBoxStream, SimpleGenerationOptions, Timestamp, ToolCallId,
     ToolResultMessage, Usage, UsageSource, UserMessage, VersionedExtension,
@@ -69,6 +69,83 @@ pub struct AgentInput {
     /// Records committed and emitted in order before the first assistant call.
     pub records: Vec<AgentRecord>,
 }
+
+/// Reconstructed run-local facts that are not part of persistent agent state.
+///
+/// A durable harness supplies this value when it resumes an interrupted
+/// logical run. `cost_complete` distinguishes a run with no prior response
+/// cost from one whose prior response costs were incomplete or incompatible.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecoveredRunState {
+    /// Aggregate usage for all assistant responses already committed by the
+    /// logical run, or `None` when no assistant has yet committed.
+    pub usage: Option<Usage>,
+    /// Aggregate fixed-point cost when every committed assistant supplied a
+    /// compatible cost.
+    pub cost: Option<Cost>,
+    /// Whether aggregate cost remains complete.
+    pub cost_complete: bool,
+    /// Run-local system prompt captured in the durable operation intent.
+    pub system_prompt_override: Option<String>,
+    /// Records already committed by this logical run, matching Pi's
+    /// cumulative `newMessages` value.
+    pub new_messages: Vec<AgentRecord>,
+}
+
+impl Default for RecoveredRunState {
+    fn default() -> Self {
+        Self {
+            usage: None,
+            cost: None,
+            cost_complete: true,
+            system_prompt_override: None,
+            new_messages: Vec::new(),
+        }
+    }
+}
+
+/// Owned durable facts needed to resume the post-turn state machine after a
+/// process crash.
+///
+/// The assistant and every listed tool result must already be present in the
+/// agent transcript when this value is consumed. A recovery prelude may commit
+/// additional tool results before yielding this value. `new_messages` is the
+/// reconstructed equivalent of Pi's run-local `newMessages` accumulator.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecoveredCompletedTurn {
+    /// Assistant message whose turn was durably committed.
+    pub assistant: AssistantMessage,
+    /// Complete source-ordered tool results for that assistant.
+    pub tool_results: Vec<ToolResultMessage>,
+    /// Whether every finalized result in a nonempty tool batch terminates.
+    pub terminate_batch: bool,
+    /// Records committed by the interrupted loop invocation.
+    pub new_messages: Vec<AgentRecord>,
+    /// Aggregate accounting and run-local context reconstructed for the whole
+    /// interrupted logical run.
+    pub run_state: RecoveredRunState,
+}
+
+/// One item in a stream-driven completed-turn recovery prelude.
+///
+/// Harnesses use `Agent` events for recovered tool lifecycles and finish with
+/// one reconstructed completed turn. `Failed` closes the active recovery run
+/// with a committed failed assistant when recovery itself cannot continue.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CompletedTurnRecoveryEvent {
+    /// Recovered tool or tool-result lifecycle event.
+    Agent(Box<AgentEvent>),
+    /// Authoritative reconstructed completed turn.
+    Completed(Box<RecoveredCompletedTurn>),
+    /// Sanitized recovery failure.
+    Failed(PublicError),
+}
+
+/// Send-capable stream of recovery prelude items.
+pub type CompletedTurnRecoveryStream<'a> = SendBoxStream<'a, CompletedTurnRecoveryEvent>;
+
+/// Local-executor stream of recovery prelude items.
+pub type LocalCompletedTurnRecoveryStream<'a> = LocalBoxStream<'a, CompletedTurnRecoveryEvent>;
 
 impl AgentInput {
     /// Creates a prompt input from an ordered record batch.
@@ -278,6 +355,22 @@ impl crate::Agent {
         Ok(())
     }
 
+    /// Returns the configured scheduler capability for durable crash recovery.
+    ///
+    /// A harness uses this clone only to finish a tool batch whose assistant
+    /// message was committed before the process stopped. The scheduler's
+    /// recovery seam bypasses preflight for durably started calls while still
+    /// applying post-execution finalization; unstarted calls retain ordinary
+    /// preparation, validation, and authorization.
+    pub fn tool_scheduler(&self) -> ToolScheduler {
+        self.tool_scheduler.clone()
+    }
+
+    /// Returns the configured batch mode used by ordinary and recovered tools.
+    pub fn tool_execution_mode(&self) -> ToolExecutionMode {
+        self.tool_execution
+    }
+
     /// Starts one prompt run. The returned stream borrows the agent and applies
     /// backpressure at every emitted event.
     pub fn run<'a>(
@@ -342,7 +435,64 @@ impl crate::Agent {
             return Err(AgentError::RetryRequiresFailedAssistant);
         }
         let retry_records = self.state.transcript[..self.state.transcript.len() - 1].to_vec();
-        Ok(self.start_run_with_context(Vec::new(), true, cancellation, Some(retry_records)))
+        Ok(self.start_run_with_context(
+            Vec::new(),
+            true,
+            cancellation,
+            Some(retry_records),
+            None,
+            None,
+        ))
+    }
+
+    /// Resumes an interrupted assistant boundary without polling queues before
+    /// the recovered turn. The queue boundary remains after the turn and its
+    /// policies, so later durable ingress cannot overtake the retried request.
+    pub fn resume_interrupted_turn<'a>(
+        &'a mut self,
+        records: Vec<AgentRecord>,
+        poll_initial_steering: bool,
+        run_state: RecoveredRunState,
+        cancellation: CancellationToken,
+    ) -> SendBoxStream<'a, AgentEvent> {
+        self.start_run_with_context(
+            records,
+            poll_initial_steering,
+            cancellation,
+            None,
+            None,
+            Some(run_state),
+        )
+    }
+
+    /// Resumes the mandatory post-turn phases for one already committed turn.
+    ///
+    /// This is the narrow durable-recovery seam used when no tool work remains
+    /// to be reconstructed. It emits `RunStarted`, then `TurnFinished`, runs
+    /// both turn-policy callbacks, polls queues at their normal boundaries,
+    /// and either finishes or proceeds to the next model turn.
+    pub fn resume_completed_turn<'a>(
+        &'a mut self,
+        turn: RecoveredCompletedTurn,
+        cancellation: CancellationToken,
+    ) -> SendBoxStream<'a, AgentEvent> {
+        self.resume_completed_turn_stream(
+            Box::pin(futures_util::stream::iter([
+                CompletedTurnRecoveryEvent::Completed(Box::new(turn)),
+            ])),
+            cancellation,
+        )
+    }
+
+    /// Resumes an already committed turn after a stream-driven recovery
+    /// prelude, keeping queue ingress and cancellation active while recovered
+    /// tools execute.
+    pub fn resume_completed_turn_stream<'a>(
+        &'a mut self,
+        recovery: CompletedTurnRecoveryStream<'a>,
+        cancellation: CancellationToken,
+    ) -> SendBoxStream<'a, AgentEvent> {
+        self.start_run_with_context(Vec::new(), false, cancellation, None, Some(recovery), None)
     }
 
     /// Clears transcript and all run scratch while retaining configured model,
@@ -383,7 +533,14 @@ impl crate::Agent {
         poll_initial_steering: bool,
         cancellation: CancellationToken,
     ) -> SendBoxStream<'a, AgentEvent> {
-        self.start_run_with_context(records, poll_initial_steering, cancellation, None)
+        self.start_run_with_context(
+            records,
+            poll_initial_steering,
+            cancellation,
+            None,
+            None,
+            None,
+        )
     }
 
     fn start_run_with_context<'a>(
@@ -392,6 +549,8 @@ impl crate::Agent {
         poll_initial_steering: bool,
         cancellation: CancellationToken,
         initial_context_records: Option<Vec<AgentRecord>>,
+        recovery: Option<CompletedTurnRecoveryStream<'a>>,
+        recovered_run_state: Option<RecoveredRunState>,
     ) -> SendBoxStream<'a, AgentEvent> {
         self.require_idle()
             .expect("a borrowed Agent cannot safely start a second active run");
@@ -415,7 +574,9 @@ impl crate::Agent {
             execute_send_tool_batch,
             records,
             poll_initial_steering,
-            initial_context_records
+            initial_context_records,
+            recovery,
+            recovered_run_state
         ))
     }
 
@@ -584,6 +745,19 @@ impl LocalAgent {
         Ok(())
     }
 
+    /// Returns the configured local scheduler for durable crash recovery.
+    ///
+    /// Its recovery seam has the same already-prepared versus unstarted-call
+    /// split as the Send scheduler.
+    pub fn tool_scheduler(&self) -> LocalToolScheduler {
+        self.tool_scheduler.clone()
+    }
+
+    /// Returns the configured local batch mode used during recovery.
+    pub fn tool_execution_mode(&self) -> ToolExecutionMode {
+        self.tool_execution
+    }
+
     /// Replaces the local context policy while idle.
     pub fn set_context_policy(
         &mut self,
@@ -672,7 +846,55 @@ impl LocalAgent {
             return Err(AgentError::RetryRequiresFailedAssistant);
         }
         let retry_records = self.state.transcript[..self.state.transcript.len() - 1].to_vec();
-        Ok(self.start_run_with_context(Vec::new(), true, cancellation, Some(retry_records)))
+        Ok(self.start_run_with_context(
+            Vec::new(),
+            true,
+            cancellation,
+            Some(retry_records),
+            None,
+            None,
+        ))
+    }
+
+    /// Local counterpart of [`crate::Agent::resume_interrupted_turn`].
+    pub fn resume_interrupted_turn<'a>(
+        &'a mut self,
+        records: Vec<AgentRecord>,
+        poll_initial_steering: bool,
+        run_state: RecoveredRunState,
+        cancellation: CancellationToken,
+    ) -> LocalBoxStream<'a, AgentEvent> {
+        self.start_run_with_context(
+            records,
+            poll_initial_steering,
+            cancellation,
+            None,
+            None,
+            Some(run_state),
+        )
+    }
+
+    /// Local counterpart of [`crate::Agent::resume_completed_turn`].
+    pub fn resume_completed_turn<'a>(
+        &'a mut self,
+        turn: RecoveredCompletedTurn,
+        cancellation: CancellationToken,
+    ) -> LocalBoxStream<'a, AgentEvent> {
+        self.resume_completed_turn_stream(
+            Box::pin(futures_util::stream::iter([
+                CompletedTurnRecoveryEvent::Completed(Box::new(turn)),
+            ])),
+            cancellation,
+        )
+    }
+
+    /// Local counterpart of [`crate::Agent::resume_completed_turn_stream`].
+    pub fn resume_completed_turn_stream<'a>(
+        &'a mut self,
+        recovery: LocalCompletedTurnRecoveryStream<'a>,
+        cancellation: CancellationToken,
+    ) -> LocalBoxStream<'a, AgentEvent> {
+        self.start_run_with_context(Vec::new(), false, cancellation, None, Some(recovery), None)
     }
 
     /// Clears local transcript and runtime scratch with Pi retention semantics.
@@ -711,7 +933,14 @@ impl LocalAgent {
         poll_initial_steering: bool,
         cancellation: CancellationToken,
     ) -> LocalBoxStream<'a, AgentEvent> {
-        self.start_run_with_context(records, poll_initial_steering, cancellation, None)
+        self.start_run_with_context(
+            records,
+            poll_initial_steering,
+            cancellation,
+            None,
+            None,
+            None,
+        )
     }
 
     fn start_run_with_context<'a>(
@@ -720,6 +949,8 @@ impl LocalAgent {
         poll_initial_steering: bool,
         cancellation: CancellationToken,
         initial_context_records: Option<Vec<AgentRecord>>,
+        recovery: Option<LocalCompletedTurnRecoveryStream<'a>>,
+        recovered_run_state: Option<RecoveredRunState>,
     ) -> LocalBoxStream<'a, AgentEvent> {
         self.require_idle()
             .expect("a borrowed LocalAgent cannot safely start a second active run");
@@ -743,7 +974,9 @@ impl LocalAgent {
             execute_local_tool_batch,
             records,
             poll_initial_steering,
-            initial_context_records
+            initial_context_records,
+            recovery,
+            recovered_run_state
         ))
     }
 
@@ -839,7 +1072,9 @@ macro_rules! agent_run_stream {
         $execute_tools:ident,
         $records:expr,
         $poll_initial_steering:expr,
-        $initial_context_records:expr
+        $initial_context_records:expr,
+        $recovery:expr,
+        $recovered_run_state:expr
     ) => {
         async_stream::stream! {
             let mut $guard = $guard;
@@ -849,21 +1084,406 @@ macro_rules! agent_run_stream {
             if let Some(initial_records) = $initial_context_records {
                 current_context.records = initial_records;
             }
+            let recovered_run_state: Option<RecoveredRunState> = $recovered_run_state;
+            if let Some(system_prompt) = recovered_run_state
+                .as_ref()
+                .and_then(|state| state.system_prompt_override.clone())
+            {
+                current_context.system_prompt = system_prompt;
+            }
             // Pi's `newMessages` is cumulative for one loop invocation and is
             // not the same value as the replaceable current context. Prompt
             // records enter it; pre-existing continuation/retry history does
             // not.
-            let mut new_messages = Vec::<AgentRecord>::new();
+            let mut new_messages = recovered_run_state
+                .as_ref()
+                .map(|state| state.new_messages.clone())
+                .unwrap_or_default();
             let mut current_model = $guard.agent.state.model.clone();
             let mut current_reasoning = $guard.agent.state.reasoning;
             let mut turn = 0_u32;
-            let mut run_usage: Option<Usage> = None;
-            let mut run_cost: Option<pi_ai::Cost> = None;
-            let mut run_cost_complete = true;
+            let mut run_usage = recovered_run_state
+                .as_ref()
+                .and_then(|state| state.usage.clone());
+            let mut run_cost = recovered_run_state
+                .as_ref()
+                .and_then(|state| state.cost.clone());
+            let mut run_cost_complete = recovered_run_state
+                .as_ref()
+                .is_none_or(|state| state.cost_complete);
 
             $guard.agent.phase = Some(AgentPhase::StartRun);
             $guard.agent.bump_event_sequence();
             yield AgentEvent::RunStarted { run_id: run_id.clone() };
+
+            if let Some(mut recovery) = $recovery {
+                let mut recovered_turn = None;
+                let mut recovery_failure = None;
+                while let Some(item) = recovery.next().await {
+                    match item {
+                        CompletedTurnRecoveryEvent::Completed(turn) => {
+                            recovered_turn = Some(turn);
+                            break;
+                        }
+                        CompletedTurnRecoveryEvent::Failed(error) => {
+                            recovery_failure = Some(error);
+                            break;
+                        }
+                        CompletedTurnRecoveryEvent::Agent(event) => {
+                            let valid = match event.as_ref() {
+                                AgentEvent::ToolExecutionStarted { call } => {
+                                    $guard.agent.phase = Some(AgentPhase::PrepareToolBatch);
+                                    add_pending_call(
+                                        &mut $guard.agent.pending_tool_calls,
+                                        call.id.clone(),
+                                    );
+                                    true
+                                }
+                                AgentEvent::ToolExecutionUpdated { .. } => {
+                                    $guard.agent.phase = Some(AgentPhase::ExecuteToolBatch);
+                                    true
+                                }
+                                AgentEvent::ToolExecutionFinished { call_id, .. } => {
+                                    $guard.agent.phase = Some(AgentPhase::ExecuteToolBatch);
+                                    remove_pending_call(
+                                        &mut $guard.agent.pending_tool_calls,
+                                        call_id,
+                                    );
+                                    true
+                                }
+                                AgentEvent::MessageStarted {
+                                    role: MessageRole::ToolResult,
+                                    ..
+                                } => {
+                                    $guard.agent.phase = Some(AgentPhase::CommitToolResults);
+                                    true
+                                }
+                                AgentEvent::MessageCommitted {
+                                    message: AgentRecord::Llm(Message::ToolResult(result)),
+                                } => {
+                                    $guard.agent.phase = Some(AgentPhase::CommitToolResults);
+                                    let duplicate = $guard.agent.state.transcript.iter().any(
+                                        |record| record.message_id() == Some(&result.id),
+                                    );
+                                    if duplicate {
+                                        false
+                                    } else {
+                                        let record = AgentRecord::Llm(Message::ToolResult(
+                                            result.clone(),
+                                        ));
+                                        $guard.agent.state.transcript.push(record.clone());
+                                        current_context.records.push(record.clone());
+                                        new_messages.push(record);
+                                        true
+                                    }
+                                }
+                                AgentEvent::RunStarted { .. }
+                                | AgentEvent::TurnStarted { .. }
+                                | AgentEvent::ContextPrepared { .. }
+                                | AgentEvent::MessageStarted { .. }
+                                | AgentEvent::AssistantUpdate { .. }
+                                | AgentEvent::MessageCommitted { .. }
+                                | AgentEvent::TurnFinished { .. }
+                                | AgentEvent::RunFinished { .. } => false,
+                            };
+                            if !valid {
+                                recovery_failure = Some(public_policy_error(
+                                    "completed_turn_recovery",
+                                    "recovery prelude emitted an invalid or duplicate lifecycle event"
+                                        .into(),
+                                ));
+                                break;
+                            }
+                            $guard.agent.bump_event_sequence();
+                            yield *event;
+                        }
+                    }
+                }
+
+                if recovered_turn.is_none() && recovery_failure.is_none() {
+                    recovery_failure = Some(public_policy_error(
+                        "completed_turn_recovery",
+                        "recovery prelude ended without a completed turn".into(),
+                    ));
+                }
+
+                if let Some(error) = recovery_failure {
+                    let failed = if $guard.cancellation.is_cancelled() {
+                        empty_cancelled_message(
+                            $guard.agent.allocate_message_id("assistant"),
+                            &current_model,
+                            CancellationReason::new(error.message),
+                        )
+                    } else {
+                        empty_failed_message(
+                            $guard.agent.allocate_message_id("assistant"),
+                            &current_model,
+                            error,
+                        )
+                    };
+                    $guard.agent.last_error = failed.finish.error.clone();
+                    $guard.agent.bump_event_sequence();
+                    yield AgentEvent::MessageStarted {
+                        message_id: failed.id.clone(),
+                        role: MessageRole::Assistant,
+                    };
+                    let record = AgentRecord::Llm(Message::Assistant(failed.clone()));
+                    $guard.agent.state.transcript.push(record.clone());
+                    current_context.records.push(record.clone());
+                    new_messages.push(record.clone());
+                    $guard.agent.bump_event_sequence();
+                    yield AgentEvent::MessageCommitted { message: record };
+                    let outcome = turn_outcome(&failed, Vec::new());
+                    $guard.agent.phase = Some(AgentPhase::FinishTurn);
+                    $guard.agent.bump_event_sequence();
+                    yield AgentEvent::TurnFinished { outcome };
+                    $guard.agent.phase = Some(AgentPhase::FinishRun);
+                    $guard.finished = true;
+                    $guard.agent.bump_event_sequence();
+                    yield AgentEvent::RunFinished {
+                        outcome: terminal_run_outcome(&failed),
+                    };
+                    return;
+                }
+
+                let recovered = *recovered_turn
+                    .expect("completed turn was checked above");
+                if let Err(message) = validate_recovered_completed_turn(
+                    &$guard.agent.state.transcript,
+                    &recovered,
+                ) {
+                    let failed = empty_failed_message(
+                        $guard.agent.allocate_message_id("assistant"),
+                        &current_model,
+                        public_policy_error("completed_turn_recovery", message),
+                    );
+                    $guard.agent.last_error = failed.finish.error.clone();
+                    $guard.agent.bump_event_sequence();
+                    yield AgentEvent::MessageStarted {
+                        message_id: failed.id.clone(),
+                        role: MessageRole::Assistant,
+                    };
+                    let record = AgentRecord::Llm(Message::Assistant(failed.clone()));
+                    $guard.agent.state.transcript.push(record.clone());
+                    current_context.records.push(record.clone());
+                    new_messages.push(record.clone());
+                    $guard.agent.bump_event_sequence();
+                    yield AgentEvent::MessageCommitted { message: record };
+                    let outcome = turn_outcome(&failed, Vec::new());
+                    $guard.agent.phase = Some(AgentPhase::FinishTurn);
+                    $guard.agent.bump_event_sequence();
+                    yield AgentEvent::TurnFinished { outcome };
+                    $guard.agent.phase = Some(AgentPhase::FinishRun);
+                    $guard.finished = true;
+                    $guard.agent.bump_event_sequence();
+                    yield AgentEvent::RunFinished {
+                        outcome: terminal_run_outcome(&failed),
+                    };
+                    return;
+                }
+
+                let assistant = recovered.assistant;
+                let tool_messages = recovered.tool_results;
+                let terminate_batch = recovered.terminate_batch;
+                new_messages = recovered.new_messages;
+                if let Some(system_prompt) = recovered.run_state.system_prompt_override {
+                    current_context.system_prompt = system_prompt;
+                }
+                run_usage = recovered.run_state.usage;
+                run_cost = recovered.run_state.cost;
+                run_cost_complete = recovered.run_state.cost_complete;
+                $guard.agent.pending_tool_calls = Arc::from([]);
+
+                let outcome = turn_outcome(
+                    &assistant,
+                    tool_messages
+                        .iter()
+                        .map(|message| message.id.clone())
+                        .collect(),
+                );
+                $guard.agent.phase = Some(AgentPhase::FinishTurn);
+                $guard.agent.bump_event_sequence();
+                yield AgentEvent::TurnFinished {
+                    outcome: outcome.clone(),
+                };
+
+                if matches!(
+                    assistant.finish.reason,
+                    AssistantFinishReason::Error | AssistantFinishReason::Aborted
+                ) {
+                    $guard.agent.phase = Some(AgentPhase::FinishRun);
+                    $guard.finished = true;
+                    $guard.agent.bump_event_sequence();
+                    yield AgentEvent::RunFinished {
+                        outcome: terminal_run_outcome(&assistant),
+                    };
+                    return;
+                }
+
+                $guard.agent.phase = Some(AgentPhase::PrepareNextTurn);
+                let next = $guard.agent.turn_policy.prepare_next_turn(
+                    CompletedTurn {
+                        outcome: &outcome,
+                        assistant: &assistant,
+                        tool_results: &tool_messages,
+                        context: &current_context,
+                        new_messages: &new_messages,
+                    },
+                    $guard.cancellation.clone(),
+                ).await;
+                let next = match next {
+                    Ok(next) => next,
+                    Err(error) => {
+                        let failed = if $guard.cancellation.is_cancelled() {
+                            empty_cancelled_message(
+                                $guard.agent.allocate_message_id("assistant"),
+                                &current_model,
+                                CancellationReason::new(error.to_string()),
+                            )
+                        } else {
+                            empty_failed_message(
+                                $guard.agent.allocate_message_id("assistant"),
+                                &current_model,
+                                public_policy_error("turn_policy", error.to_string()),
+                            )
+                        };
+                        let record = AgentRecord::Llm(Message::Assistant(failed.clone()));
+                        $guard.agent.state.transcript.push(record.clone());
+                        current_context.records.push(record.clone());
+                        new_messages.push(record.clone());
+                        $guard.agent.last_error = failed.finish.error.clone();
+                        $guard.agent.bump_event_sequence();
+                        yield AgentEvent::MessageStarted {
+                            message_id: failed.id.clone(),
+                            role: MessageRole::Assistant,
+                        };
+                        $guard.agent.bump_event_sequence();
+                        yield AgentEvent::MessageCommitted { message: record };
+                        let failed_outcome = turn_outcome(&failed, Vec::new());
+                        $guard.agent.bump_event_sequence();
+                        yield AgentEvent::TurnFinished { outcome: failed_outcome };
+                        $guard.agent.phase = Some(AgentPhase::FinishRun);
+                        $guard.finished = true;
+                        $guard.agent.bump_event_sequence();
+                        yield AgentEvent::RunFinished {
+                            outcome: terminal_run_outcome(&failed),
+                        };
+                        return;
+                    }
+                };
+                apply_next_turn(
+                    next,
+                    &mut current_context,
+                    &mut current_model,
+                    &mut current_reasoning,
+                );
+
+                $guard.agent.phase = Some(AgentPhase::ShouldStopAfterTurn);
+                let should_stop = $guard.agent.turn_policy.should_stop(
+                    CompletedTurn {
+                        outcome: &outcome,
+                        assistant: &assistant,
+                        tool_results: &tool_messages,
+                        context: &current_context,
+                        new_messages: &new_messages,
+                    },
+                    $guard.cancellation.clone(),
+                ).await;
+                let should_stop = match should_stop {
+                    Ok(should_stop) => should_stop,
+                    Err(error) => {
+                        let failed = if $guard.cancellation.is_cancelled() {
+                            empty_cancelled_message(
+                                $guard.agent.allocate_message_id("assistant"),
+                                &current_model,
+                                CancellationReason::new(error.to_string()),
+                            )
+                        } else {
+                            empty_failed_message(
+                                $guard.agent.allocate_message_id("assistant"),
+                                &current_model,
+                                public_policy_error("turn_policy", error.to_string()),
+                            )
+                        };
+                        let record = AgentRecord::Llm(Message::Assistant(failed.clone()));
+                        $guard.agent.state.transcript.push(record.clone());
+                        current_context.records.push(record.clone());
+                        new_messages.push(record.clone());
+                        $guard.agent.last_error = failed.finish.error.clone();
+                        $guard.agent.bump_event_sequence();
+                        yield AgentEvent::MessageStarted {
+                            message_id: failed.id.clone(),
+                            role: MessageRole::Assistant,
+                        };
+                        $guard.agent.bump_event_sequence();
+                        yield AgentEvent::MessageCommitted { message: record };
+                        let failed_outcome = turn_outcome(&failed, Vec::new());
+                        $guard.agent.phase = Some(AgentPhase::FinishTurn);
+                        $guard.agent.bump_event_sequence();
+                        yield AgentEvent::TurnFinished { outcome: failed_outcome };
+                        $guard.agent.phase = Some(AgentPhase::FinishRun);
+                        $guard.finished = true;
+                        $guard.agent.bump_event_sequence();
+                        yield AgentEvent::RunFinished {
+                            outcome: terminal_run_outcome(&failed),
+                        };
+                        return;
+                    }
+                };
+
+                let has_tool_calls = assistant.content.iter().any(|block| {
+                    matches!(block, ContentBlock::ToolCall { .. })
+                });
+                let cancelled_during_tools =
+                    $guard.cancellation.is_cancelled() && has_tool_calls;
+                if should_stop && !cancelled_during_tools {
+                    $guard.agent.phase = Some(AgentPhase::FinishRun);
+                    $guard.finished = true;
+                    $guard.agent.bump_event_sequence();
+                    yield AgentEvent::RunFinished {
+                        outcome: RunOutcome::Completed {
+                            final_message_id: assistant.id.clone(),
+                            usage: run_usage.clone().unwrap_or_else(|| {
+                                Usage::zero(UsageSource::Unknown)
+                            }),
+                            cost: run_cost_complete.then(|| run_cost.clone()).flatten(),
+                        },
+                    };
+                    return;
+                }
+
+                $guard.agent.phase = Some(AgentPhase::PollSteering);
+                pending_records = commands_to_records(
+                    $guard.agent.queue_rx.drain(QueueKind::Steering),
+                );
+                if pending_records.is_empty()
+                    && !cancelled_during_tools
+                    && (!has_tool_calls || terminate_batch)
+                {
+                    $guard.agent.phase = Some(AgentPhase::WouldStop);
+                    $guard.agent.phase = Some(AgentPhase::PollFollowUp);
+                    pending_records = commands_to_records(
+                        $guard.agent.queue_rx.drain(QueueKind::FollowUp),
+                    );
+                    if pending_records.is_empty() {
+                        $guard.agent.phase = Some(AgentPhase::FinishRun);
+                        $guard.finished = true;
+                        $guard.agent.bump_event_sequence();
+                        yield AgentEvent::RunFinished {
+                            outcome: RunOutcome::Completed {
+                                final_message_id: assistant.id.clone(),
+                                usage: run_usage.clone().unwrap_or_else(|| {
+                                    Usage::zero(UsageSource::Unknown)
+                                }),
+                                cost: run_cost_complete.then(|| run_cost.clone()).flatten(),
+                            },
+                        };
+                        return;
+                    }
+                }
+
+                turn = 1;
+            }
 
             loop {
                 $guard.agent.bump_event_sequence();
@@ -1942,6 +2562,75 @@ fn turn_outcome(
         usage: assistant.usage.clone(),
         cost: assistant.cost.clone(),
     }
+}
+
+fn validate_recovered_completed_turn(
+    transcript: &[AgentRecord],
+    recovered: &RecoveredCompletedTurn,
+) -> Result<(), String> {
+    let assistant_record = AgentRecord::Llm(Message::Assistant(recovered.assistant.clone()));
+    if !transcript.contains(&assistant_record) {
+        return Err(format!(
+            "recovered assistant {} is not committed in the agent transcript",
+            recovered.assistant.id
+        ));
+    }
+
+    let calls = recovered
+        .assistant
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::ToolCall { call, .. } => Some((&call.id, call.name.as_str())),
+            ContentBlock::Text { .. }
+            | ContentBlock::Image { .. }
+            | ContentBlock::Thinking { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    let terminal_failure = matches!(
+        recovered.assistant.finish.reason,
+        AssistantFinishReason::Error | AssistantFinishReason::Aborted
+    );
+    if !terminal_failure && calls.len() != recovered.tool_results.len() {
+        return Err(format!(
+            "recovered assistant {} has {} tool calls but {} committed results",
+            recovered.assistant.id,
+            calls.len(),
+            recovered.tool_results.len()
+        ));
+    }
+    if terminal_failure && !recovered.tool_results.is_empty() {
+        return Err(format!(
+            "failed recovered assistant {} unexpectedly carries tool results",
+            recovered.assistant.id
+        ));
+    }
+    for ((call_id, call_name), result) in calls.iter().zip(&recovered.tool_results) {
+        if result.tool_call_id != **call_id || result.tool_name != *call_name {
+            return Err(format!(
+                "recovered tool result {} does not match assistant source order",
+                result.id
+            ));
+        }
+        let result_record = AgentRecord::Llm(Message::ToolResult(result.clone()));
+        if !transcript.contains(&result_record) {
+            return Err(format!(
+                "recovered tool result {} is not committed in the agent transcript",
+                result.id
+            ));
+        }
+    }
+    if let Some(record) = recovered
+        .new_messages
+        .iter()
+        .find(|record| !transcript.contains(record))
+    {
+        return Err(format!(
+            "recovered new-message record {:?} is not committed in the agent transcript",
+            record.message_id()
+        ));
+    }
+    Ok(())
 }
 
 fn terminal_run_outcome(message: &AssistantMessage) -> RunOutcome {

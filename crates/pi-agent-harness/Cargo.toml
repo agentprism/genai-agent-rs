@@ -9,6 +9,7 @@ description = "pi-agent-harness: compaction and branch summarization, skills and
 publish = false
 
 [dependencies]
+async-stream = "0.3.6"
 bytes = "1.10.1"
 dashmap = "6.1.0"
 futures-util = { version = "0.3.31", default-features = false, features = ["alloc", "async-await", "std"] }

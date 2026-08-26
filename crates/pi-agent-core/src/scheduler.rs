@@ -16,6 +16,7 @@ use pi_ai::{
 use serde_json::{Value, value::RawValue};
 use std::{
     cell::RefCell,
+    collections::BTreeMap,
     fmt,
     rc::Rc,
     sync::{Arc, Mutex, MutexGuard},
@@ -182,7 +183,31 @@ impl ToolScheduler {
         tools: &'a ToolRegistry,
         request: ToolBatchRequest<'a, ToolRegistry>,
     ) -> SendBoxStream<'a, ToolBatchStreamEvent> {
-        send_batch_stream(self.policy.clone(), tools, request)
+        send_batch_stream(self.policy.clone(), tools, request, None)
+    }
+
+    /// Executes a crash-recovery batch with a per-call durable argument seam.
+    ///
+    /// An entry in `prepared_arguments` is the already-prepared, validated,
+    /// and authorized invocation intent recorded before the original process
+    /// began executing that call. Such a call resolves its current executable
+    /// tool but deliberately skips argument preparation, schema validation,
+    /// and authorization. Calls absent from the map use ordinary preflight so
+    /// a harness can recover a mixed batch containing both started and
+    /// unstarted calls. Post-execution finalization still runs because it was
+    /// not reached before a crash at the durable start boundary.
+    pub fn execute_recovery_batch_events<'a>(
+        &'a self,
+        tools: &'a ToolRegistry,
+        request: ToolBatchRequest<'a, ToolRegistry>,
+        prepared_arguments: &'a BTreeMap<ToolCallId, Value>,
+    ) -> SendBoxStream<'a, ToolBatchStreamEvent> {
+        send_batch_stream(
+            self.policy.clone(),
+            tools,
+            request,
+            Some(prepared_arguments),
+        )
     }
 }
 
@@ -236,7 +261,23 @@ impl LocalToolScheduler {
         tools: &'a LocalToolRegistry,
         request: ToolBatchRequest<'a, LocalToolRegistry>,
     ) -> LocalBoxStream<'a, ToolBatchStreamEvent> {
-        local_batch_stream(self.policy.clone(), tools, request)
+        local_batch_stream(self.policy.clone(), tools, request, None)
+    }
+
+    /// Local-executor counterpart of
+    /// [`ToolScheduler::execute_recovery_batch_events`].
+    pub fn execute_recovery_batch_events<'a>(
+        &'a self,
+        tools: &'a LocalToolRegistry,
+        request: ToolBatchRequest<'a, LocalToolRegistry>,
+        prepared_arguments: &'a BTreeMap<ToolCallId, Value>,
+    ) -> LocalBoxStream<'a, ToolBatchStreamEvent> {
+        local_batch_stream(
+            self.policy.clone(),
+            tools,
+            request,
+            Some(prepared_arguments),
+        )
     }
 }
 
@@ -324,6 +365,7 @@ fn send_batch_stream<'a>(
     policy: Arc<dyn ToolPolicy>,
     tools: &'a ToolRegistry,
     request: ToolBatchRequest<'a, ToolRegistry>,
+    prepared_arguments: Option<&'a BTreeMap<ToolCallId, Value>>,
 ) -> SendBoxStream<'a, ToolBatchStreamEvent> {
     Box::pin(async_stream::stream! {
         let truncated = request.assistant.finish.reason == AssistantFinishReason::Length;
@@ -366,6 +408,9 @@ fn send_batch_stream<'a>(
                         source_index,
                         call: call.clone(),
                     };
+                    let recovered_arguments = prepared_arguments
+                        .and_then(|arguments| arguments.get(&call.id))
+                        .cloned();
                     match preflight_send(
                         tools,
                         policy.clone(),
@@ -374,6 +419,7 @@ fn send_batch_stream<'a>(
                         preflight_index,
                         source_index,
                         call,
+                        recovered_arguments,
                         batch_cancellation.clone(),
                     ).await {
                         SendPreflight::Immediate(outcome) => {
@@ -434,6 +480,9 @@ fn send_batch_stream<'a>(
                         source_index,
                         call: call.clone(),
                     };
+                    let recovered_arguments = prepared_arguments
+                        .and_then(|arguments| arguments.get(&call.id))
+                        .cloned();
                     match preflight_send(
                         tools,
                         policy.clone(),
@@ -442,6 +491,7 @@ fn send_batch_stream<'a>(
                         preflight_index,
                         source_index,
                         call,
+                        recovered_arguments,
                         batch_cancellation.clone(),
                     ).await {
                         SendPreflight::Immediate(outcome) => {
@@ -515,6 +565,7 @@ async fn preflight_send(
     preflight_index: PreflightIndex,
     source_index: SourceIndex,
     call: ToolCall,
+    recovered_arguments: Option<Value>,
     cancellation: CancellationToken,
 ) -> SendPreflight {
     let Some(binding) = tools.binding(&call.name) else {
@@ -527,6 +578,31 @@ async fn preflight_send(
             false,
         ));
     };
+    if let Some(effective_arguments) = recovered_arguments {
+        if cancellation.is_cancelled() {
+            return SendPreflight::Immediate(immediate_error(
+                preflight_index,
+                source_index,
+                call,
+                "Operation aborted",
+                false,
+            ));
+        }
+        let mut effective_call = call.clone();
+        effective_call.arguments = effective_arguments.clone();
+        return SendPreflight::Prepared(PreparedSendCall {
+            preflight_index,
+            source_index,
+            source_call: call,
+            effective_call,
+            // The pre-authorization validation evidence is intentionally not
+            // durable. Recovery uses the lossless authorized intent for both
+            // execution views rather than reconstructing obsolete scratch
+            // state under current preparers or schemas.
+            validated_arguments: effective_arguments,
+            tool: binding.tool.clone(),
+        });
+    }
     let prepared_arguments = match &binding.preparer {
         Some(preparer) => match preparer.prepare(&call.arguments) {
             Ok(arguments) => arguments,
@@ -675,6 +751,7 @@ fn local_batch_stream<'a>(
     policy: Rc<dyn LocalToolPolicy>,
     tools: &'a LocalToolRegistry,
     request: ToolBatchRequest<'a, LocalToolRegistry>,
+    prepared_arguments: Option<&'a BTreeMap<ToolCallId, Value>>,
 ) -> LocalBoxStream<'a, ToolBatchStreamEvent> {
     Box::pin(async_stream::stream! {
         let truncated = request.assistant.finish.reason == AssistantFinishReason::Length;
@@ -713,6 +790,9 @@ fn local_batch_stream<'a>(
                         source_index,
                         call: call.clone(),
                     };
+                    let recovered_arguments = prepared_arguments
+                        .and_then(|arguments| arguments.get(&call.id))
+                        .cloned();
                     match preflight_local(
                         tools,
                         policy.clone(),
@@ -721,6 +801,7 @@ fn local_batch_stream<'a>(
                         preflight_index,
                         source_index,
                         call,
+                        recovered_arguments,
                         batch_cancellation.clone(),
                     ).await {
                         LocalPreflight::Immediate(outcome) => {
@@ -781,6 +862,9 @@ fn local_batch_stream<'a>(
                         source_index,
                         call: call.clone(),
                     };
+                    let recovered_arguments = prepared_arguments
+                        .and_then(|arguments| arguments.get(&call.id))
+                        .cloned();
                     match preflight_local(
                         tools,
                         policy.clone(),
@@ -789,6 +873,7 @@ fn local_batch_stream<'a>(
                         preflight_index,
                         source_index,
                         call,
+                        recovered_arguments,
                         batch_cancellation.clone(),
                     ).await {
                         LocalPreflight::Immediate(outcome) => {
@@ -860,6 +945,7 @@ async fn preflight_local(
     preflight_index: PreflightIndex,
     source_index: SourceIndex,
     call: ToolCall,
+    recovered_arguments: Option<Value>,
     cancellation: CancellationToken,
 ) -> LocalPreflight {
     let Some(binding) = tools.binding(&call.name) else {
@@ -872,6 +958,27 @@ async fn preflight_local(
             false,
         ));
     };
+    if let Some(effective_arguments) = recovered_arguments {
+        if cancellation.is_cancelled() {
+            return LocalPreflight::Immediate(immediate_error(
+                preflight_index,
+                source_index,
+                call,
+                "Operation aborted",
+                false,
+            ));
+        }
+        let mut effective_call = call.clone();
+        effective_call.arguments = effective_arguments.clone();
+        return LocalPreflight::Prepared(PreparedLocalCall {
+            preflight_index,
+            source_index,
+            source_call: call,
+            effective_call,
+            validated_arguments: effective_arguments,
+            tool: binding.tool.clone(),
+        });
+    }
     let prepared_arguments = match &binding.preparer {
         Some(preparer) => match preparer.prepare(&call.arguments) {
             Ok(arguments) => arguments,
