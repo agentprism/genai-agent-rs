@@ -2,7 +2,7 @@
 # below. Planned mappings are permitted again per the owner rulings of 2026-08-26
 # (M10 image generation; pi-sync additions for new upstream tests).
 upstream_repository = "earendil-works/pi"
-upstream_commit = "8fa7eebd235355522c8104166b4f1f959b4e2f10"
+upstream_commit = "e86823096c5bad39e1ca282ec24bc5eb9bec745b"
 
 [[mapping]]
 source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part1-proposal.md#6-lossless-ffi-event-envelope"
@@ -1042,6 +1042,7 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/openai-completions-tool-choice.test.ts"
+needs_reverification = "SYNC-2026-08-26: upstream changed the no-tools case to require explicit toolChoice; owner decision pending in docs/pi-sync/report-2026-08-26.md."
 rust = [
   "openai_chat_finish_reason_contract",
   "openai_chat_reasoning_content_required_compat",
@@ -1522,6 +1523,7 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/harness/nodejs-env.test.ts"
+needs_reverification = "SYNC-2026-08-26: upstream added missing-taskkill abort coverage; reviewed as already conforming, pending mapping re-verification."
 rust = [
   "capability_unavailable_process_spawner_is_explicit",
   "env_atomic_replace",

@@ -8,10 +8,10 @@ export const meta = {
 
 const A = typeof args === "string" ? JSON.parse(args) : args || {};
 const REPO = A.repo || "/home/vikash/genai-agent/genai-agent-rs";
-const PI_ROOT = A.piRoot || "/home/vikash/pi-pin-8fa7eebd2";
+const PI_ROOT = A.piRoot || "/home/vikash/pi-pin-e86823096";
 const PI_AI = PI_ROOT + "/packages/ai";
 const PI_AGENT = PI_ROOT + "/packages/agent";
-const PIN = A.pin || "8fa7eebd235355522c8104166b4f1f959b4e2f10";
+const PIN = A.pin || "e86823096c5bad39e1ca282ec24bc5eb9bec745b";
 const BRANCH = A.branch || "main";
 const MILESTONE = A.milestone || "M1";
 const ONLY = Array.isArray(A.packages) ? A.packages : null;

@@ -1,4 +1,4 @@
-# Generated from earendil-works/pi 8fa7eebd235355522c8104166b4f1f959b4e2f10.
+# Generated from earendil-works/pi e86823096c5bad39e1ca282ec24bc5eb9bec745b.
 # One pinned upstream test path per line, sorted bytewise for offline CI checks.
 packages/agent/test/agent-loop.test.ts
 packages/agent/test/agent.test.ts
