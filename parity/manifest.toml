@@ -1523,7 +1523,12 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/harness/prompt-templates.test.ts"
-rust = []
+rust = [
+  "prompt_template_argument_substitution",
+  "prompt_template_fallback_description_uses_utf16_units",
+  "prompt_template_missing_argument_rejected",
+  "prompt_template_output_is_deterministic",
+]
 status = "planned"
 milestone = "M8"
 
@@ -1568,6 +1573,38 @@ rust = [
   "compaction_records_tokens_before",
   "compaction_retains_configured_tail",
   "compaction_threshold_decision",
+]
+status = "semantic-parity"
+
+[[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#7.9-7.12-and-10.10"
+rust = [
+  "bash_truncated_output_has_full_artifact",
+  "edit_rejects_multiple_matches",
+  "edit_rejects_noop",
+  "edit_requires_exact_match",
+  "mutation_queue_different_paths_concurrent",
+  "mutation_queue_same_path_serializes",
+  "prompt_template_argument_substitution",
+  "prompt_template_fallback_description_uses_utf16_units",
+  "prompt_template_missing_argument_rejected",
+  "prompt_template_output_is_deterministic",
+  "skill_catalog_discovers_valid_skills",
+  "skill_catalog_preserves_multi_root_order",
+  "skill_content_digest_is_stable",
+  "skill_invalid_metadata_is_reported",
+  "skill_resume_uses_recorded_digest",
+  "telemetry_correlates_session_run_operation",
+  "telemetry_default_excludes_auth",
+  "telemetry_default_excludes_content",
+  "telemetry_default_excludes_replay_payload",
+  "telemetry_durable_event_follows_commit",
+  "telemetry_schema_validates_every_event",
+  "telemetry_schema_version_is_required",
+  "telemetry_sink_failure_is_best_effort_by_default",
+  "truncate_never_splits_utf8",
+  "truncate_respects_byte_limit",
+  "truncate_respects_line_limit",
 ]
 status = "semantic-parity"
 
@@ -1638,7 +1675,13 @@ milestone = "M7"
 
 [[mapping]]
 source = "packages/agent/test/harness/skills.test.ts"
-rust = []
+rust = [
+  "skill_catalog_discovers_valid_skills",
+  "skill_catalog_preserves_multi_root_order",
+  "skill_content_digest_is_stable",
+  "skill_invalid_metadata_is_reported",
+  "skill_resume_uses_recorded_digest",
+]
 status = "planned"
 milestone = "M8"
 
@@ -1650,19 +1693,39 @@ milestone = "M8"
 
 [[mapping]]
 source = "packages/agent/test/harness/telemetry.test.ts"
-rust = []
+rust = [
+  "telemetry_correlates_session_run_operation",
+  "telemetry_default_excludes_auth",
+  "telemetry_default_excludes_content",
+  "telemetry_default_excludes_replay_payload",
+  "telemetry_durable_event_follows_commit",
+  "telemetry_schema_validates_every_event",
+  "telemetry_schema_version_is_required",
+  "telemetry_sink_failure_is_best_effort_by_default",
+]
 status = "planned"
 milestone = "M8"
 
 [[mapping]]
 source = "packages/agent/test/harness/tools.test.ts"
-rust = []
+rust = [
+  "bash_truncated_output_has_full_artifact",
+  "edit_rejects_multiple_matches",
+  "edit_rejects_noop",
+  "edit_requires_exact_match",
+  "mutation_queue_different_paths_concurrent",
+  "mutation_queue_same_path_serializes",
+]
 status = "planned"
 milestone = "M8"
 
 [[mapping]]
 source = "packages/agent/test/harness/truncate.test.ts"
-rust = []
+rust = [
+  "truncate_never_splits_utf8",
+  "truncate_respects_byte_limit",
+  "truncate_respects_line_limit",
+]
 status = "planned"
 milestone = "M8"
 

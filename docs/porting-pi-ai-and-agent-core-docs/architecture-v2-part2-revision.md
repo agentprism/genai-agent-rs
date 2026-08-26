@@ -3785,6 +3785,8 @@ pub trait PromptTemplateRegistry: Send + Sync {
 }
 ```
 
+> Correction: Pinned Pi's `substituteArgs` replaces an absent positional placeholder with an empty string (`args[index] ?? ""`) rather than rejecting the invocation. The native registry therefore uses Pi-compatible empty substitution by default; the §10.10 test named `prompt_template_missing_argument_rejected` exercises the explicit strict policy rather than claiming that rejection is Pi's default (`packages/agent/src/harness/prompt-templates.ts:232–247`).
+
 The harness operation intent should record skill/template identities and content digests. A resumed operation must not silently pick up changed skill content unless the resume policy explicitly allows it.
 
 ## 7.10 Environment contract
@@ -3895,6 +3897,8 @@ This prevents concurrent assistant tool calls from racing on the same file while
 3. reject a no-op replacement;
 4. write atomically where supported;
 5. return a structured diff and resulting metadata.
+
+> Correction: Pinned Pi's reference `edit` accepts one or more replacements, matches every `oldText` against the same original file, and rejects ambiguous or overlapping regions before writing. It strips and restores a UTF-8 BOM, normalizes CRLF/CR to LF for matching and restores the original line-ending style, and falls back from raw matching to NFKC plus trailing-whitespace, smart-quote, Unicode-dash, and Unicode-space normalization while preserving unchanged line blocks. The Rust reference operation implements those semantics; the single raw `replace_exact` sketch above is only the atomic publication capability used after the full-file edit has been prepared (`packages/agent/src/harness/tools/edit.ts`; `packages/agent/src/harness/tools/edit-diff.ts`).
 
 ### Output truncation
 
