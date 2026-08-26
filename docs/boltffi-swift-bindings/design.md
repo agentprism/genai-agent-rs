@@ -1,269 +1,2484 @@
 # BoltFFI-generated Swift bindings design
 
-Status: design finding, 2026-08-25. Scope: the `core` and `extended` rows in
-[`api-inventory.md`](api-inventory.md), targeting the Send/Tokio family and
-Swift. The current crate names are used throughout. When the crates are renamed,
-`pi-ai`, `pi-agent-core`, `pi-agent-runtime-tokio`, and `pi-agent-session` become
-the corresponding `agentprism-*` packages; this is a packaging/name update, not
-a change to the mappings below.
+Status: revised design, round 12, 2026-08-26. Authority:
+`docs/boltffi-swift-bindings/owner-review-2026-08-26.md:1`. That adopted review
+retires the earlier “attributes only” interpretation of R2. This document uses
+the current crate names. The planned `pi-*` to `agentprism-*` rename changes
+package and module names only; the boundary and invariants below do not change.
 
-> **Compatibility verdict: R1, R2, and R3 cannot all be satisfied by the
-> documented BoltFFI surface.** The ordinary Rust API returns borrowed
-> `SendBoxStream` values, `AssistantStream`, and Tokio receivers, whereas the
-> documented stream attribute requires the annotated method itself to return
-> `Arc<EventSubscription<T>>` (`crates/pi-agent-core/src/run.rs:283`,
-> `crates/pi-ai/src/streaming.rs:1900`,
-> `crates/pi-agent-runtime-tokio/src/lib.rs:133`). BoltFFI documents exactly that
-> return-type requirement and generates Swift `AsyncStream<T>` only from that
-> shape. [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#the-ffi_stream-attribute]
-> The host callback contracts use explicit `SendBoxFuture` return values, while
-> the documented trait mapping requires an exported trait method to be written
-> as `async fn` with `#[async_trait]` to become an async Swift protocol
-> requirement (`crates/pi-agent-core/src/tools.rs:201`,
-> `crates/pi-agent-runtime-tokio/src/lib.rs:45`,
-> `crates/pi-agent-session/src/storage.rs:18`). [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods]
-> Generic free functions, generic structs, generic traits, associated types,
-> arbitrary trait objects, and non-static lifetimes cover further core or
-> extended items, and the documentation explicitly lists those shapes as
-> unsupported. Generic inherent methods and constructors, generic enums, and
-> generic type aliases are treated separately as documentation gaps below.
-> [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations]
-> [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported]
-> [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#limitations]
+## 1. Decision and scope
 
-This is therefore a mapping and feasibility design, not a claim that the whole
-surface currently compiles through BoltFFI. A row marked **direct** identifies
-the documented construct to apply once all transitive field and signature types
-are representable. A row marked **blocked** identifies the exact reason an
-attribute-only implementation cannot expose the native item. No envelope API
-is substituted for a native item.
-[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs]
-[https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations]
+The binding boundary is the concrete Tokio actor facade, not the borrowed
+`pi-agent-core::Agent` composition seams. The current actor already owns the
+agent on one task, serializes commands through a bounded mailbox, publishes
+owned snapshots, and returns one actor-owned run
+(`crates/pi-agent-runtime-tokio/src/lib.rs:148`). The low-level `Agent::run`,
+`Agent::prompt_text`, `Agent::prompt_records`, `Agent::continue_run`, and
+`Agent::retry_last_turn` methods instead borrow `&mut Agent` and return borrowed
+`SendBoxStream` values (`crates/pi-agent-core/src/run.rs:283`,
+`crates/pi-agent-core/src/run.rs:292`,
+`crates/pi-agent-core/src/run.rs:302`,
+`crates/pi-agent-core/src/run.rs:312`,
+`crates/pi-agent-core/src/run.rs:336`).
 
-## 1. BoltFFI capability summary
+`docs/boltffi-swift-bindings/api-inventory.md` remains useful documentation
+research, but its broad `core`/`extended` accounting is not the initial binding
+scope after the adopted owner review. The verbatim lists below are the scope.
 
-The snapshot manifest records nineteen canonical `/docs/` pages fetched on
-2026-08-25 and no unreachable documentation links
-(`docs/boltffi-swift-bindings/docs-snapshot/MANIFEST.md:1`). Each page was read
-in full for this design.
+Corrected R2 is:
 
-- **Overview.** BoltFFI describes generated native bindings, lists Swift among
-  the supported targets, and identifies records, functions, classes, constants,
-  async functions, callbacks/traits, async streams, and errors as exportable
-  categories. [https://www.boltffi.dev/docs/overview.md | docs/boltffi-swift-bindings/docs-snapshot/overview.md#what-you-can-export]
+> Integration must not introduce a separately maintained FFI facade, duplicate
+> record hierarchy, IDL, or required Swift wrapper. Existing canonical crates
+> may receive inline BoltFFI annotations and minimal concrete API changes needed
+> to project their ordinary consumer contracts safely, including owned returns,
+> concrete collection inputs, interior synchronization, async pull methods, and
+> Rust-owned runtime integration. Every such change must remain a legitimate
+> Rust API rather than a binding-only command/envelope layer.
 
-- **Installation.** Installation adds `boltffi` as both a normal and build
-  dependency, configures a `staticlib` crate type (with `cdylib` optional), puts
-  `boltffi::build::generate()` in `build.rs`, and verifies the project with
-  `boltffi check`. [https://www.boltffi.dev/docs/installation.md | docs/boltffi-swift-bindings/docs-snapshot/installation.md#add-to-your-project]
+The implementation may therefore improve the canonical Rust actor API where the
+same change is useful to an ordinary Rust caller. It may not reproduce the
+JSON-configuration construction and sequenced-JSON-event facade currently
+maintained in `bindings/pi-ffi`: its JSON constructor and agent-configuration
+entry point are at `bindings/pi-ffi/src/lib.rs:190` and
+`bindings/pi-ffi/src/lib.rs:198`, while its sequenced JSON event surface begins
+at `bindings/pi-ffi/src/lib.rs:290`.
+
+The adopted ordinary-consumer export scope is reproduced verbatim:
+
+- `TokioAgentHandle`
+- Reshaped `TokioAgentRun`
+- Prompt/continue/retry
+- Steering/follow-up/cancellation
+- Reset/snapshot/wait-for-idle/shutdown
+- Owned Agent event/outcome/control types
+- `AgentEventSink` when acknowledged host callbacks are implemented
+
+The adopted initial exclusions are also reproduced verbatim:
+
+- Bare borrowed `Agent` run streams
+- `ModelRuntime` trait-object construction seams
+- Scheduler streams
+- Generic `TypedTool<I, F>`
+- Provider implementation traits
+- Local/non-Send executor family
+- Raw Tokio receivers
+
+Those exclusions correspond to the five borrowed Agent methods cited above,
+the runtime trait (`crates/pi-ai/src/runtime.rs:87`), scheduler streams
+(`crates/pi-agent-core/src/scheduler.rs:238`), `TypedTool`
+(`crates/pi-agent-core/src/tools.rs:277`), the Local Agent family
+(`crates/pi-agent-core/src/restore.rs:221`), and the current raw run receiver
+(`crates/pi-agent-runtime-tokio/src/lib.rs:133`). Swift-authored tools,
+policies, storage backends, model runtimes, and provider implementations are
+later callback-authoring milestones, not prerequisites for the first concrete
+Agent consumer boundary.
+
+### Design verdict
+
+The initial binding is feasible only after the canonical changes in section 4.
+Authoritative Agent delivery uses `AgentEventEnvelope` through
+`TokioAgentRun::next_event`; direct model-call `AssistantEvent` delivery uses the concrete
+`TokioAssistantStream::next_event` specified in section 4.8. Neither uses
+BoltFFI `EventSubscription`.
+[https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#buffer-capacity]
+`AgentEventSink` remains a distinct acknowledged callback contract. The first
+implementation milestone changes canonical Rust APIs; the second adds inline
+annotations; the third runs native Swift acceptance tests.
+
+Six highlighted gaps remain implementation gates rather than reasons to
+invent a facade:
+
+1. The snapshot does not document consuming class receivers such as
+   `outcome(self)`. The owner review reports a rejection in BoltFFI source, but
+   that claim is **UNRESOLVED: not answered by the documentation**. Pages
+   checked: `classes.md#methods`, `classes.md#memory-management`, and
+   `async.md#methods`. The canonical `outcome(&self)` reshape is independently
+   required for reusable completion and cancellation safety.
+   [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods]
+   [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#memory-management]
+   [https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#methods]
+2. The snapshot documents async host traits and class arguments separately, but
+   does not show an async host-trait method receiving an owned Rust-backed class
+   such as `CancellationToken`.
+   **UNRESOLVED: not answered by the documentation**. Pages checked:
+   `callbacks.md#traits`,
+   `callbacks.md#async-methods`, `callbacks.md#ownership`, and
+   `classes.md#methods-that-take-or-return-classes`.
+   [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#traits]
+   [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods]
+   [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#ownership]
+   [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes]
+3. The streaming page documents callback-mode delivery through the same
+   buffered `EventSubscription`, but it says nothing about a producer-side
+   acknowledgement barrier. **UNRESOLVED: not answered by the documentation**.
+   Pages checked: `streaming.md#callback-mode`,
+   `streaming.md#buffer-capacity`, and `streaming.md#how-it-works`. This is why
+   callback-mode streaming is not used as an `AgentEventSink` substitute.
+   [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#callback-mode]
+   [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#buffer-capacity]
+   [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#how-it-works]
+4. Current `TokioAgentError::Agent(AgentError)` is both a tuple-payload error
+   variant and a nested error-valued payload
+   (`crates/pi-agent-runtime-tokio/src/lib.rs:76`). The error documentation
+   demonstrates unit variants and struct-style variants whose fields are
+   strings or primitives, but it does not establish either tuple-payload error
+   variants or nested error-valued payloads.
+   **UNRESOLVED: not answered by the documentation** for both questions. Pages
+   checked: `errors.md#supported-error-types`, `errors.md#enum-errors`, and
+   `errors.md#enums-with-payloads`. Section 8.3 makes this an annotation gate.
+   [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#supported-error-types]
+   [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors]
+   [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enums-with-payloads]
+5. The records documentation demonstrates unit data-enum variants and
+   struct-style associated-data variants, but it does not establish whether
+   `#[data]` accepts tuple-style variants. This affects at least `Message`,
+   `AgentRecord`, `DiagnosticErrorCode`, `ConstrainedSampling`,
+   `OrderedJsonValue`, `ReplayTarget`, `OpaquePayload`, and
+   `ReplayDataOperation` in the in-scope graph
+   (`crates/pi-ai/src/messages.rs:32`,
+   `crates/pi-agent-core/src/state.rs:62`,
+   `crates/pi-ai/src/messages.rs:178`,
+   `crates/pi-ai/src/messages.rs:334`,
+   `crates/pi-ai/src/json_compat.rs:324`,
+   `crates/pi-ai/src/replay.rs:179`,
+   `crates/pi-ai/src/replay.rs:276`,
+   `crates/pi-ai/src/streaming.rs:563`).
+   **UNRESOLVED: not answered by the documentation**. Pages checked:
+   `records.md#enums`, `records.md#enums-with-associated-data`, and
+   `types.md#records`. Section 8.2 makes each canonical enum a distinct
+   generation and Swift-fidelity gate; no binding-only enum or envelope may
+   replace one.
+   [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums]
+   [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data]
+   [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records]
+6. `ControlError::QueueFull.capacity` is `usize`
+   (`crates/pi-agent-core/src/control.rs:68`,
+   `crates/pi-agent-core/src/control.rs:74`), and both
+   `DEFAULT_COMMAND_CAPACITY` and `DEFAULT_EVENT_CAPACITY` are `usize`
+   (`crates/pi-agent-runtime-tokio/src/lib.rs:30`,
+   `crates/pi-agent-runtime-tokio/src/lib.rs:33`). The numeric quick-reference
+   table lists the fixed-width integer types through `u64`, but not `usize`.
+   The primitives section has an isolated `usize` function-argument example;
+   it does not state whether `usize` is supported as an error-variant payload
+   or a constant type. **UNRESOLVED: not answered by the documentation**.
+   Pages checked: `types.md#quick-reference`, `types.md#primitives`,
+   `errors.md#enums-with-payloads`, and `constants.md#supported-values`.
+   `ControlError::QueueFull.capacity` is therefore a separate generated Swift
+   payload-fidelity gate. The two capacity constants remain unannotated in the
+   initial binding; tests may use them inside Rust, but no generated constant
+   is assumed.
+   [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference]
+   [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#primitives]
+   [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enums-with-payloads]
+   [https://www.boltffi.dev/docs/constants.md | docs/boltffi-swift-bindings/docs-snapshot/constants.md#supported-values]
+
+### Owner-review coverage
+
+| Adopted review section | Design resolution |
+|---|---|
+| Corrected R2 (`docs/boltffi-swift-bindings/owner-review-2026-08-26.md:12`) | Section 1 and all of section 4 |
+| Core streaming fact (`docs/boltffi-swift-bindings/owner-review-2026-08-26.md:33`) | Sections 3.2–3.4 |
+| Tokio actor rather than bare `Agent` (`docs/boltffi-swift-bindings/owner-review-2026-08-26.md:63`) | Section 1 and section 5 |
+| Current delivery path (`docs/boltffi-swift-bindings/owner-review-2026-08-26.md:84`) | Section 3.1 |
+| `TokioAgentRun` reshape and raw receiver (`docs/boltffi-swift-bindings/owner-review-2026-08-26.md:130`) | Sections 4.1–4.2 |
+| Cancellation semantics (`docs/boltffi-swift-bindings/owner-review-2026-08-26.md:236`) | Section 6 |
+| Acknowledged sinks (`docs/boltffi-swift-bindings/owner-review-2026-08-26.md:272`) | Section 4.4 |
+| Sink-only run fix (`docs/boltffi-swift-bindings/owner-review-2026-08-26.md:324`) | Section 4.3 |
+| Four Swift consumer shapes (`docs/boltffi-swift-bindings/owner-review-2026-08-26.md:339`) | Section 7 |
+| Event envelope decision (`docs/boltffi-swift-bindings/owner-review-2026-08-26.md:395`) | Section 4.5 |
+| Tokio runtime ownership (`docs/boltffi-swift-bindings/owner-review-2026-08-26.md:418`) | Section 4.7 |
+| Ordinary-consumer scope (`docs/boltffi-swift-bindings/owner-review-2026-08-26.md:435`) | Sections 1 and 5 |
+| Twelve acceptance tests (`docs/boltffi-swift-bindings/owner-review-2026-08-26.md:461`) | Section 9 |
+
+The round-5 rejection is resolved explicitly as follows: section 4.7 now gives
+Swift a concrete OpenAI provider/native-transport/API-key factory that returns a
+configured canonical `Models`, rather than assuming that empty `Models::new()`
+is production construction; sections 5 and 8.7 carry that path through the
+surface and gap analysis; acceptance test 17 executes it through generated
+Swift. Section 8.4 gates all six currently in-scope `#[non_exhaustive]`
+occurrences, including `AssistantEvent` and the `RequestStartErrorKind` inside
+`RequestStartError`. Section 8.2 now records `BTreeSet`,
+`serde_json::Number`, and `serde_json::Value` as unresolved transitive value
+types. This revision also traces the previously omitted
+`ToolCall.arguments`, `ToolSpec.parameters`, `DeferredHandle.data`,
+`ToolOutput.details`, `ToolUpdate.details`, `ToolResultMessage.details`/
+`VersionedExtension.value`, and `GrammarVariants` paths. Sections 5 and 10
+carry those paths into their surface-level and generation gates; the document
+does not infer coverage for one JSON or map field from a probe of another.
+
+The round-7 rejection is resolved explicitly as follows. Sections 5, 8.2, 9,
+and 10 now treat `AgentSnapshot.streaming` as an independent active/partial
+snapshot root rather than inferring it from `AgentSnapshot.state` or a
+committed transcript (`crates/pi-agent-core/src/state.rs:184`,
+`crates/pi-agent-core/src/state.rs:188`). Acceptance test 18 now constructs
+standalone `AssistantEvent::DiagnosticAdded`, each of the three terminal
+`AssistantEvent` variants, nested `AgentEvent::AssistantUpdate`, explicit
+`AgentEvent::MessageCommitted`, and a snapshot whose `streaming` field is
+`Some(AssistantMessageSnapshot)` with values deliberately different from the
+committed transcript (`crates/pi-ai/src/streaming.rs:428`,
+`crates/pi-ai/src/streaming.rs:522`, `crates/pi-ai/src/streaming.rs:528`,
+`crates/pi-ai/src/streaming.rs:534`,
+`crates/pi-agent-core/src/events.rs:113`,
+`crates/pi-agent-core/src/events.rs:120`,
+`crates/pi-ai/src/streaming.rs:1674`). The tuple-newtype gate now covers not
+only IDs but also `Timestamp`, `Currency`, `ReplayDropReason`, and the
+`OrderedJsonObject`/`OrderedJsonString`/`OrderedJsonArray` sampling graph
+(`crates/pi-ai/src/ids.rs:133`, `crates/pi-ai/src/usage.rs:88`,
+`crates/pi-ai/src/handoff.rs:44`, `crates/pi-ai/src/json_compat.rs:24`,
+`crates/pi-ai/src/json_compat.rs:114`,
+`crates/pi-ai/src/json_compat.rs:227`). The documentation shows named-field
+struct records but does not establish tuple-newtype generation, so each of
+these is an explicit unresolved generation and fidelity gate rather than an
+inference from an ID probe. **UNRESOLVED: not answered by the documentation**.
+Pages checked: `records.md#structs`, `types.md#records`, and
+`custom-types.md#representation-types`.
+[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs]
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records]
+[https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#representation-types]
+
+The round-8 rejection is resolved explicitly as follows. Sections 5, 8.2, 9,
+and 10 now traverse the full replay graph rather than treating `replay` as an
+opaque leaf: `AssistantMessageSnapshot.replay` is a `ReplayEnvelope` with a
+`ReplayScope` and ordered `Vec<ReplayItem>`, and every item reaches
+`ReplayTarget` and `OpaquePayload` (`crates/pi-ai/src/streaming.rs:1697`,
+`crates/pi-ai/src/replay.rs:13`, `crates/pi-ai/src/replay.rs:17`,
+`crates/pi-ai/src/replay.rs:19`, `crates/pi-ai/src/replay.rs:135`,
+`crates/pi-ai/src/replay.rs:141`, `crates/pi-ai/src/replay.rs:149`). The same
+matrix is required independently in `AgentSnapshot.streaming.replay`, that
+snapshot's `terminal_message.replay`, standalone assistant replay events, and
+nested `AgentEvent::AssistantUpdate` replay events. Acceptance test 18 requires
+nonempty ordered items, every `ReplayTarget` form, all three
+`OpaquePayload::{Utf8, Bytes, JsonBytes}` forms, every
+`ReplayDataOperation` form, and distinct Swift-checked sentinels at each root
+(`crates/pi-ai/src/replay.rs:179`, `crates/pi-ai/src/replay.rs:276`,
+`crates/pi-ai/src/streaming.rs:474`, `crates/pi-ai/src/streaming.rs:488`,
+`crates/pi-ai/src/streaming.rs:563`). The same sections now make tuple-payload
+data-enum syntax an explicit unresolved gate for all eight enums listed in gap
+5 rather than assuming that the documented struct-style associated-data syntax
+covers it. The records page does not show tuple-variant syntax.
+**UNRESOLVED: not answered by the documentation**. Pages checked:
+`records.md#enums`, `records.md#enums-with-associated-data`, and
+`types.md#records`.
+[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums]
+[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data]
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records]
+
+The round-9 replay-traversal rejection is resolved explicitly as follows.
+Sections 5, 8.2, 9, and 10 now name and test thirteen independent
+`ReplayEnvelope` roots: a direct `ModelRequest` assistant message; each direct
+`AssistantEvent::{Finished,Failed,Cancelled}` terminal message; each of those
+three terminal events nested in `AgentEvent::AssistantUpdate`; an assistant
+`AgentEvent::MessageCommitted`; a standalone assistant `AgentRecord`; a direct
+`AgentState.transcript`; `AgentSnapshot.state.transcript`;
+`AgentSnapshot.streaming.replay`; and
+`AgentSnapshot.streaming.terminal_message.replay`
+(`crates/pi-ai/src/runtime.rs:17`, `crates/pi-ai/src/messages.rs:36`,
+`crates/pi-ai/src/messages.rs:157`, `crates/pi-ai/src/messages.rs:473`,
+`crates/pi-ai/src/streaming.rs:521`, `crates/pi-ai/src/streaming.rs:528`,
+`crates/pi-ai/src/streaming.rs:534`,
+`crates/pi-agent-core/src/events.rs:113`,
+`crates/pi-agent-core/src/events.rs:120`,
+`crates/pi-agent-core/src/state.rs:33`,
+`crates/pi-agent-core/src/state.rs:64`,
+`crates/pi-agent-core/src/state.rs:184`,
+`crates/pi-agent-core/src/state.rs:188`,
+`crates/pi-ai/src/streaming.rs:1697`,
+`crates/pi-ai/src/streaming.rs:1705`). Every root has a distinct, nonempty
+envelope with root-specific scope and item sentinels, ordered items, all four
+`ReplayTarget` variants, and all three `OpaquePayload` variants. Standalone and
+nested `ReplayItemStarted`/`ReplayData` event matrices remain additional roots;
+they cannot substitute for any terminal, request, committed, state, or snapshot
+envelope.
+
+The remaining accepted-run establishment rejection is resolved explicitly as
+follows. Section 4.1 now requires an armed `request_run` drop guard from command
+submission through the non-awaiting `TokioAgentRun` return step. If the
+exported prompt/continue/retry future is dropped after actor acceptance but
+before that handoff, the guard cancels the shared run token and closes the
+unclaimed observation receiver. Section 6 distinguishes that establishment
+cancellation from cancelling an established `nextEvent()` await or explicitly
+cancelling a run. Acceptance test 19 deterministically holds the establishment
+future after actor acceptance and before result handoff, then proves terminal
+cancellation settlement, actor idleness, and release of the actor's runtime
+lease after orderly shutdown in both Rust and generated Swift. Phases 1 and 3
+make the corresponding Rust and Swift halves blocking gates.
+
+The latest transitive-boundary rejection is resolved explicitly as follows.
+Sections 5 and 8.2 now identify the `usize` payload of
+`ControlError::QueueFull` independently of its tuple-newtype and
+`#[non_exhaustive]` gates (`crates/pi-agent-core/src/control.rs:68`,
+`crates/pi-agent-core/src/control.rs:74`). Acceptance test 18 now has a
+generated Swift catch and exact-payload-fidelity gate for that `usize` field.
+Section 5 and phase 2 also select a definite policy for
+`DEFAULT_COMMAND_CAPACITY` and `DEFAULT_EVENT_CAPACITY`: both remain
+unannotated because their current type is `usize`
+(`crates/pi-agent-runtime-tokio/src/lib.rs:30`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:33`), and the documentation does not
+establish `usize` error-payload or constant support. **UNRESOLVED: not answered
+by the documentation**. Pages checked: `types.md#quick-reference`,
+`types.md#primitives`, `errors.md#enums-with-payloads`, and
+`constants.md#supported-values`.
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference]
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#primitives]
+[https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enums-with-payloads]
+[https://www.boltffi.dev/docs/constants.md | docs/boltffi-swift-bindings/docs-snapshot/constants.md#supported-values]
+
+## 2. BoltFFI per-page capability summary
+
+The local manifest records nineteen canonical `/docs/` pages captured on
+2026-08-25 (`docs/boltffi-swift-bindings/docs-snapshot/MANIFEST.md:1`).
+`async.md` and `streaming.md` were re-read in full for this revision.
+
+- **Overview.** BoltFFI lists Swift as a supported target.
+  [https://www.boltffi.dev/docs/overview.md | docs/boltffi-swift-bindings/docs-snapshot/overview.md#supported-languages]
+  It identifies records, functions, classes, constants, async functions,
+  callbacks/traits, async streams, and errors as export categories.
+  [https://www.boltffi.dev/docs/overview.md | docs/boltffi-swift-bindings/docs-snapshot/overview.md#what-you-can-export]
+
+- **Installation.** The documented attachment adds `boltffi` as a normal and
+  build dependency, includes `staticlib` in the crate type, calls
+  `boltffi::build::generate()` from `build.rs`, and uses `boltffi check`.
+  [https://www.boltffi.dev/docs/installation.md | docs/boltffi-swift-bindings/docs-snapshot/installation.md#add-to-your-project]
   [https://www.boltffi.dev/docs/installation.md | docs/boltffi-swift-bindings/docs-snapshot/installation.md#create-buildrs]
   [https://www.boltffi.dev/docs/installation.md | docs/boltffi-swift-bindings/docs-snapshot/installation.md#verify-installation]
 
-- **Quick Start.** The quick start repeats the Cargo and `build.rs` setup, uses
-  `#[data]` and `#[export]` after importing them from `boltffi`, and shows initialization, Apple
-  build, Swift generation, and XCFramework packaging commands.
+- **Quick Start.** The quick start shows Cargo and `build.rs` setup, then uses
+  `use boltffi::{data, export};` before applying `#[data]` and `#[export]`; it
+  also shows initialization, Swift generation, and Apple packaging.
   [https://www.boltffi.dev/docs/quick-start.md | docs/boltffi-swift-bindings/docs-snapshot/quick-start.md#2-configure-cargotoml]
   [https://www.boltffi.dev/docs/quick-start.md | docs/boltffi-swift-bindings/docs-snapshot/quick-start.md#3-create-buildrs]
   [https://www.boltffi.dev/docs/quick-start.md | docs/boltffi-swift-bindings/docs-snapshot/quick-start.md#4-write-your-rust-code]
   [https://www.boltffi.dev/docs/quick-start.md | docs/boltffi-swift-bindings/docs-snapshot/quick-start.md#5-build-and-generate-bindings]
 
-- **Getting Started.** The page introduces `#[data]` for a value record,
-  `#[export]` for a free function after `use boltffi::*`, and the choice among build, generate,
-  and package operations before importing the generated Swift module.
+- **Getting Started.** The page introduces `#[data]` values, `#[export]` free
+  functions, and the build/generate/package choices before importing the
+  generated Swift module.
   [https://www.boltffi.dev/docs/getting-started.md | docs/boltffi-swift-bindings/docs-snapshot/getting-started.md#write-your-code]
   [https://www.boltffi.dev/docs/getting-started.md | docs/boltffi-swift-bindings/docs-snapshot/getting-started.md#build-package-or-generate]
 
-- **Tutorial.** The tutorial combines a data record, an exported Rust-backed
-  class, fallible methods, and async methods, then shows those results as Swift
-  value types, classes, `throws`, and `async` calls.
+- **Tutorial.** The tutorial combines a data value, Rust-owned class, throwing
+  method, and async method and shows the corresponding Swift value, class,
+  `throws`, and `async` forms.
   [https://www.boltffi.dev/docs/tutorial.md | docs/boltffi-swift-bindings/docs-snapshot/tutorial.md#write-the-rust-code]
   [https://www.boltffi.dev/docs/tutorial.md | docs/boltffi-swift-bindings/docs-snapshot/tutorial.md#adding-error-handling]
   [https://www.boltffi.dev/docs/tutorial.md | docs/boltffi-swift-bindings/docs-snapshot/tutorial.md#adding-async]
 
-- **Functions.** `#[export]` exports free functions and supports the
-  documented primitive, string, record, enum, slice, optional, class,
-  callback-trait, `Option`, `Result`, `Vec`, async, and non-stored closure forms;
-  generic free functions, references returned by free functions, and stored or
-  outliving closures are listed as limitations. [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#functions]
-  [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#primitives-and-strings]
-  [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#structs-and-enums]
-  [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#slices]
-  [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#optional]
-  [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes]
-  [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#callback-traits]
-  [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#option]
-  [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#result]
-  [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#vec]
-  [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#async-functions]
-  [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#closures]
+- **Functions.** `#[export]` covers the documented primitives, strings,
+  records, enums, slices, optional inputs, classes, callback traits, `Option`,
+  `Result`, `Vec`, async functions, and non-stored closures. Generic free
+  functions, references returned by free functions, and stored/outliving
+  closures are listed as limitations.
+  [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#functions]
   [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations]
 
-- **Records.** `#[data]` maps structs to Swift value structs and maps
-  simple or payload enums to Swift enums; `#[data(impl)]` exports record
-  constructors and methods, and an `&mut self` method becomes mutating Swift.
+- **Records.** `#[data]` maps the documented structs, unit-only enums, and
+  struct-style associated-data enums to Swift value types. The page does not
+  show tuple-style data-enum variants; that syntax is
+  **UNRESOLVED: not answered by the documentation** after checking
+  `records.md#enums`, `records.md#enums-with-associated-data`, and
+  `types.md#records`. `#[data(impl)]` exports constructors and methods, and an
+  `&mut self` record method becomes mutating Swift.
   [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs]
   [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums]
-  [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#constructors]
-  [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#instance-methods]
+  [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data]
+  [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records]
+  [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors]
   [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#mutating-methods]
 
-- **Classes.** `#[export]` on an inherent `impl` maps a Rust-owned object
-  to a reference-semantics Swift class; constructors return `Self`, methods may
-  be synchronous, asynchronous, static, fallible, or class-valued, and `#[skip]`
-  omits a method. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class]
-  [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors]
+- **Classes.** `#[export]` on an inherent impl maps a Rust-owned object to a
+  Swift reference-semantics class. Documented class methods may be
+  constructors, synchronous, async, static, throwing, class-valued, or skipped
+  with `#[skip]`.
+  [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class]
   [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods]
-  [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#static-methods]
   [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#async-methods]
-  [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes]
   [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#skipping-methods]
-  Exported classes require `Send + Sync` by default; `#[export(single_threaded)]`
-  disables both that check and the mutable-receiver check, permits `&mut self`,
-  and makes target-side serialization the consumer's responsibility.
+  Exported classes must be `Send + Sync` by default. The documented
+  `single_threaded` mode disables that check and the mutable-receiver check and
+  leaves serialization to the target.
   [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#thread-safety]
   [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#single-threaded-mode]
 
-- **Constants.** `#[export]` maps supported global constants to module
-  values and constants inside exported data/class impls to static members; the
-  documented values are primitives, strings, and byte slices.
+- **Constants.** `#[export]` maps documented primitive, string, and byte-slice
+  constants to module values or static members.
   [https://www.boltffi.dev/docs/constants.md | docs/boltffi-swift-bindings/docs-snapshot/constants.md#global-constants]
   [https://www.boltffi.dev/docs/constants.md | docs/boltffi-swift-bindings/docs-snapshot/constants.md#supported-values]
+  The supported-values section does not enumerate `usize`; the numeric
+  quick-reference table lists fixed-width integers but omits `usize`, and the
+  isolated `usize` function-argument example does not answer constant support.
+  **UNRESOLVED: not answered by the documentation**. Pages checked:
+  `constants.md#supported-values`, `types.md#quick-reference`, and
+  `types.md#primitives`.
+  [https://www.boltffi.dev/docs/constants.md | docs/boltffi-swift-bindings/docs-snapshot/constants.md#supported-values]
+  [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference]
+  [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#primitives]
 
-- **Types.** The type tables map the listed primitives, strings, `Option`, `Result`, and
-  `Vec`, and provide built-in mappings from `Duration`, `SystemTime`,
-  `uuid::Uuid`, `url::Url`, and `Vec<u8>` to Swift `TimeInterval`, `Date`,
-  `UUID`, `URL`, and `Data` respectively.
+- **Types.** The type tables map the listed primitives, strings, `Option`,
+  `Result`, and `Vec`; built-ins include `Duration`, `SystemTime`, `Uuid`, `Url`,
+  and `Vec<u8>`.
   [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference]
   [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#built-in-custom-types]
-  The overview lists `HashMap` among exportable categories, but the type-page
-  quick reference and collections sections do not give a `HashMap`-to-Swift
-  mapping or specify nested-map support. **UNRESOLVED: not answered by the
-  documentation**; pages checked: `overview.md#what-you-can-export`,
-  `types.md#quick-reference`, `types.md#collections`.
-  [https://www.boltffi.dev/docs/overview.md | docs/boltffi-swift-bindings/docs-snapshot/overview.md#what-you-can-export]
-  [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference]
-  [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#collections]
   Generic structs, arbitrary `dyn Trait`, raw pointers, non-static lifetimes,
   and `HashSet` are listed as unsupported.
   [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported]
+  The numeric quick-reference table lists fixed-width integers only and does
+  not list `usize`. Although the primitives section uses `usize` in one
+  function-argument example, it does not state support for `usize` in record or
+  error payload fields or in constants. **UNRESOLVED: not answered by the
+  documentation**. Pages checked: `types.md#quick-reference`,
+  `types.md#primitives`, `errors.md#enums-with-payloads`, and
+  `constants.md#supported-values`.
+  [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference]
+  [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#primitives]
+  [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enums-with-payloads]
+  [https://www.boltffi.dev/docs/constants.md | docs/boltffi-swift-bindings/docs-snapshot/constants.md#supported-values]
 
-- **Callbacks & Traits.** `#[export]` on a trait generates a Swift
-  protocol implemented by the host; `Box<dyn Trait>` transfers single ownership,
-  `Arc<dyn Trait>` permits shared ownership, async protocol requirements use
-  `#[async_trait]` and actual `async fn` methods, stored callbacks must be owned,
-  and multithreaded callbacks require `Send + Sync`.
+- **Callbacks & Traits.** `#[export]` on a trait generates a host-implemented
+  Swift protocol. The documented ownership forms are `Box<dyn Trait>` and
+  `Arc<dyn Trait>`; async requirements use `#[async_trait]` and actual
+  `async fn`; stored callbacks must be owned; multithreaded callbacks use
+  `Send + Sync`.
   [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#traits]
   [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#ownership]
   [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods]
   [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#storing-traits]
-  Generic traits and associated types are unsupported, and default implementations
-  are ignored. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#limitations]
+  Generic traits and associated types are unsupported, and default
+  implementations are ignored.
+  [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#limitations]
 
-- **Async.** An exported Rust `async fn` becomes a Swift `async` function and an
-  async function returning `Result` becomes `async throws`; target-task
-  cancellation propagates cooperatively to the Rust future.
+- **Async.** An exported Rust `async fn` becomes a Swift async function, and
+  async `Result` becomes `async throws`. Swift task cancellation cooperatively
+  cancels that Rust future.
   [https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#standalone-functions]
   [https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#error-handling]
   [https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#cancellation]
-  BoltFFI does not provide an executor; target callbacks drive future polling,
-  and Tokio-dependent work must already have an active Tokio runtime.
+  BoltFFI provides future polling but no executor; Tokio-dependent work needs
+  an active Tokio runtime.
   [https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#runtime]
 
-- **Async Internals.** The generated async ABI uses entry, poll, complete,
-  cancel, and free operations with continuation callbacks, and cancellation
-  marks the future, wakes it, and frees the task before the target wrapper
-  reports cancellation. [https://www.boltffi.dev/docs/async-internals.md | docs/boltffi-swift-bindings/docs-snapshot/async-internals.md#generated-ffi-functions]
+- **Async Internals.** The documented async ABI has entry, poll, complete,
+  cancel, and free operations with continuation callbacks; cancellation marks
+  and wakes the future before the target reports cancellation.
+  [https://www.boltffi.dev/docs/async-internals.md | docs/boltffi-swift-bindings/docs-snapshot/async-internals.md#generated-ffi-functions]
   [https://www.boltffi.dev/docs/async-internals.md | docs/boltffi-swift-bindings/docs-snapshot/async-internals.md#cancellation]
 
-- **Streaming.** `#[ffi_stream(item = T, mode = "async")]` may annotate
-  only a method returning `Arc<EventSubscription<T>>`, and that method becomes
-  Swift `AsyncStream<T>`; callback mode produces a cancellable subscription and
-  batch mode produces pull-based batches.
+- **Streaming.** `#[ffi_stream(item = T, mode = \"async\")]` requires the
+  annotated method to return `Arc<EventSubscription<T>>` and generates Swift
+  `AsyncStream<T>`; callback and batch modes use the same subscription
+  abstraction.
   [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#the-ffi_stream-attribute]
   [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#stream-modes]
-  `StreamProducer<T>` broadcasts to subscribers through a default 256-item ring
-  buffer, never blocks the producer, and drops new events when a subscriber's
-  buffer is full. [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#creating-streams]
+  Each subscription uses a finite ring buffer, with 256 as the documented
+  default; when full, new events are dropped and the producer does not block.
   [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#buffer-capacity]
-  Producer unsubscribe finishes iteration, while cancelling the Swift task or
-  breaking its loop cancels the subscription.
+  Producer unsubscribe completes iteration; cancelling the Swift task or
+  breaking iteration cancels the subscription.
   [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#stopping-streams]
   [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#consumer-side-cancellation]
 
-- **Errors.** An exported `Result<T, E>` becomes a throwing target call when
-  `E` is a string, `#[error]` struct, or `#[error]` enum;
-  simple and payload error enums map to Swift error enums, and the same mapping
-  applies to async results. [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#supported-error-types]
-  [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#struct-errors]
-  [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors]
+- **Errors.** Exported `Result<T, E>` becomes a throwing target call when `E`
+  is a documented string, `#[error]` struct, or `#[error]` enum; the same rule
+  applies to async results.
+  [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#supported-error-types]
   [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#async-errors]
 
-- **Custom Types.** For an external or otherwise non-native boundary type,
-  `custom_type!` defines conversions to a supported representation, while
-  `#[custom_ffi]` plus `CustomFfiConvertible` provides manual owned-type
-  conversion; representation types may be primitives, `String`, `Vec`, or a
-  BoltFFI data type and may be nested in containers.
+- **Custom Types.** `custom_type!` converts an external or otherwise non-native
+  type to a supported representation; `#[custom_ffi]` plus
+  `CustomFfiConvertible` provides manual owned conversion. Documented
+  representations include primitives, `String`, `Vec`, and BoltFFI data types.
   [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#the-custom_type-macro]
   [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#the-customfficonvertible-trait]
   [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#representation-types]
-  A failed custom conversion panics rather than returning a recoverable boundary
-  error. [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#conversion-errors]
+  Failed custom conversion panics rather than producing a recoverable boundary
+  error.
+  [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#conversion-errors]
 
-- **Configuration.** A root `boltffi.toml` selects package identity, source
-  crate, Apple output and deployment settings, Swift module name, SwiftPM
-  layout, slices, symbols, and the limited documented type-mapping overrides.
+- **Configuration.** Root `boltffi.toml` configuration selects package
+  identity, source crate, Apple settings, Swift module name, SwiftPM layout,
+  slices, symbols, and documented type-mapping overrides.
   [https://www.boltffi.dev/docs/configuration.md | docs/boltffi-swift-bindings/docs-snapshot/configuration.md#package-identity]
   [https://www.boltffi.dev/docs/configuration.md | docs/boltffi-swift-bindings/docs-snapshot/configuration.md#apple-configuration]
   [https://www.boltffi.dev/docs/configuration.md | docs/boltffi-swift-bindings/docs-snapshot/configuration.md#type-mappings]
 
-- **Packaging.** `boltffi generate swift` generates source only, whereas
-  `boltffi pack apple` builds Rust, generates Swift, and produces an XCFramework
-  and Swift package; the Apple package supports bundled, split, and FFI-only
-  layouts. [https://www.boltffi.dev/docs/packaging.md | docs/boltffi-swift-bindings/docs-snapshot/packaging.md#overview]
+- **Packaging.** `boltffi generate swift` generates source, while
+  `boltffi pack apple` builds Rust, generates Swift, and produces an
+  XCFramework and Swift package with documented bundled, split, or FFI-only
+  layouts.
+  [https://www.boltffi.dev/docs/packaging.md | docs/boltffi-swift-bindings/docs-snapshot/packaging.md#overview]
   [https://www.boltffi.dev/docs/packaging.md | docs/boltffi-swift-bindings/docs-snapshot/packaging.md#step-by-step-workflow]
   [https://www.boltffi.dev/docs/packaging.md | docs/boltffi-swift-bindings/docs-snapshot/packaging.md#swiftpm-layouts]
 
-- **Experimental Features.** Experimental mode is enabled by CLI flag or
-  configuration and the listed experimental stream work concerns Kotlin
-  Multiplatform and TypeScript, not Swift.
+- **Experimental Features.** Experimental mode is configured by CLI or
+  configuration; the listed experimental stream work concerns Kotlin
+  Multiplatform and TypeScript rather than Swift.
   [https://www.boltffi.dev/docs/experimental.md | docs/boltffi-swift-bindings/docs-snapshot/experimental.md#enabling]
   [https://www.boltffi.dev/docs/experimental.md | docs/boltffi-swift-bindings/docs-snapshot/experimental.md#feature-details]
 
-## 2. Integration shape and R2 verdict
+## 3. Authoritative streaming rule
 
-### Required project attachment
+### 3.1 Current delivery path
 
-For the single Rust library shown by the documentation, setup is a normal
-`boltffi` dependency, a build dependency on `boltffi`, a library crate type that
-includes `staticlib`, and a `build.rs` calling `boltffi::build::generate()`.
-[https://www.boltffi.dev/docs/installation.md | docs/boltffi-swift-bindings/docs-snapshot/installation.md#add-to-your-project]
-[https://www.boltffi.dev/docs/installation.md | docs/boltffi-swift-bindings/docs-snapshot/installation.md#create-buildrs]
-The current `pi-ai`, `pi-agent-core`, `pi-agent-runtime-tokio`, and
-`pi-agent-session` manifests contain none of that setup
-(`crates/pi-ai/Cargo.toml:1`, `crates/pi-agent-core/Cargo.toml:1`,
-`crates/pi-agent-runtime-tokio/Cargo.toml:1`,
-`crates/pi-agent-session/Cargo.toml:1`). Those manifest and build-script edits
-would be required wherever the documented single-library setup is applied,
-although they do not alter library contracts. Whether one binding package can
-discover annotated dependency crates is unresolved below.
+The current concrete path is:
 
-The proposed gate is a `boltffi` Cargo feature in each participating crate, with
-ordinary Rust conditional attributes on existing items:
+```text
+borrowed Agent stream
+        |
+        | actor polls
+        v
+bounded Tokio mpsc
+        |
+        | sender.send(event).await
+        v
+TokioAgentRun::next_event
+        |
+        v
+consumer
+```
+
+The actor creates a run-local `CancellationToken`, polls the borrowed core
+stream, applies each event to the published snapshot, and then dispatches it
+(`crates/pi-agent-runtime-tokio/src/lib.rs:511`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:734`). The observational channel is
+bounded at a default capacity of 128
+(`crates/pi-agent-runtime-tokio/src/lib.rs:33`). `dispatch_event` awaits
+`sender.send(event.clone())`; a full channel therefore delays actor progress
+rather than discarding that event
+(`crates/pi-agent-runtime-tokio/src/lib.rs:838`).
+
+Current ordering for each event is:
+
+1. Apply the event and publish the snapshot
+   (`crates/pi-agent-runtime-tokio/src/lib.rs:754`,
+   `crates/pi-agent-runtime-tokio/src/lib.rs:761`).
+2. Send the observation to the run channel
+   (`crates/pi-agent-runtime-tokio/src/lib.rs:838`).
+3. Await registered sinks in registration order
+   (`crates/pi-agent-runtime-tokio/src/lib.rs:842`).
+4. Await the run-scoped sink
+   (`crates/pi-agent-runtime-tokio/src/lib.rs:848`).
+5. Return to polling the core stream
+   (`crates/pi-agent-runtime-tokio/src/lib.rs:748`).
+
+`RunFinished` is captured before dispatch, but the completion result and idle
+notification are sent only after `drive_run` returns, so they include
+`RunFinished` sink settlement
+(`crates/pi-agent-runtime-tokio/src/lib.rs:762`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:718`).
+
+### 3.2 Why `EventSubscription` is forbidden here
+
+Every documented `#[ffi_stream]` mode requires
+`Arc<EventSubscription<T>>`; the Swift async mode is the one that generates
+`AsyncStream<T>`.
+[https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#the-ffi_stream-attribute]
+[https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#async-mode]
+The same documented subscription has a finite ring buffer and drops new events
+when full without blocking the producer.
+[https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#buffer-capacity]
+
+Therefore:
+
+- No exported method returning `EventSubscription<AgentEventEnvelope>` or
+  `EventSubscription<AgentEvent>` is permitted. The selected canonical Tokio
+  item is `AgentEventEnvelope`, whose payload is `AgentEvent`
+  (`crates/pi-agent-core/src/events.rs:329`,
+  `crates/pi-agent-core/src/events.rs:335`).
+- No exported method returning `EventSubscription<AssistantEvent>` is
+  permitted. `AssistantEvent` is the lossless normalized stream nested in
+  `AgentEvent::AssistantUpdate`
+  (`crates/pi-ai/src/streaming.rs:360`,
+  `crates/pi-agent-core/src/events.rs:113`,
+  `crates/pi-agent-core/src/events.rs:117`).
+- Increasing the ring capacity is not a semantic fix because the documented
+  overflow rule still drops.
+  [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#buffer-capacity]
+- Callback and batch stream modes are also unsuitable because they use
+  `EventSubscription<T>` as well.
+  [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#stream-modes]
+
+Adding a BoltFFI ring after the existing Tokio channel would introduce a new
+loss point only at the foreign-language boundary.
+[https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#buffer-capacity]
+
+### 3.3 Exported Agent pull contract
+
+The exported boundary is an ordinary async class method:
 
 ```rust
-#[cfg(feature = "boltffi")]
-use boltffi::*;
+pub async fn next_event(
+    &self,
+) -> Result<Option<AgentEventEnvelope>, TokioAgentError>;
+```
 
-#[cfg_attr(feature = "boltffi", data)]
-pub struct PromptImage {
-    pub data: String,
-    pub mime_type: String,
+Section 4.5 selects `AgentEventEnvelope` as the canonical Tokio observation and
+sink item. Exported Rust async class methods map to Swift async methods,
+`Result` maps to throwing calls, and `Option<T>` maps to a Swift optional.
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#async-methods]
+[https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#error-handling]
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#option]
+Composing those documented mappings, the expected Swift consumption shape is
+an inference:
+
+```swift
+while let envelope = try await run.nextEvent() {
+    consume(envelope)
 }
 ```
 
-**UNRESOLVED: not answered by the documentation** — whether BoltFFI's discovery
-and generated build support `cfg_attr`, and whether the dependency and build
-script themselves may safely be optional. Pages checked:
+This method pulls directly from the Rust-owned Tokio receiver. It adds no second
+queue and retains the actor's current backpressure behavior
+(`crates/pi-agent-runtime-tokio/src/lib.rs:127`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:399`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:838`).
+
+### 3.4 Exported direct model-call pull contract
+
+R3 also covers model calls made directly through the concrete `Models` control
+plane, not only assistant events nested in an Agent run. Today
+`Models::stream_simple` takes an owned `ModelRequest` and `CancellationToken`
+and returns a future establishing an owned `AssistantStream`
+(`crates/pi-ai/src/models.rs:762`). `ModelRuntime::stream` exposes the same
+request/stream contract at the narrow execution seam
+(`crates/pi-ai/src/runtime.rs:89`). `AssistantStream` is a
+`Stream<Item = AssistantEvent>` fused after a terminal event or raw EOF
+(`crates/pi-ai/src/streaming.rs:1900`,
+`crates/pi-ai/src/streaming.rs:1934`). The trait-object seam remains
+unannotated; the concrete `Models` path is projected by the canonical Tokio
+owner in section 4.8.
+
+The exported item is a Rust-owned class with this lossless pull:
+
+```rust
+pub async fn next_event(
+    &self,
+) -> Result<Option<AssistantEvent>, TokioAssistantError>;
+```
+
+An exported async class method maps to a Swift async method, `Result` maps to a
+throwing call, and `Option<T>` maps to a Swift optional.
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#async-methods]
+[https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#error-handling]
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#option]
+Composing those documented mappings, the expected Swift loop is an inference:
+
+```swift
+while let event = try await stream.nextEvent() {
+    consume(event)
+}
+```
+
+The direct stream uses a bounded Tokio channel whose sender awaits capacity; it
+does not use `EventSubscription<AssistantEvent>`. The documented BoltFFI
+subscription drops new events on overflow instead of applying backpressure, so
+it cannot carry this authoritative stream.
+[https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#buffer-capacity]
+
+Request establishment failure remains a thrown `RequestStartError`. After an
+`AssistantStream` exists, successful, failed, and cancelled completion are the
+existing terminal `AssistantEvent::{Finished,Failed,Cancelled}` values
+(`crates/pi-ai/src/runtime.rs:42`,
+`crates/pi-ai/src/streaming.rs:521`,
+`crates/pi-ai/src/streaming.rs:528`,
+`crates/pi-ai/src/streaming.rs:534`). `next_event` returns `Ok(None)` only after
+one of those terminal events has been delivered. If the producer reaches raw
+EOF first, the next pull throws `TokioAssistantError::MissingTerminalEvent`;
+the current raw `AssistantStream` otherwise fuses on that EOF without
+distinguishing it (`crates/pi-ai/src/streaming.rs:1948`). Actor/task failure is
+reported as `TokioAssistantError::Closed`. These errors are canonical runtime
+protocol errors, not replacement provider envelopes.
+
+## 4. Canonical Rust API changes
+
+All changes in this section belong in existing canonical crates. None creates a
+binding crate, duplicate record hierarchy, IDL, command dispatcher, or required
+Swift wrapper.
+
+### 4.1 Reshape `TokioAgentRun`
+
+The current `TokioAgentRun` directly owns
+`mpsc::Receiver<AgentEvent>` and a consuming
+`oneshot::Receiver<Result<RunOutcome, TokioAgentError>>`
+(`crates/pi-agent-runtime-tokio/src/lib.rs:127`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:128`). Its methods are currently
+`next_event(&mut self) -> Option<AgentEvent>` and
+`outcome(self) -> Result<RunOutcome, TokioAgentError>`
+(`crates/pi-agent-runtime-tokio/src/lib.rs:138`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:143`). Calling current `outcome()`
+without draining more than the 128-event channel capacity can wait forever:
+the actor can be blocked in `send().await` while `outcome` waits on the
+completion oneshot (`crates/pi-agent-runtime-tokio/src/lib.rs:399`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:838`).
+
+Use interior synchronization and reusable completion:
+
+```rust
+pub struct TokioAgentRun {
+    events: tokio::sync::Mutex<mpsc::Receiver<AgentEventEnvelope>>,
+    completion:
+        watch::Receiver<Option<Result<RunOutcome, TokioAgentError>>>,
+    cancellation: CancellationToken,
+    // Private state records observation-closed and terminal validation.
+}
+```
+
+This is the section 4.5 decision applied to the run storage.
+`TokioAgentError` should derive `Clone` so a cached completion can be returned
+more than once; all of its current payloads are cloneable
+(`crates/pi-agent-runtime-tokio/src/lib.rs:70`,
+`crates/pi-agent-core/src/error.rs:13`).
+
+The one annotated inherent impl has this canonical API:
+
+```rust
+#[export]
+impl TokioAgentRun {
+    pub async fn next_event(
+        &self,
+    ) -> Result<Option<AgentEventEnvelope>, TokioAgentError>;
+
+    pub async fn outcome(
+        &self,
+    ) -> Result<RunOutcome, TokioAgentError>;
+
+    pub fn cancel(&self);
+
+    pub async fn cancel_and_outcome(
+        &self,
+    ) -> Result<RunOutcome, TokioAgentError>;
+}
+```
+
+These are the selected canonical Rust method shapes. Applying `#[export]` to
+the impl remains gated on the two `TokioAgentError::Agent(AgentError)` mapping
+questions in section 8.3; the design does not infer support for that error shape
+from the documented async-method mapping.
+[https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#supported-error-types]
+[https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enums-with-payloads]
+
+`#[export]` on an inherent impl is the documented Rust-class mapping; async
+`&self` methods are documented, and the default exported-class check requires
+`Send + Sync`.
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class]
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#async-methods]
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#thread-safety]
+The implementation must pass that default check; it must not use
+`#[export(single_threaded)]`.
+
+`request_run` must create the `CancellationToken` before it submits
+`RunChannels`, pass one clone to the actor, and retain one clone in the returned
+`TokioAgentRun`. The actor currently creates separate tokens inside each
+prompt/continue/retry branch
+(`crates/pi-agent-runtime-tokio/src/lib.rs:511`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:546`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:578`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:616`). Moving creation to
+`request_run` makes run-local cancellation available immediately without
+adding a mailbox command or a second cancellation identity.
+
+`request_run` is also a cancellation-sensitive establishment boundary. Its
+current implementation creates the event/completion/acceptance channels,
+submits the actor command, awaits `accepted_rx`, and only then constructs the
+returned `TokioAgentRun`
+(`crates/pi-agent-runtime-tokio/src/lib.rs:394`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:399`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:411`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:412`). On the actor side,
+`accept_run` marks the actor non-idle and sends acceptance
+(`crates/pi-agent-runtime-tokio/src/lib.rs:697`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:704`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:705`); the prompt branch can then
+enter `drive_run` immediately (`crates/pi-agent-runtime-tokio/src/lib.rs:523`).
+The continue and retry branches have the same transition
+(`crates/pi-agent-runtime-tokio/src/lib.rs:596`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:634`). Thus acceptance can wake the
+establishment future while the actor has already begun an accepted run.
+
+Add a private canonical `RunEstablishmentGuard` inside `request_run`. It is
+armed before command submission and owns the not-yet-handed-off event receiver,
+the reusable completion receiver, and one clone of the same cancellation token
+placed in `RunChannels`. Conceptually:
+
+```rust
+struct RunEstablishmentGuard {
+    events: Option<mpsc::Receiver<AgentEventEnvelope>>,
+    completion:
+        Option<watch::Receiver<Option<Result<RunOutcome, TokioAgentError>>>>,
+    cancellation: Option<CancellationToken>,
+    armed: bool,
+}
+```
+
+While armed, `Drop` must cancel the token and close/drop the event receiver,
+discarding any buffered observation. It also drops the unclaimed completion
+receiver. After successful actor acceptance, one non-awaiting `handoff` method
+moves those three values into `TokioAgentRun` and disarms the guard as the final
+step that produces `Ok(TokioAgentRun)`. There must be no suspension point
+between disarming and returning the run. Rejection and every early return leave
+the guard armed. Merely sending or receiving actor acceptance never disarms it.
+This is private RAII inside the canonical actor API, not a binding-only object.
+
+This guard closes the specific post-acceptance race: if Swift cancels an
+exported prompt/continue/retry establishment await after the actor sent
+acceptance but before the generated binding repolls and receives the run,
+BoltFFI cooperatively stops further polling of that Rust future; its documented
+cleanup path then reaches `free`.
+[https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#cancellation]
+[https://www.boltffi.dev/docs/async-internals.md | docs/boltffi-swift-bindings/docs-snapshot/async-internals.md#cancellation]
+Freeing the still-pending future drops the armed guard, which is the proposed
+Rust cleanup action that cancels the actor's shared token and closes
+observation. Without that explicit cancellation, closing the current receiver
+only makes `dispatch_event` disable subsequent observational sends; it does not
+cancel the actor-owned token or core run
+(`crates/pi-agent-runtime-tokio/src/lib.rs:837`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:840`). The actor must continue far
+enough to settle the cancellation lifecycle and sinks and publish idle even
+though no `TokioAgentRun` was handed to the caller; an ensuing orderly shutdown
+must then let `actor_loop` exit and release its runtime lease. Section 9 test 19
+is the mandatory race proof.
+
+`next_event` must:
+
+1. Hold the receiver mutex across one `recv` so concurrent polls serialize.
+2. Return the next owned envelope unchanged.
+3. Track whether its embedded event delivered a matching `RunFinished`.
+4. On channel EOF, await/read cached actor completion.
+5. Return `Ok(None)` only after a validated normal end.
+6. Return the existing `MissingRunFinished`, `SnapshotInvariant`, or `Closed`
+   variant for protocol/actor failure as applicable
+   (`crates/pi-agent-runtime-tokio/src/lib.rs:74`,
+   `crates/pi-agent-runtime-tokio/src/lib.rs:78`,
+   `crates/pi-agent-runtime-tokio/src/lib.rs:80`).
+
+Expected provider failure and cancellation remain in-band
+`RunOutcome::Failed` and `RunOutcome::Cancelled` values
+(`crates/pi-agent-core/src/events.rs:62`,
+`crates/pi-agent-core/src/events.rs:69`). They do not become thrown transport
+errors.
+
+`outcome(&self)` preserves the practical meaning of the old consuming method:
+the caller no longer intends to observe intermediate events. It must acquire
+the receiver, close it, discard all buffered observations, thereby wake any
+actor send blocked on capacity, and then await the reusable cached completion.
+After `outcome` begins, later `next_event` calls return `Ok(None)` after a
+successful cached completion or return the same cached actor/protocol error.
+Cancelling one `outcome` await must not consume or destroy the completion for a
+later call.
+
+`cancel(&self)` cancels the retained run token without waiting behind the actor
+mailbox. `cancel_and_outcome(&self)` cancels that token, closes/discards
+observations using the same operation as `outcome`, and waits for terminal
+settlement.
+
+Keep advanced receiver access in a separate unannotated Rust-only impl:
+
+```rust
+impl TokioAgentRun {
+    pub fn events(&mut self) -> &mut mpsc::Receiver<AgentEventEnvelope> {
+        self.events.get_mut()
+    }
+}
+```
+
+Raw Tokio envelope receivers are not part of the generated boundary.
+BoltFFI's documented `#[skip]` can also exclude a class method, but physically
+separating the impl keeps the foreign-facing block concrete and auditable.
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#skipping-methods]
+
+### 4.2 Validate EOF at the pull boundary
+
+Current `drive_run` already converts core EOF without `RunFinished` to
+`TokioAgentError::MissingRunFinished`
+(`crates/pi-agent-runtime-tokio/src/lib.rs:823`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:824`). The current event receiver,
+however, reports only `None`; a caller can miss the actor error unless it also
+consumes `outcome` (`crates/pi-agent-runtime-tokio/src/lib.rs:138`).
+
+The reshaped pull method couples EOF to cached completion. Normal EOF requires:
+
+- a delivered `RunFinished`;
+- a matching cached `RunOutcome`;
+- no snapshot-assembly error; and
+- settled run-scoped and registered sinks.
+
+Snapshot assembly errors already use `SnapshotInvariant`
+(`crates/pi-agent-runtime-tokio/src/lib.rs:859`). Sender/owner-task loss uses
+`Closed` (`crates/pi-agent-runtime-tokio/src/lib.rs:74`). This distinction is
+the Rust API contract as well as the Swift throwing contract.
+
+### 4.3 Fix sink-only runs
+
+`prompt_text_with_sink` currently calls the same `request_run` path as a pull
+run (`crates/pi-agent-runtime-tokio/src/lib.rs:217`).
+`request_run` always creates the bounded event channel
+(`crates/pi-agent-runtime-tokio/src/lib.rs:399`), and `dispatch_event` awaits
+that sender before it invokes the run-scoped sink
+(`crates/pi-agent-runtime-tokio/src/lib.rs:838`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:848`). A caller that ignores the run
+receiver can therefore stop sink delivery after the channel fills.
+
+Make the observation sender optional in canonical `RunChannels` and
+`drive_run`, with item type
+`Option<mpsc::Sender<AgentEventEnvelope>>`. A pull run installs
+`Some(sender)`; a sink-only run installs `None`. `prompt_text_with_sink` still
+returns `TokioAgentRun` so callers can cancel and await outcome, but the run is
+constructed in observation-closed mode and no hidden drainer is spawned. This
+is preferable to requiring callers to race an immediate `outcome()` call.
+
+The existing UniFFI binding's background drain at
+`bindings/pi-ffi/src/lib.rs:690` is not copied.
+
+### 4.4 Export `AgentEventSink` as an acknowledged async trait
+
+The current trait returns an explicit
+`SendBoxFuture<'static, ()>` (`crates/pi-agent-runtime-tokio/src/lib.rs:45`).
+Rewrite that same canonical trait:
+
+```rust
+#[async_trait::async_trait]
+#[export]
+pub trait AgentEventSink: Send + Sync + 'static {
+    async fn on_event(
+        &self,
+        envelope: AgentEventEnvelope,
+        cancellation: CancellationToken,
+    );
+}
+```
+
+BoltFFI documents `#[export]` host traits, `Arc<dyn Trait>` shared/stored
+ownership, `Send + Sync` for multithreaded callbacks, and
+`#[async_trait]` plus actual `async fn`; when Rust calls the async method it
+awaits the target implementation before continuing.
+[https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#traits]
+[https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#ownership]
+[https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods]
+[https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#thread-safety]
+
+The repository-side acknowledgement contract remains explicit:
+`dispatch_event` awaits each registered sink in order and then awaits the
+run-scoped sink before it returns to `drive_run`
+(`crates/pi-agent-runtime-tokio/src/lib.rs:765`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:842`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:848`). The async-trait page says a
+Rust caller awaits the target implementation before continuing.
+[https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods]
+
+By contrast, whether BoltFFI's callback-mode *stream* provides any
+producer-side acknowledgement barrier is
+**UNRESOLVED: not answered by the documentation**. Pages checked:
+`streaming.md#callback-mode`,
+`streaming.md#buffer-capacity`, and `streaming.md#how-it-works`. Those pages
+describe a callback handle, a finite ring buffer, event dropping, and batched
+consumer polling, but no acknowledgement from target callback completion to the
+Rust producer. Therefore callback-mode `EventSubscription` is not a permitted
+sink replacement.
+[https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#callback-mode]
+[https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#buffer-capacity]
+[https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#how-it-works]
+
+The entire annotated signature above is conditional on resolving the owned
+`CancellationToken` callback-argument gap identified in section 1. The
+documentation separately shows async trait methods and methods that pass
+Rust-backed classes, but does not show their combination.
+**UNRESOLVED: not answered by the documentation**; pages checked:
+`callbacks.md#async-methods`, `callbacks.md#ownership`, and
+`classes.md#methods-that-take-or-return-classes`. The annotation milestone must
+generate and execute a minimal Swift callback before the sink surface is
+accepted. If it fails, acknowledged Swift sinks remain blocked and the design
+must return to the owner; it may not replace the token with a binding-only
+integer or command.
+[https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods]
+[https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#ownership]
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes]
+
+Preserve native closure ergonomics with a blanket implementation that changes
+the current item from `AgentEvent` to `AgentEventEnvelope`, accepts
+`Fn(AgentEventEnvelope, CancellationToken) -> SendBoxFuture<'static, ()>`, and
+awaits that future inside the new async trait method. The current bare-event
+blanket implementation is at `crates/pi-agent-runtime-tokio/src/lib.rs:54`;
+this is part of the canonical runtime item promotion, not a binding-only
+adapter.
+
+Inside a sink, only re-entrant capabilities are safe:
+`CancellationToken::cancel` (`crates/pi-ai/src/cancellation.rs:62`),
+`TokioAgentHandle::cancel_now`
+(`crates/pi-agent-runtime-tokio/src/lib.rs:301`), and
+`TokioAgentHandle::latest_snapshot`
+(`crates/pi-agent-runtime-tokio/src/lib.rs:364`). Awaiting a mailbox method from
+the sink can wait behind that sink's own acknowledgement because the actor is
+inside `dispatch_event` until the sink returns
+(`crates/pi-agent-runtime-tokio/src/lib.rs:765`).
+
+### 4.5 Decision: promote the canonical event item to `AgentEventEnvelope`
+
+The code defines the persistence/FFI value:
+
+```rust
+pub struct AgentEventEnvelope {
+    pub sequence: u64,
+    pub run_id: RunId,
+    pub event: AgentEvent,
+}
+```
+
+(`crates/pi-agent-core/src/events.rs:329`,
+`crates/pi-agent-core/src/events.rs:331`,
+`crates/pi-agent-core/src/events.rs:333`,
+`crates/pi-agent-core/src/events.rs:335`). Architecture Part 1 says to wrap
+events in this form for persistence and FFI
+(`docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part1-proposal.md:1018`).
+The current Tokio run, channel, and sink use bare `AgentEvent`
+(`crates/pi-agent-runtime-tokio/src/lib.rs:127`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:420`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:49`).
+
+The two legitimate options from the owner review were:
+
+1. Preserve the current ordinary Rust actor API. `next_event` and
+   `AgentEventSink::on_event` continue carrying bare `AgentEvent`.
+2. Promote `AgentEventEnvelope` to the canonical Tokio observation and sink
+   item. The actor allocates `sequence` and `run_id` once, before fan-out, so
+   pull consumers, sinks, persistence, and Swift receive identical identity.
+
+**Decision: option 2, the owner review's preferred option, is selected.**
+Option 1 is not the binding design. The selected contract makes sequence gaps
+detectable and gives durable sessions the same authoritative identity as live
+observation. This must be a canonical runtime change because the sequence must
+be allocated once before the event branches to the observation channel and
+sinks. A binding-only counter would create a second authority; the current
+UniFFI layer does exactly that at `bindings/pi-ffi/src/lib.rs:703` and
+`bindings/pi-ffi/src/lib.rs:730`.
+
+The actor reads the event's sequence from the pre-apply
+`snapshot.next_sequence`. On `RunStarted`, it takes and retains that event's
+`run_id`; every later event in the run uses the retained identity. It applies
+the event, which advances the snapshot sequence at
+`crates/pi-agent-runtime-tokio/src/lib.rs:858`, and then constructs exactly one
+envelope for both the observational sender and every sink. An event before
+`RunStarted`, or one whose run identity conflicts with the active run, is a
+`SnapshotInvariant` error rather than an invitation to invent an identity.
+No consumer allocates or repairs sequence values.
+
+Accordingly, every Agent pull and sink signature in this design carries
+`AgentEventEnvelope`, and acceptance test 12 is unconditional. The embedded
+`event` remains the existing canonical `AgentEvent`; there is no duplicate
+envelope hierarchy.
+
+### 4.6 Add concrete collection inputs and preserve owned values
+
+`TokioAgentHandle::prompt_records` currently accepts generic
+`impl IntoIterator<Item = AgentRecord>` and immediately collects a `Vec`
+(`crates/pi-agent-runtime-tokio/src/lib.rs:230`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:232`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:234`). Change the canonical actor
+method to accept `Vec<AgentRecord>` directly, or add a distinctly named
+Rust-generic convenience that delegates to the concrete method. `Vec<T>` is a
+documented boundary collection.
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#collections]
+The exported method must be the concrete one; no duplicate input record is
+introduced.
+
+`snapshot` and `latest_snapshot` already return owned `AgentSnapshot`
+(`crates/pi-agent-runtime-tokio/src/lib.rs:349`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:364`). Steering and follow-up already
+take owned `AgentRecord` and return owned `QueueReceipt`
+(`crates/pi-agent-runtime-tokio/src/lib.rs:255`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:257`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:270`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:272`). Preserve those ordinary Rust
+contracts.
+
+### 4.7 Own the Tokio runtime
+
+`TokioAgentHandle::with_capacities` currently calls
+`tokio::runtime::Handle::try_current()` and returns `NoRuntime` if no runtime is
+entered (`crates/pi-agent-runtime-tokio/src/lib.rs:178`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:183`). BoltFFI provides
+future polling but no Rust executor and requires a runtime to be active for
+Tokio-dependent libraries.
+[https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#runtime]
+
+Add `TokioRuntimeOwner` to `pi-agent-runtime-tokio` as the concrete production
+factory. It owns the runtime supervisor, a cloned concrete `Models` control
+plane, a cloned `ToolRegistry`, and the actor capacities. `Models` is already a
+cloneable concrete control-plane type and implements the narrow `ModelRuntime`
+capability (`crates/pi-ai/src/models.rs:47`,
+`crates/pi-ai/src/models.rs:48`,
+`crates/pi-ai/src/models.rs:49`,
+`crates/pi-ai/src/models.rs:1399`). `ToolRegistry` is already cloneable and has
+an empty constructor (`crates/pi-agent-core/src/tools.rs:490`,
+`crates/pi-agent-core/src/tools.rs:491`,
+`crates/pi-agent-core/src/tools.rs:497`). `AgentState` is the existing owned
+agent construction value (`crates/pi-agent-core/src/state.rs:23`). The factory
+therefore needs no bare `Agent`, arbitrary trait object, JSON command, or
+binding-only configuration record.
+
+Add an inherent `Models::new() -> Self` that delegates to the existing
+`Default` implementation (`crates/pi-ai/src/models.rs:99`,
+`crates/pi-ai/src/models.rs:101`). This is the canonical empty control-plane
+constructor for Rust and Swift, not a scripted runtime and not a complete
+production configuration. BoltFFI documents class constructors as inherent
+methods returning `Self`.
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors]
+Whether a `Default` trait implementation can itself generate a target-language
+constructor is **UNRESOLVED: not answered by the documentation**; pages checked:
+`classes.md#defining-a-class` and `classes.md#constructors`. This design does not
+depend on that behavior.
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class]
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors]
+
+#### First concrete production `Models` path: OpenAI with native HTTP and API-key auth
+
+Empty `Models::new()` is insufficient for an ordinary Swift application. The
+existing mutation accepts `ProviderRegistration`
+(`crates/pi-ai/src/models.rs:399`), but that record contains
+`Arc<dyn AuthResolver>`, `Arc<dyn ModelCatalog>`, a dispatch map of
+`Arc<dyn ChatApi>`, and a retry-classifier trait object
+(`crates/pi-ai/src/provider.rs:2320`,
+`crates/pi-ai/src/provider.rs:2324`,
+`crates/pi-ai/src/provider.rs:2326`,
+`crates/pi-ai/src/provider.rs:2331`,
+`crates/pi-ai/src/provider.rs:2335`). The current OpenAI factory still requires
+`Arc<dyn HttpTransport>` (`providers/pi-ai-openai/src/handler.rs:487`,
+`providers/pi-ai-openai/src/handler.rs:488`), whose execution contract is at
+`crates/pi-ai/src/middleware.rs:275`. None of those authoring capabilities is a
+foreign ordinary-consumer input. BoltFFI lists arbitrary `dyn Trait` among the
+types that do not cross its ordinary value boundary.
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported]
+
+Add one concrete, canonical provider factory to `pi-ai-openai`:
+
+```rust
+pub struct OpenAiModelsFactory {
+    transport: Arc<NativeOpenAiHttpTransport>,
+    api_key: SecretString,
+}
+
+#[error]
+pub struct OpenAiModelsError {
+    pub code: String,
+    pub message: String,
+}
+
+#[export]
+impl OpenAiModelsFactory {
+    pub fn new(
+        api_key: String,
+    ) -> Result<Self, OpenAiModelsError>;
+
+    pub fn build(
+        &self,
+    ) -> Result<Models, OpenAiModelsError>;
+}
+```
+
+This is a normal Rust provider-construction API, not an FFI facade. Its fields
+are private implementation state; BoltFFI's documented class form keeps the
+object in Rust and exposes only methods in the annotated impl.
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class]
+The fallible `new` uses the documented fallible-constructor shape, `build`
+returns another Rust-backed class using the documented class-valued method
+shape, and the proposed two-string error uses the documented structured-error
+shape.
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#fallible-constructors]
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes]
+[https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#struct-errors]
+
+`NativeOpenAiHttpTransport` is a concrete production transport implemented in
+`pi-ai-openai`; it implements the current `HttpTransport` request,
+cancellation, established-response, and streaming-body contract
+(`crates/pi-ai/src/middleware.rs:275`,
+`crates/pi-ai/src/middleware.rs:277`,
+`crates/pi-ai/src/middleware.rs:281`). It is not a Swift callback and is never a
+generated parameter. `OpenAiModelsFactory::new` creates that concrete
+transport and converts the supplied key immediately to the existing redacting
+`SecretString` (`crates/pi-ai/src/auth.rs:24`,
+`crates/pi-ai/src/auth.rs:26`,
+`crates/pi-ai/src/auth.rs:29`). The factory must reject an empty key and report
+only sanitized error text.
+
+`build` returns the canonical `Models`, not an `OpenAiModels` wrapper. It:
+
+1. Calls the existing `openai_provider` with the concrete transport coerced to
+   its internal `Arc<dyn HttpTransport>` seam
+   (`providers/pi-ai-openai/src/handler.rs:487`).
+2. Seeds an `InMemoryCredentialStore` with the canonical
+   `Credential::ApiKey(ApiKeyCredential)` for provider `openai`; those existing
+   values are at `crates/pi-ai/src/auth.rs:52`,
+   `crates/pi-ai/src/auth.rs:55`, `crates/pi-ai/src/auth.rs:208`, and
+   `crates/pi-ai/src/auth.rs:212`.
+3. Calls the existing `ModelsBuilder::credential_store`,
+   `ModelsBuilder::provider`, and `ModelsBuilder::build`
+   (`crates/pi-ai/src/models.rs:1476`,
+   `crates/pi-ai/src/models.rs:1501`,
+   `crates/pi-ai/src/models.rs:1541`).
+
+The existing OpenAI registration installs its bearer resolver at
+`providers/pi-ai-openai/src/handler.rs:500`; that resolver is built over the
+standard environment/API-key auth at
+`providers/pi-ai-openai/src/handler.rs:781` and
+`providers/pi-ai-openai/src/handler.rs:785`. The canonical API-key resolver
+checks a stored nonempty key before ambient environment lookup
+(`crates/pi-ai/src/auth.rs:1485`,
+`crates/pi-ai/src/auth.rs:1487`,
+`crates/pi-ai/src/auth.rs:1494`). Thus the seeded credential is the auth path
+used by requests from the returned `Models`; it is not a parallel provider
+configuration.
+
+Add `InMemoryCredentialStore::with_credential(provider, credential) -> Self`
+beside its current empty constructor
+(`crates/pi-ai/src/auth.rs:347`, `crates/pi-ai/src/auth.rs:349`) so this seed is
+synchronous and atomic at construction. That helper remains ordinary Rust-only
+for this milestone; neither `CredentialStore` nor its lease trait enters the
+generated API. The resulting `Models` has the real OpenAI catalog, provider
+auth resolver, native transport, and stored API key before it is handed to
+`TokioRuntimeOwner`. It is usable by both `Agent` and direct
+`Models::stream_simple` through the existing concrete control plane
+(`crates/pi-ai/src/models.rs:762`, `crates/pi-ai/src/models.rs:1399`).
+
+This first path is deliberately one provider and process-local credential
+storage. Additional concrete providers and a file-backed credential factory can
+be added later without exposing provider-authoring traits. The initial package
+is not accepted unless the generated-language construction test in section 9
+builds this factory, obtains its configured `Models`, spawns an actor, and
+shuts that actor down without any test-only constructor.
+
+The canonical ordinary-Rust API is:
+
+```rust
+pub struct TokioRuntimeOwner {
+    supervisor: Arc<RuntimeSupervisor>,
+    models: Models,
+    tools: ToolRegistry,
+    command_capacity: usize,
+    event_capacity: usize,
+}
+
+#[export]
+impl TokioRuntimeOwner {
+    pub fn new(
+        models: &Models,
+        tools: &ToolRegistry,
+    ) -> Result<Self, TokioAgentError>;
+
+    pub fn spawn_agent(
+        &self,
+        state: AgentState,
+    ) -> Result<TokioAgentHandle, TokioAgentError>;
+
+    pub async fn stream_model(
+        &self,
+        request: ModelRequest,
+    ) -> Result<TokioAssistantStream, RequestStartError>;
+}
+
+impl TokioRuntimeOwner {
+    pub fn runtime_handle(&self) -> &tokio::runtime::Handle; // Rust-only
+}
+```
+
+`new` clones the supplied canonical objects. `spawn_agent` performs the exact
+ordinary construction internally:
+
+```rust
+let agent = Agent::new(
+    Arc::new(self.models.clone()),
+    state,
+    self.tools.clone(),
+)?;
+```
+
+That is the current native constructor contract
+(`crates/pi-agent-core/src/run.rs:140`) with the concrete `Models`
+implementation selected instead of exposing `Arc<dyn ModelRuntime>`. A no-tool
+Swift application supplies `ToolRegistry::new`; the later Swift-authored-tool
+milestone populates the same canonical registry. The first production Swift
+application obtains its configured canonical `Models` from
+`OpenAiModelsFactory::build` above. Provider implementation traits remain
+unannotated, and the Tokio factory neither knows how to construct OpenAI nor
+duplicates provider configuration. `Models` remains the provider/auth/catalog
+control plane (`crates/pi-ai/src/models.rs:399`,
+`crates/pi-ai/src/models.rs:762`).
+
+BoltFFI documents borrowed Rust-backed classes as method/constructor arguments,
+so `&Models` and `&ToolRegistry` are the intended generated-class inputs once
+those two canonical types have annotated class impls.
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes]
+It also documents fallible constructors as target-language throwing
+constructors.
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#fallible-constructors]
+Whether an *owned* Rust-backed class argument would be accepted remains
+**UNRESOLVED: not answered by the documentation**; pages checked:
+`functions.md#classes`, `classes.md#constructors`, and
+`classes.md#methods-that-take-or-return-classes`. The design does not require
+that form.
+[https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes]
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors]
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes]
+
+Runtime lifetime is a task invariant, not merely a handle field. The runtime
+supervisor owns the actual `tokio::runtime::Runtime` on its native owner thread
+and routes runtime-owned spawning through `spawn_with_lease`. The actor future
+and every direct-model producer capture a counted `RuntimeLease` before polling
+user work and release it only after `actor_loop` or the producer exits. Tool,
+provider-transport, or environment work polled inside the actor is covered by
+the actor lease; any such work deliberately detached from that future must
+acquire its own lease through the same supervisor. Dropping
+`TokioRuntimeOwner` marks the supervisor for shutdown, but dropping that owner
+or every external `TokioAgentHandle` cannot stop the runtime while a leased task
+is live. The supervisor's native owner thread drops the actual runtime only
+after shutdown was requested and the last task lease settled.
+
+The current `shutdown` acknowledgement is sent immediately before the idle
+actor returns (`crates/pi-agent-runtime-tokio/src/lib.rs:688`), or after an
+active `drive_run` settles (`crates/pi-agent-runtime-tokio/src/lib.rs:718`). Add
+a reusable actor-done signal owned by `TokioAgentHandle`; reshaped
+`shutdown(&self)` first obtains the mailbox acknowledgement and then awaits that
+done signal. This makes successful shutdown mean the actor future has released
+its runtime lease, not merely that it has accepted the shutdown command. Add a
+cloneable `TokioAgentError::RuntimeInitialization { message: String }` variant
+for supervisor/runtime-builder failure; the current error has only `NoRuntime`
+for missing ambient construction (`crates/pi-agent-runtime-tokio/src/lib.rs:72`).
+
+### 4.8 Add the concrete direct `AssistantEvent` pull object
+
+Add `TokioAssistantStream` and `TokioAssistantError` to the same canonical
+Tokio crate. The current `AssistantStream` owns a `Send + 'static` event stream
+and fuses on terminal event or EOF (`crates/pi-ai/src/streaming.rs:1901`,
+`crates/pi-ai/src/streaming.rs:1934`). The
+Tokio object owns the foreign-consumer delivery state without replacing
+`AssistantEvent`:
+
+```rust
+pub struct TokioAssistantStream {
+    events: tokio::sync::Mutex<mpsc::Receiver<AssistantEvent>>,
+    completion:
+        watch::Receiver<Option<Result<(), TokioAssistantError>>>,
+    cancellation: CancellationToken,
+    // Private state records observation closure and terminal delivery.
+}
+
+#[export]
+impl TokioAssistantStream {
+    pub async fn next_event(
+        &self,
+    ) -> Result<Option<AssistantEvent>, TokioAssistantError>;
+
+    pub fn cancel(&self);
+
+    pub async fn cancel_and_wait(
+        &self,
+    ) -> Result<(), TokioAssistantError>;
+}
+
+impl TokioAssistantStream {
+    pub fn events(
+        &mut self,
+    ) -> &mut mpsc::Receiver<AssistantEvent>; // Rust-only
+}
+```
+
+`TokioRuntimeOwner::stream_model` creates one token and bounded event channel,
+then spawns a producer under a runtime lease. The producer first calls the
+stored concrete `Models::stream_simple` and completes an establishment
+handshake; only a successfully established `AssistantStream` is returned to
+the caller (`crates/pi-ai/src/models.rs:762`). The exported future awaits only
+that channel handshake, which is compatible with the documentation's statement
+that channel-based async does not itself need a runtime; the provider work runs
+on the Rust-owned runtime because Tokio-dependent libraries require an active
+runtime.
+[https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#runtime]
+
+The establishment await owns a drop guard containing the receive side and one
+token clone. BoltFFI documents that target-language cancellation marks and
+wakes the exported Rust future and that cleanup then runs through the generated
+future's `free` operation.
+[https://www.boltffi.dev/docs/async-internals.md | docs/boltffi-swift-bindings/docs-snapshot/async-internals.md#cancellation]
+The guard is therefore the proposed Rust cleanup point when Swift cancels before
+the handshake completes: it closes the observation channel and cancels the
+model token so the producer can settle and release its runtime lease. The guard
+behavior is part of the proposed canonical Rust factory, not an additional
+BoltFFI guarantee.
+
+After establishment, the producer polls each `AssistantEvent` on the owned
+runtime and awaits bounded `mpsc::Sender::send`; this is lossless backpressure,
+not a BoltFFI ring. `next_event(&self)` serializes receiver access, returns each
+event unchanged, records terminal delivery, and validates cached producer
+completion at EOF. It returns `Ok(None)` only after delivering
+`Finished`, `Failed`, or `Cancelled`; raw EOF first yields
+`TokioAssistantError::MissingTerminalEvent`, and producer/supervisor loss yields
+`TokioAssistantError::Closed`. The current event variants and terminal test are
+at `crates/pi-ai/src/streaming.rs:521`,
+`crates/pi-ai/src/streaming.rs:528`,
+`crates/pi-ai/src/streaming.rs:534`, and
+`crates/pi-ai/src/streaming.rs:540`.
+
+`cancel()` cancels only this model call and preserves terminal lifecycle
+delivery when the caller keeps pulling. `cancel_and_wait()` cancels the token,
+closes/discards the observational receiver, wakes a producer blocked on channel
+capacity, and awaits cached completion. Once observation is closed, the
+producer continues draining internally until it sees and validates the in-band
+terminal event; it does not report intentional observation closure as
+`MissingTerminalEvent`. Cancellation or provider failure after establishment
+remains an in-band terminal event under the current runtime contract
+(`crates/pi-ai/src/runtime.rs:42`). Concurrent pulls serialize on the receiver
+mutex. Raw receiver access stays in an unannotated impl.
+
+Exported async `&self` methods, throwing async results, and default
+`Send + Sync` class checking are documented BoltFFI class forms.
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#async-methods]
+[https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#error-handling]
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#thread-safety]
+No `#[ffi_stream]` attribute is used because that documented attribute requires
+`Arc<EventSubscription<T>>`, whose finite ring drops new events when full.
+[https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#the-ffi_stream-attribute]
+[https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#buffer-capacity]
+
+## 5. In-scope mapping table
+
+“Direct after canonical change” means the signature has a documented BoltFFI
+shape once every transitive value type maps. Named-field records and the
+documented unit or struct-style associated-data enums use `#[data]`;
+Rust-owned classes use `#[export]`; async `Result` methods map to Swift
+`async throws`. Tuple-style data-enum variants are not shown by the records
+documentation and remain an explicit generation gate below.
+**UNRESOLVED: not answered by the documentation**. Pages checked:
+`records.md#enums`, `records.md#enums-with-associated-data`, and
+`types.md#records`.
+[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs]
+[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data]
+[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums]
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records]
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class]
+[https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#error-handling]
+
+| Ordinary-consumer surface | Current source | Planned mapping and status |
+|---|---|---|
+| `TokioRuntimeOwner::{new,spawn_agent,stream_model}` | `TokioAgentHandle::with_capacities` currently calls `Handle::try_current()` at `crates/pi-agent-runtime-tokio/src/lib.rs:183`; current `Agent::new` takes runtime/state/tools at `crates/pi-agent-core/src/run.rs:140` | Add section 4.7's canonical factory over borrowed concrete `Models` and `ToolRegistry`, owned `AgentState`, and a supervised runtime. The actor and direct-model producer each capture a task lease. Raw Tokio handles stay unannotated. Exported classes and borrowed class arguments are documented. [https://www.boltffi.dev/docs/classes.md \| docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class] [https://www.boltffi.dev/docs/classes.md \| docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes] |
+| Concrete `Models` input | Cloneable control plane at `crates/pi-ai/src/models.rs:47`, `crates/pi-ai/src/models.rs:48`, and `crates/pi-ai/src/models.rs:49`; current empty `Default` construction at `crates/pi-ai/src/models.rs:99`; concrete `ModelRuntime` impl at `crates/pi-ai/src/models.rs:1399` | Add and annotate inherent `Models::new() -> Self` as an explicitly empty constructor. Production Swift uses the next row's concrete OpenAI factory, then passes the returned canonical `Models` to `TokioRuntimeOwner`; it never supplies `ProviderRegistration` or `ModelRuntime`. Rust-backed classes and inherent constructors are documented. [https://www.boltffi.dev/docs/classes.md \| docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class] [https://www.boltffi.dev/docs/classes.md \| docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors] |
+| `OpenAiModelsFactory::{new,build}` | Existing `openai_provider` requires `Arc<dyn HttpTransport>` at `providers/pi-ai-openai/src/handler.rs:487`; `ProviderRegistration` contains provider/auth/catalog trait objects at `crates/pi-ai/src/provider.rs:2320`; `ModelsBuilder` accepts the registration and credential store at `crates/pi-ai/src/models.rs:1476`, `crates/pi-ai/src/models.rs:1501`, and `crates/pi-ai/src/models.rs:1541` | Add section 4.7's canonical concrete class in `pi-ai-openai`. It owns `NativeOpenAiHttpTransport` and a redacted API key in Rust, and `build()` returns the canonical configured `Models`. No provider/transport/auth trait is a generated parameter. Private Rust class state, fallible constructors, class-valued methods, and structured errors are documented. [https://www.boltffi.dev/docs/classes.md \| docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class] [https://www.boltffi.dev/docs/classes.md \| docs/boltffi-swift-bindings/docs-snapshot/classes.md#fallible-constructors] [https://www.boltffi.dev/docs/classes.md \| docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes] [https://www.boltffi.dev/docs/errors.md \| docs/boltffi-swift-bindings/docs-snapshot/errors.md#struct-errors] |
+| Concrete `ToolRegistry` input | Cloneable registry at `crates/pi-agent-core/src/tools.rs:490`, `crates/pi-agent-core/src/tools.rs:491`; empty constructor at `crates/pi-agent-core/src/tools.rs:497` | Annotate the canonical class constructor and safe observations first; registration of Swift-authored `Tool` implementations remains a callback-authoring milestone. The same object is cloned into production Agent construction. [https://www.boltffi.dev/docs/classes.md \| docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors] |
+| `TokioAgentHandle` | Class at `crates/pi-agent-runtime-tokio/src/lib.rs:158` | Direct class after the runtime-retaining constructor and transitive types map. Only the concrete actor impl is annotated. [https://www.boltffi.dev/docs/classes.md \| docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class] |
+| `prompt_text`, `continue_run`, `retry_last_turn` | `crates/pi-agent-runtime-tokio/src/lib.rs:203`, `crates/pi-agent-runtime-tokio/src/lib.rs:243`, `crates/pi-agent-runtime-tokio/src/lib.rs:249`; shared current establishment helper at `crates/pi-agent-runtime-tokio/src/lib.rs:394` | Direct async throwing class methods returning reshaped `TokioAgentRun`. Section 4.1's armed establishment guard makes cancellation before return cancel the already accepted shared run token and close unclaimed observation. [https://www.boltffi.dev/docs/classes.md \| docs/boltffi-swift-bindings/docs-snapshot/classes.md#async-methods] [https://www.boltffi.dev/docs/async.md \| docs/boltffi-swift-bindings/docs-snapshot/async.md#error-handling] [https://www.boltffi.dev/docs/async.md \| docs/boltffi-swift-bindings/docs-snapshot/async.md#cancellation] [https://www.boltffi.dev/docs/async-internals.md \| docs/boltffi-swift-bindings/docs-snapshot/async-internals.md#cancellation] |
+| `prompt_records` | Generic collection at `crates/pi-agent-runtime-tokio/src/lib.rs:230` | Canonical concrete `Vec<AgentRecord>` input, then direct async throwing method. `Vec` is documented. [https://www.boltffi.dev/docs/types.md \| docs/boltffi-swift-bindings/docs-snapshot/types.md#collections] |
+| `prompt_text_with_sink`, `subscribe`, `unsubscribe` | `crates/pi-agent-runtime-tokio/src/lib.rs:217`, `crates/pi-agent-runtime-tokio/src/lib.rs:306`, `crates/pi-agent-runtime-tokio/src/lib.rs:319` | Conditional on the async-trait rewrite and owned callback-argument generation test. Every run-scoped or registered sink receives `AgentEventEnvelope`. `EventSinkId` tuple-newtype mapping remains unresolved below. Async stored host traits and `Arc` ownership are documented separately. [https://www.boltffi.dev/docs/callbacks.md \| docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] [https://www.boltffi.dev/docs/callbacks.md \| docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#storing-traits] |
+| `steer`, `follow_up`, handle `cancel`, `cancel_now` | `crates/pi-agent-runtime-tokio/src/lib.rs:255`, `crates/pi-agent-runtime-tokio/src/lib.rs:270`, `crates/pi-agent-runtime-tokio/src/lib.rs:285`, `crates/pi-agent-runtime-tokio/src/lib.rs:301` | Direct async/sync methods after `AgentRecord`, `QueueReceipt`, `RunId`, and errors map. These remain distinct from run-local `TokioAgentRun::cancel`. [https://www.boltffi.dev/docs/classes.md \| docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/classes.md \| docs/boltffi-swift-bindings/docs-snapshot/classes.md#async-methods] |
+| `reset_transcript`, `reset_all`, `snapshot`, `latest_snapshot`, `wait_for_idle`, `shutdown` | `crates/pi-agent-runtime-tokio/src/lib.rs:329`, `crates/pi-agent-runtime-tokio/src/lib.rs:339`, `crates/pi-agent-runtime-tokio/src/lib.rs:349`, `crates/pi-agent-runtime-tokio/src/lib.rs:364`, `crates/pi-agent-runtime-tokio/src/lib.rs:374`, `crates/pi-agent-runtime-tokio/src/lib.rs:385` | Direct async/sync methods after snapshot/error mapping. `latest_snapshot` is already owned; `shutdown` gains actor-done settlement from section 4.7. [https://www.boltffi.dev/docs/classes.md \| docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/classes.md \| docs/boltffi-swift-bindings/docs-snapshot/classes.md#async-methods] |
+| `snapshots()` | Raw watch receiver at `crates/pi-agent-runtime-tokio/src/lib.rs:369` | Keep unannotated. It is a raw Tokio receiver, and the documented stream attribute requires `Arc<EventSubscription<T>>`. [https://www.boltffi.dev/docs/streaming.md \| docs/boltffi-swift-bindings/docs-snapshot/streaming.md#the-ffi_stream-attribute] |
+| `TokioAgentRun::{next_event,outcome,cancel,cancel_and_outcome}` | Current run at `crates/pi-agent-runtime-tokio/src/lib.rs:126` | Direct class after section 4.1. The selected pull is `Result<Option<AgentEventEnvelope>, TokioAgentError>`. Async `Result<Option<T>, E>` composes documented async, error, and optional mappings. [https://www.boltffi.dev/docs/async.md \| docs/boltffi-swift-bindings/docs-snapshot/async.md#error-handling] [https://www.boltffi.dev/docs/types.md \| docs/boltffi-swift-bindings/docs-snapshot/types.md#option] |
+| `TokioAgentRun::events` | `crates/pi-agent-runtime-tokio/src/lib.rs:133` | Keep in a separate unannotated Rust-only impl. No `EventSubscription` adapter is added. |
+| `TokioAssistantStream::{next_event,cancel,cancel_and_wait}` | Raw `AssistantStream` at `crates/pi-ai/src/streaming.rs:1900`; direct `Models::stream_simple` at `crates/pi-ai/src/models.rs:762` | Add the canonical Rust-owned Tokio pull object in section 4.8. Start errors throw before the object is returned; established completion stays in-band; premature EOF and producer loss throw from `next_event`. No `EventSubscription` adapter is added. Async throwing and optional mappings are documented. [https://www.boltffi.dev/docs/async.md \| docs/boltffi-swift-bindings/docs-snapshot/async.md#error-handling] [https://www.boltffi.dev/docs/types.md \| docs/boltffi-swift-bindings/docs-snapshot/types.md#option] |
+| `TokioAssistantStream::events` | No current concrete owner; raw `AssistantStream` implements `Stream` at `crates/pi-ai/src/streaming.rs:1934` | Keep the added raw Tokio receiver accessor in a separate unannotated Rust-only impl. |
+| `AgentEventSink` | Boxed future trait carrying bare `AgentEvent` at `crates/pi-agent-runtime-tokio/src/lib.rs:45`, `crates/pi-agent-runtime-tokio/src/lib.rs:49` | Rewrite to the documented async-trait form with `AgentEventEnvelope`; preserve `Arc<dyn AgentEventSink>`, ordering, and acknowledgement. Owned `CancellationToken` callback input is unresolved pending generation. [https://www.boltffi.dev/docs/callbacks.md \| docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#ownership] [https://www.boltffi.dev/docs/callbacks.md \| docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] |
+| `PromptImage`, `PromptText` | `crates/pi-agent-core/src/run.rs:84`; `crates/pi-agent-core/src/run.rs:93` | Direct data: strings and `Vec<PromptImage>` are documented record/collection fields. [https://www.boltffi.dev/docs/records.md \| docs/boltffi-swift-bindings/docs-snapshot/records.md#structs-with-strings-or-collections] |
+| `ModelRequest`, `ModelRef`, `Context`, `SimpleGenerationOptions` | `crates/pi-ai/src/runtime.rs:13`, `crates/pi-ai/src/ids.rs:105`, `crates/pi-ai/src/messages.rs:467`, `crates/pi-ai/src/options.rs:561` | These are the canonical owned direct-model inputs; no command envelope replaces them. `ModelRequest` is a record only after its entire nested graph maps. In addition to tuple-string IDs, `OrderedJsonObject` and its recursive `OrderedJsonString`/`OrderedJsonArray` values, `HeaderMapSpec`, and `ErasedApiOptionsPatch::value`, `Context.messages` reaches assistant `ToolCall.arguments: serde_json::Value`, `DeferredHandle.data: serde_json::Value`, diagnostic `serde_json::Number`/`BTreeMap<String, serde_json::Value>`, `Timestamp`, `Currency` through terminal cost, and `ToolResultMessage.details -> VersionedExtension.value: RawValue`; `Context.tools` reaches `ToolSpec.parameters: serde_json::Value` and `GrammarVariants: BTreeMap<GrammarFormat, String>` (`crates/pi-ai/src/runtime.rs:17`, `crates/pi-ai/src/options.rs:598`, `crates/pi-ai/src/json_compat.rs:24`, `crates/pi-ai/src/json_compat.rs:114`, `crates/pi-ai/src/json_compat.rs:227`, `crates/pi-ai/src/messages.rs:143`, `crates/pi-ai/src/messages.rs:152`, `crates/pi-ai/src/messages.rs:169`, `crates/pi-ai/src/messages.rs:182`, `crates/pi-ai/src/messages.rs:217`, `crates/pi-ai/src/messages.rs:233`, `crates/pi-ai/src/messages.rs:306`, `crates/pi-ai/src/messages.rs:319`, `crates/pi-ai/src/messages.rs:418`, `crates/pi-ai/src/messages.rs:473`, `crates/pi-ai/src/messages.rs:475`, `crates/pi-ai/src/deferred.rs:39`, `crates/pi-ai/src/model.rs:923`, `crates/pi-ai/src/usage.rs:121`). Every path is a separate section 8.2 generation gate. Nested records are documented only when their field graph maps. [https://www.boltffi.dev/docs/records.md \| docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] |
+| `AgentEventEnvelope`, embedded `AgentEvent`, `TurnOutcome`, `RunOutcome` | `crates/pi-agent-core/src/events.rs:329`, `crates/pi-agent-core/src/events.rs:335`, `crates/pi-agent-core/src/events.rs:81`, `crates/pi-agent-core/src/events.rs:31`, `crates/pi-agent-core/src/events.rs:51` | The envelope is the selected canonical pull/sink record; the embedded event and outcomes remain the existing canonical payload types. The graph is blocked by section 8's tuple IDs plus the non-ID `Timestamp`, `Currency`, and `ReplayDropReason` tuple newtypes, `Arc<[T]>`, `i128` cost, and `BTreeSet<ModelFingerprint>`. `ReplayDropReason` is reachable through `AgentEvent::ContextPrepared -> HandoffReport.changes -> HandoffChange::OpaqueReplayDropped` (`crates/pi-agent-core/src/events.rs:97`, `crates/pi-agent-core/src/events.rs:103`, `crates/pi-ai/src/handoff.rs:84`, `crates/pi-ai/src/handoff.rs:92`, `crates/pi-ai/src/handoff.rs:150`). JSON-bearing paths are `ToolCall.arguments` in `ToolExecutionStarted`; `ToolUpdate.details: RawValue` in `ToolExecutionUpdated`; `ToolOutput.details: RawValue` in `ToolExecutionFinished`; and assistant/tool-result JSON reachable through explicit `AssistantUpdate` and `MessageCommitted` roots (`crates/pi-agent-core/src/events.rs:113`, `crates/pi-agent-core/src/events.rs:120`, `crates/pi-agent-core/src/events.rs:125`, `crates/pi-agent-core/src/events.rs:130`, `crates/pi-agent-core/src/events.rs:137`, `crates/pi-agent-core/src/tools.rs:51`, `crates/pi-agent-core/src/tools.rs:93`). `AgentEvent` is also `#[non_exhaustive]`; section 8.4 gates generation because the documentation does not describe that attribute. Payload enums themselves are documented. [https://www.boltffi.dev/docs/records.md \| docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/records.md \| docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] |
+| `AssistantEvent` and its replay/message graph | Non-exhaustive enum at `crates/pi-ai/src/streaming.rs:357`, `crates/pi-ai/src/streaming.rs:360`; replay-event roots at `crates/pi-ai/src/streaming.rs:474`, `crates/pi-ai/src/streaming.rs:488`; nested variant/field at `crates/pi-agent-core/src/events.rs:113`, `crates/pi-agent-core/src/events.rs:117` | Export the same owned enum both directly through `TokioAssistantStream` and nested in `AgentEvent::AssistantUpdate`; never as `EventSubscription<AssistantEvent>`. In addition to the diagnostic/JSON/message paths below, every terminal variant carries `AssistantMessage.replay: ReplayEnvelope`; the envelope contains `ReplayScope` and ordered `Vec<ReplayItem>`, and each item contains `ReplayTarget` and `OpaquePayload` (`crates/pi-ai/src/messages.rs:157`, `crates/pi-ai/src/replay.rs:13`, `crates/pi-ai/src/replay.rs:17`, `crates/pi-ai/src/replay.rs:19`, `crates/pi-ai/src/replay.rs:135`, `crates/pi-ai/src/replay.rs:141`, `crates/pi-ai/src/replay.rs:149`). Generation/fidelity must cover nonempty items, all four `ReplayTarget` forms, and `OpaquePayload::{Utf8,Bytes,JsonBytes}`. Independently, standalone `AssistantEvent::ReplayItemStarted` must cover all target forms and standalone `AssistantEvent::ReplayData` must cover all five `ReplayDataOperation` forms; every one is mirrored inside `AgentEvent::AssistantUpdate` with distinct sentinels (`crates/pi-ai/src/replay.rs:179`, `crates/pi-ai/src/replay.rs:276`, `crates/pi-ai/src/streaming.rs:563`). All three terminal variants also carry `AssistantMessage` paths for `ToolCall.arguments`, `DeferredHandle.data`, diagnostics, `Timestamp`, and `Currency` (`crates/pi-ai/src/messages.rs:143`, `crates/pi-ai/src/messages.rs:152`, `crates/pi-ai/src/messages.rs:155`, `crates/pi-ai/src/messages.rs:165`, `crates/pi-ai/src/messages.rs:169`, `crates/pi-ai/src/streaming.rs:521`, `crates/pi-ai/src/streaming.rs:527`, `crates/pi-ai/src/streaming.rs:533`). Each direct and nested route is its own gate. `AssistantEvent`'s `#[non_exhaustive]` attribute and the tuple-style variants inside its graph are separate unresolved gates in sections 8.4 and 8.2. The records documentation demonstrates struct-style associated data but not tuple-style variant syntax. **UNRESOLVED: not answered by the documentation**. Pages checked: `records.md#enums`, `records.md#enums-with-associated-data`, and `types.md#records`. [https://www.boltffi.dev/docs/records.md \| docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/records.md \| docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] [https://www.boltffi.dev/docs/types.md \| docs/boltffi-swift-bindings/docs-snapshot/types.md#records] [https://www.boltffi.dev/docs/streaming.md \| docs/boltffi-swift-bindings/docs-snapshot/streaming.md#buffer-capacity] |
+| `AgentState`, `AgentRecord`, `AgentSnapshot` | `crates/pi-agent-core/src/state.rs:23`, `crates/pi-agent-core/src/state.rs:62`, `crates/pi-agent-core/src/state.rs:180` | Owned canonical data with two independent nested roots. `AgentSnapshot.state` reaches the committed transcript: `AgentRecord::Custom.payload: RawValue`; assistant content, deferred data, diagnostics, timestamps/costs, tool-result details, and each committed assistant's complete `AssistantMessage.replay` graph (`crates/pi-agent-core/src/state.rs:33`, `crates/pi-agent-core/src/state.rs:64`, `crates/pi-agent-core/src/state.rs:70`, `crates/pi-agent-core/src/state.rs:184`, `crates/pi-ai/src/messages.rs:36`, `crates/pi-ai/src/messages.rs:38`, `crates/pi-ai/src/messages.rs:143`, `crates/pi-ai/src/messages.rs:152`, `crates/pi-ai/src/messages.rs:157`, `crates/pi-ai/src/messages.rs:165`, `crates/pi-ai/src/messages.rs:169`, `crates/pi-ai/src/messages.rs:233`). Independently, `AgentSnapshot.streaming: Option<AssistantMessageSnapshot>` reaches partial deferred/diagnostics/content plus `replay: ReplayEnvelope`, usage/cost, timestamp, and optional terminal `AssistantMessage` (`crates/pi-agent-core/src/state.rs:188`, `crates/pi-ai/src/streaming.rs:1689`, `crates/pi-ai/src/streaming.rs:1693`, `crates/pi-ai/src/streaming.rs:1695`, `crates/pi-ai/src/streaming.rs:1697`, `crates/pi-ai/src/streaming.rs:1699`, `crates/pi-ai/src/streaming.rs:1701`, `crates/pi-ai/src/streaming.rs:1703`, `crates/pi-ai/src/streaming.rs:1705`). Both `streaming.replay` and `streaming.terminal_message.replay` are separate complete roots: each must have its own distinct `ReplayScope`, nonempty ordered items, all four `ReplayTarget` forms, and all three `OpaquePayload` forms (`crates/pi-ai/src/replay.rs:13`, `crates/pi-ai/src/replay.rs:17`, `crates/pi-ai/src/replay.rs:19`, `crates/pi-ai/src/replay.rs:135`, `crates/pi-ai/src/replay.rs:141`, `crates/pi-ai/src/replay.rs:149`, `crates/pi-ai/src/replay.rs:179`, `crates/pi-ai/src/replay.rs:276`). `pending_tool_calls` separately reaches `Arc<[ToolCallId]>` (`crates/pi-agent-core/src/state.rs:190`). Do not create Swift-specific snapshot or transcript records. Nested records are documented only when the full graph maps. [https://www.boltffi.dev/docs/records.md \| docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] |
+| Transitive tuple-newtype values: IDs, `QueueSequence`, `EventSinkId`, `Timestamp`, `Currency`, `ReplayDropReason`, `OrderedJsonString`, `OrderedJsonObject`, `OrderedJsonArray` | Macro IDs at `crates/pi-ai/src/ids.rs:6`; other definitions at `crates/pi-agent-core/src/control.rs:19`, `crates/pi-agent-runtime-tokio/src/lib.rs:35`, `crates/pi-ai/src/ids.rs:133`, `crates/pi-ai/src/usage.rs:88`, `crates/pi-ai/src/handoff.rs:44`, `crates/pi-ai/src/json_compat.rs:24`, `crates/pi-ai/src/json_compat.rs:114`, `crates/pi-ai/src/json_compat.rs:227` | Every listed type is an in-scope value root or a transitive field in the request/event/outcome/snapshot/control graph. The documentation shows named-field structs but does not establish tuple-newtype generation. **UNRESOLVED: not answered by the documentation**. Pages checked: `records.md#structs`, `types.md#records`, and `custom-types.md#representation-types`. Each type therefore receives a separate generation and exact-fidelity test; success for tuple IDs cannot be generalized to the non-ID wrappers or to the recursively nested ordered-JSON wrappers. [https://www.boltffi.dev/docs/records.md \| docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/types.md \| docs/boltffi-swift-bindings/docs-snapshot/types.md#records] [https://www.boltffi.dev/docs/custom-types.md \| docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#representation-types] |
+| Tuple-payload data enums: `Message`, `AgentRecord`, `DiagnosticErrorCode`, `ConstrainedSampling`, `OrderedJsonValue`, `ReplayTarget`, `OpaquePayload`, `ReplayDataOperation` | Definitions at `crates/pi-ai/src/messages.rs:32`, `crates/pi-agent-core/src/state.rs:62`, `crates/pi-ai/src/messages.rs:178`, `crates/pi-ai/src/messages.rs:334`, `crates/pi-ai/src/json_compat.rs:324`, `crates/pi-ai/src/replay.rs:179`, `crates/pi-ai/src/replay.rs:276`, and `crates/pi-ai/src/streaming.rs:563` | Each canonical enum has at least one tuple-style variant and is independently reachable through the ordinary request/event/snapshot/control surface. The records page demonstrates unit variants and struct-style associated-data variants, but not tuple-style syntax. **UNRESOLVED: not answered by the documentation**. Pages checked: `records.md#enums`, `records.md#enums-with-associated-data`, and `types.md#records`. Generate and round-trip every variant of every listed enum through Swift; a success for one enum or payload type is not evidence for another. Do not substitute a binding-only enum or envelope. [https://www.boltffi.dev/docs/records.md \| docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] [https://www.boltffi.dev/docs/records.md \| docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/types.md \| docs/boltffi-swift-bindings/docs-snapshot/types.md#records] |
+| `QueueSequence`, `QueueKind`, `QueueDrainMode`, `QueueReceipt`, `ControlError` | `crates/pi-agent-core/src/control.rs:19`, `crates/pi-agent-core/src/control.rs:27`, `crates/pi-agent-core/src/control.rs:37`, `crates/pi-agent-core/src/control.rs:58`, `crates/pi-agent-core/src/control.rs:68`; `ControlError::QueueFull.capacity: usize` at `crates/pi-agent-core/src/control.rs:74` | Enums/record/error are candidates, but three independent gates apply: `QueueSequence` tuple-newtype generation, `ControlError`'s `#[non_exhaustive]` handling, and exact `usize` payload generation for `QueueFull.capacity`. The numeric quick-reference table lists fixed-width integers but not `usize`; the isolated `usize` function-argument example does not answer error-payload support. **UNRESOLVED: not answered by the documentation**. Pages checked: `types.md#quick-reference`, `types.md#primitives`, `records.md#enums`, `errors.md#enum-errors`, and `errors.md#enums-with-payloads`. Acceptance test 18 must catch `QueueFull` in generated Swift and prove exact capacity fidelity; success of the tuple-newtype or non-exhaustive probe cannot discharge this gate. [https://www.boltffi.dev/docs/types.md \| docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference] [https://www.boltffi.dev/docs/types.md \| docs/boltffi-swift-bindings/docs-snapshot/types.md#primitives] [https://www.boltffi.dev/docs/records.md \| docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] [https://www.boltffi.dev/docs/errors.md \| docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors] [https://www.boltffi.dev/docs/errors.md \| docs/boltffi-swift-bindings/docs-snapshot/errors.md#enums-with-payloads] |
+| `CancellationToken` | Class at `crates/pi-ai/src/cancellation.rs:28`; `new`, `cancel`, `is_cancelled`, `check`, `cancelled`, and `child` at `crates/pi-ai/src/cancellation.rs:47`, `crates/pi-ai/src/cancellation.rs:62`, `crates/pi-ai/src/cancellation.rs:67`, `crates/pi-ai/src/cancellation.rs:72`, `crates/pi-ai/src/cancellation.rs:81`, `crates/pi-ai/src/cancellation.rs:90` | Rust-backed class for `new`, `cancel`, `is_cancelled`, `check`, and `child`; keep borrowed `cancelled()` future unannotated or skipped. Class-valued returns and skipped class methods are documented. [https://www.boltffi.dev/docs/classes.md \| docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes] [https://www.boltffi.dev/docs/classes.md \| docs/boltffi-swift-bindings/docs-snapshot/classes.md#skipping-methods] |
+| `TokioAgentError`, added `TokioAssistantError`, `RequestStartError`, `RequestStartErrorKind`, `AgentError`, `ControlError`, `CancellationError` | Current errors at `crates/pi-agent-runtime-tokio/src/lib.rs:70`, `crates/pi-ai/src/runtime.rs:23`, `crates/pi-ai/src/runtime.rs:48`, `crates/pi-agent-core/src/error.rs:14`, `crates/pi-agent-core/src/control.rs:68`, `crates/pi-ai/src/cancellation.rs:12`; `ControlError::QueueFull.capacity: usize` at `crates/pi-agent-core/src/control.rs:74`; `TokioAssistantError` is added in section 4.8 | Error candidates only after their complete payload graphs map. Current `TokioAgentError::Agent(AgentError)` is a tuple-payload error variant containing another error type (`crates/pi-agent-runtime-tokio/src/lib.rs:76`). The documentation establishes unit and struct-style payload error variants, but it does not establish either tuple-payload error variants or nested error-valued payloads; both are **UNRESOLVED: not answered by the documentation** after checking `errors.md#supported-error-types`, `errors.md#enum-errors`, and `errors.md#enums-with-payloads`. Section 8.3 is the gate. `RequestStartError.kind` contains non-exhaustive `RequestStartErrorKind` (`crates/pi-ai/src/runtime.rs:50`); it and all other in-scope `#[non_exhaustive]` occurrences are separately unresolved in section 8.4. `ControlError::QueueFull.capacity` adds a third, independent `usize` payload gate: the numeric quick-reference table does not list `usize`, and the isolated function-argument example does not establish error payload fields. **UNRESOLVED: not answered by the documentation**. Pages checked: `types.md#quick-reference`, `types.md#primitives`, and `errors.md#enums-with-payloads`. [https://www.boltffi.dev/docs/errors.md \| docs/boltffi-swift-bindings/docs-snapshot/errors.md#supported-error-types] [https://www.boltffi.dev/docs/errors.md \| docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors] [https://www.boltffi.dev/docs/errors.md \| docs/boltffi-swift-bindings/docs-snapshot/errors.md#enums-with-payloads] [https://www.boltffi.dev/docs/errors.md \| docs/boltffi-swift-bindings/docs-snapshot/errors.md#async-errors] [https://www.boltffi.dev/docs/types.md \| docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference] [https://www.boltffi.dev/docs/types.md \| docs/boltffi-swift-bindings/docs-snapshot/types.md#primitives] |
+| `DEFAULT_COMMAND_CAPACITY`, `DEFAULT_EVENT_CAPACITY` | Both are `usize` constants at `crates/pi-agent-runtime-tokio/src/lib.rs:30` and `crates/pi-agent-runtime-tokio/src/lib.rs:33` | Keep both unannotated in the initial binding. The constants page permits supported result types but does not enumerate `usize`; the numeric quick-reference table omits `usize`, and its isolated function-argument example does not establish `usize` constants. **UNRESOLVED: not answered by the documentation**. Pages checked: `constants.md#supported-values`, `types.md#quick-reference`, and `types.md#primitives`. Rust contract tests may use the constants internally; generated Swift must not depend on exported capacity constants. [https://www.boltffi.dev/docs/constants.md \| docs/boltffi-swift-bindings/docs-snapshot/constants.md#supported-values] [https://www.boltffi.dev/docs/types.md \| docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference] [https://www.boltffi.dev/docs/types.md \| docs/boltffi-swift-bindings/docs-snapshot/types.md#primitives] |
+
+Replay-bearing values in the table have the following independent envelope
+roots. This is part of the surface mapping, not a test-fixture shortcut:
+
+1. `ModelRequest.context.messages -> Message::Assistant ->
+   AssistantMessage.replay` (`crates/pi-ai/src/runtime.rs:17`,
+   `crates/pi-ai/src/messages.rs:473`, `crates/pi-ai/src/messages.rs:36`,
+   `crates/pi-ai/src/messages.rs:157`).
+2. Direct `AssistantEvent::Finished.message.replay`
+   (`crates/pi-ai/src/streaming.rs:521`,
+   `crates/pi-ai/src/messages.rs:157`).
+3. Direct `AssistantEvent::Failed.message.replay`
+   (`crates/pi-ai/src/streaming.rs:528`,
+   `crates/pi-ai/src/messages.rs:157`).
+4. Direct `AssistantEvent::Cancelled.message.replay`
+   (`crates/pi-ai/src/streaming.rs:534`,
+   `crates/pi-ai/src/messages.rs:157`).
+5. `AgentEvent::AssistantUpdate` carrying `Finished`, through its terminal
+   message replay (`crates/pi-agent-core/src/events.rs:113`,
+   `crates/pi-ai/src/streaming.rs:521`,
+   `crates/pi-ai/src/messages.rs:157`).
+6. `AgentEvent::AssistantUpdate` carrying `Failed`, through its terminal
+   message replay (`crates/pi-agent-core/src/events.rs:113`,
+   `crates/pi-ai/src/streaming.rs:528`,
+   `crates/pi-ai/src/messages.rs:157`).
+7. `AgentEvent::AssistantUpdate` carrying `Cancelled`, through its terminal
+   message replay (`crates/pi-agent-core/src/events.rs:113`,
+   `crates/pi-ai/src/streaming.rs:534`,
+   `crates/pi-ai/src/messages.rs:157`).
+8. `AgentEvent::MessageCommitted` carrying
+   `AgentRecord::Llm(Message::Assistant(_))`, through that assistant's replay
+   (`crates/pi-agent-core/src/events.rs:120`,
+   `crates/pi-agent-core/src/state.rs:64`,
+   `crates/pi-ai/src/messages.rs:36`, `crates/pi-ai/src/messages.rs:157`).
+9. A standalone `AgentRecord::Llm(Message::Assistant(_))`
+   (`crates/pi-agent-core/src/state.rs:64`,
+   `crates/pi-ai/src/messages.rs:36`, `crates/pi-ai/src/messages.rs:157`).
+10. A direct `AgentState.transcript` assistant record
+    (`crates/pi-agent-core/src/state.rs:33`,
+    `crates/pi-agent-core/src/state.rs:64`,
+    `crates/pi-ai/src/messages.rs:36`, `crates/pi-ai/src/messages.rs:157`).
+11. `AgentSnapshot.state.transcript` containing an assistant record
+    (`crates/pi-agent-core/src/state.rs:184`,
+    `crates/pi-agent-core/src/state.rs:33`,
+    `crates/pi-agent-core/src/state.rs:64`,
+    `crates/pi-ai/src/messages.rs:36`, `crates/pi-ai/src/messages.rs:157`).
+12. `AgentSnapshot.streaming.replay`
+    (`crates/pi-agent-core/src/state.rs:188`,
+    `crates/pi-ai/src/streaming.rs:1697`).
+13. `AgentSnapshot.streaming.terminal_message.replay`
+    (`crates/pi-agent-core/src/state.rs:188`,
+    `crates/pi-ai/src/streaming.rs:1705`,
+    `crates/pi-ai/src/messages.rs:157`).
+
+Every numbered root is a separate mapping gate. It must carry a distinct,
+nonempty `ReplayEnvelope`: the exact canonical `schema_version`, a complete
+`ReplayScope` with root-specific sentinels, and an ordered item sequence with
+root-specific IDs,
+ordinals, kinds, applicability, and completeness; all four
+`ReplayTarget::{Message,ContentBlock,ToolCall,ProviderOutputItem}` forms; and all
+three `OpaquePayload::{Utf8,Bytes,JsonBytes}` forms with exact root-specific
+strings and bytes (`crates/pi-ai/src/replay.rs:13`,
+`crates/pi-ai/src/replay.rs:15`, `crates/pi-ai/src/replay.rs:17`,
+`crates/pi-ai/src/replay.rs:19`, `crates/pi-ai/src/replay.rs:88`,
+`crates/pi-ai/src/replay.rs:135`, `crates/pi-ai/src/replay.rs:179`,
+`crates/pi-ai/src/replay.rs:276`). The direct and nested
+`AssistantEvent::{ReplayItemStarted,ReplayData}` matrices are additional event
+roots and do not discharge any of these thirteen envelope roots
+(`crates/pi-ai/src/streaming.rs:474`,
+`crates/pi-ai/src/streaming.rs:488`,
+`crates/pi-agent-core/src/events.rs:113`).
+
+## 6. Cancellation semantics
+
+Run establishment has a cancellation boundary before the two established-run
+layers below. `prompt_text`, `prompt_text_with_sink`, `prompt_records`,
+`continue_run`, and `retry_last_turn` all enter the shared `request_run` helper
+(`crates/pi-agent-runtime-tokio/src/lib.rs:203`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:217`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:230`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:243`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:249`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:394`). Before actor acceptance,
+dropping the establishment future closes `accepted_rx`; the actor's current
+`accept_run` checks that closure before it marks the run active
+(`crates/pi-agent-runtime-tokio/src/lib.rs:697`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:701`). After acceptance is sent, that
+check is over: the actor may be in `drive_run` while the exported future is
+awake but has not yet returned a `TokioAgentRun`
+(`crates/pi-agent-runtime-tokio/src/lib.rs:705`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:523`).
+
+Cancelling the Swift task during that accepted-but-unhanded interval
+cooperatively cancels the exported future, and BoltFFI's documented async
+cleanup proceeds through `free`.
+[https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#cancellation]
+[https://www.boltffi.dev/docs/async-internals.md | docs/boltffi-swift-bindings/docs-snapshot/async-internals.md#cancellation]
+Section 4.1's armed `RunEstablishmentGuard` must therefore remain alive until
+the non-awaiting return step moves its receiver, reusable completion receiver,
+and cancellation clone into `TokioAgentRun`. If `free` drops the future first,
+the guard closes observation and explicitly cancels the shared token. Actor
+acceptance is not ownership handoff. The actor then settles the in-band
+cancellation lifecycle and sink barriers and publishes idle without relying on
+a returned run object; orderly shutdown must subsequently let the actor release
+its runtime lease. This is mandatory for every exported operation routed
+through `request_run`, and test 19 exercises each prompt/continue/retry path at
+the exact boundary.
+
+For an established `TokioAgentRun`, there are two independent cancellation
+layers.
+
+1. Cancelling a Swift task awaiting `nextEvent()` cooperatively cancels only
+   that exported Rust future. BoltFFI marks the future cancelled and stops
+   polling it; the documentation does not equate this with cancelling
+   application work.
+   [https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#cancellation]
+2. Cancelling the agent run means cancelling its retained canonical
+   `CancellationToken`. The token is cloneable and its current `cancel()` is
+   idempotent (`crates/pi-ai/src/cancellation.rs:27`,
+   `crates/pi-ai/src/cancellation.rs:28`,
+   `crates/pi-ai/src/cancellation.rs:62`).
+
+The repository locks Tokio 1.53.1 (`Cargo.lock:2412`). Its locally installed
+`mpsc::Receiver::recv` documentation says cancellation before completion
+receives no message
+(`/home/vikash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/sync/mpsc/bounded.rs:199`).
+Consequently, cancelling one pending `nextEvent()` and polling again must
+deliver the same next event.
+
+That property does not prevent a stall if Swift never resumes pulling:
+
+1. The bounded event channel reaches capacity 128
+   (`crates/pi-agent-runtime-tokio/src/lib.rs:33`).
+2. The actor waits in `sender.send(...).await`
+   (`crates/pi-agent-runtime-tokio/src/lib.rs:838`).
+3. Because `drive_run` is awaiting `dispatch_event`, it cannot return to the
+   mailbox selection that processes steering, follow-up, mailbox cancellation,
+   and shutdown (`crates/pi-agent-runtime-tokio/src/lib.rs:748`,
+   `crates/pi-agent-runtime-tokio/src/lib.rs:774`).
+4. Sinks and completion for that event have not yet run
+   (`crates/pi-agent-runtime-tokio/src/lib.rs:842`).
+
+`TokioAgentRun::cancel()` therefore uses the retained token directly and never
+waits for the mailbox. It requests cancellation but does not discard lifecycle
+events. Callers wanting committed cancellation delivery call `cancel()` and
+continue pulling until an `AgentEventEnvelope` contains
+`AgentEvent::RunFinished { outcome: RunOutcome::Cancelled { .. } }`. Callers
+abandoning observations call
+`cancelAndOutcome()`, which also closes/discards the receiver and waits for
+settlement (`crates/pi-agent-core/src/events.rs:69`).
+
+Cancelling a Swift task that was awaiting `outcome()` also cancels only that
+awaited Rust future under the documented cooperative rule; the cached
+watch-style completion remains available to a later `outcome()` call.
+[https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#cancellation]
+
+Direct model calls follow the same separation. Cancelling a Swift task awaiting
+`TokioAssistantStream.nextEvent()` cancels only that receive future under
+BoltFFI's documented cooperative cancellation behavior; it does not cancel the
+stored model-call token.
+[https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#cancellation]
+The pending receive is the same cancellation-safe Tokio bounded-receiver
+operation used by `TokioAgentRun`, so the next call must observe the event that
+was not received by the cancelled call. `TokioAssistantStream.cancel()` cancels
+the model token. Continuing the pull loop then preserves the canonical in-band
+`AssistantEvent::Cancelled` lifecycle (`crates/pi-ai/src/runtime.rs:42`,
+`crates/pi-ai/src/streaming.rs:534`).
+
+Cancelling the Swift task awaiting initial `streamModel(request:)` also cancels
+only that exported establishment future under BoltFFI's cooperative rule.
+[https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#cancellation]
+BoltFFI's documented cancellation path performs cleanup through the generated
+future's `free` operation.
+[https://www.boltffi.dev/docs/async-internals.md | docs/boltffi-swift-bindings/docs-snapshot/async-internals.md#cancellation]
+Section 4.8 therefore places a Rust drop guard in that future; the guard cancels
+the stored token and closes observation when `free` releases the cancelled
+future. That cleanup behavior is a property of the proposed canonical Rust
+factory, not an additional BoltFFI behavior.
+
+A direct model stream can stall for the same reason if Swift neither resumes
+pulling nor abandons observations: its bounded Rust channel fills and the model
+producer waits before it can poll the cancellation terminal. Call
+`cancelAndWait()` when no more events are wanted; that operation cancels the
+token, closes/discards observations, wakes a blocked sender, internally drains
+to a validated terminal event, and waits for the producer's runtime lease to
+settle. Cancelling the Swift task awaiting `cancelAndWait()` cancels only that
+one exported future; its watch-style completion remains reusable under the same
+design rule as Agent outcome.
+[https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#cancellation]
+
+## 7. Swift consumer shapes
+
+These sketches show the ordinary generated-call shape after the canonical
+changes. They remain explicitly illustrative inferences: exact generated Swift
+declarations, field spellings, and enum-case pattern syntax must be confirmed by
+generation. The inference composes the documented async, `Result`, `Option`,
+class, async-trait, record-field, and associated-data-enum examples.
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#async-methods]
+[https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#error-handling]
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#option]
+[https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods]
+[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs]
+[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs-with-strings-or-collections]
+[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data]
+
+Section 4.5 selects `AgentEventEnvelope`: every Agent `nextEvent()` below yields
+that envelope, and sink callbacks receive that same value. Consumers inspect
+`envelope.event` for lifecycle payloads while retaining `sequence` and `runId`
+for gap detection and persistence. Those field and associated-data case
+spellings are part of the same qualified inference, based on the documented
+Swift struct-field and associated-data-enum examples; they are not claimed as
+observed generated output for this repository.
+[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs]
+[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs-with-strings-or-collections]
+[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data]
+
+### Production construction
+
+The first generated production path constructs a real configured canonical
+control plane, then passes that object with canonical state and tools; Swift
+never constructs a bare `Agent` or supplies provider/transport/auth traits:
+
+```swift
+func makeHandle(
+    openAIApiKey: String,
+    state: AgentState
+) throws -> TokioAgentHandle {
+    let modelsFactory = try OpenAiModelsFactory(
+        apiKey: openAIApiKey
+    )
+    let models = try modelsFactory.build()
+    let tools = ToolRegistry()
+    let owner = try TokioRuntimeOwner(
+        models: models,
+        tools: tools
+    )
+    return try owner.spawnAgent(state: state)
+}
+```
+
+This function is illustrative call-site code, not a required wrapper. The
+generated surface is `OpenAiModelsFactory`, its `build` method, the
+`TokioRuntimeOwner` constructor, and `spawnAgent`. BoltFFI documents fallible
+constructors, class-valued methods, and constructors accepting borrowed
+Rust-backed classes.
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#fallible-constructors]
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes]
+The value returned by `build` is the existing canonical `Models`, configured
+with the current OpenAI provider/catalog/auth contracts and a concrete native
+transport as specified in section 4.7; it is not a test fixture or
+binding-specific record. The runtime lease captured by the actor makes it safe
+for this local `owner` reference to leave scope after construction; section
+4.7 requires `shutdown()` to await actor-task settlement.
+
+### Pull observation
+
+```swift
+let run = try await handle.promptText(prompt: prompt)
+
+while let envelope = try await run.nextEvent() {
+    switch envelope.event {
+    case .assistantUpdate(_, let update):
+        render(update)
+
+    case .runFinished(let outcome):
+        display(outcome)
+
+    default:
+        break
+    }
+}
+
+let outcome = try await run.outcome()
+```
+
+The final `outcome()` validates actor completion and all sink barriers.
+
+### Cancellation with lifecycle delivery
+
+```swift
+run.cancel()
+
+while let envelope = try await run.nextEvent() {
+    consume(envelope)
+}
+
+let outcome = try await run.outcome()
+```
+
+### Cancellation without further observations
+
+```swift
+let outcome = try await run.cancelAndOutcome()
+```
+
+### Acknowledged sink
+
+**Conditional surface.** This sketch is valid only if the annotation milestone
+proves that BoltFFI generates an async host trait whose method accepts the owned
+Rust-backed `CancellationToken`. That combination is
+**UNRESOLVED: not answered by the documentation**; pages checked:
+`callbacks.md#async-methods`,
+`callbacks.md#ownership`, and
+`classes.md#methods-that-take-or-return-classes`.
+[https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods]
+[https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#ownership]
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes]
+
+```swift
+final class SessionSink: AgentEventSink {
+    func onEvent(
+        envelope: AgentEventEnvelope,
+        cancellation: CancellationToken
+    ) async {
+        await session.append(envelope)
+    }
+}
+
+let run = try await handle.promptTextWithSink(
+    prompt: prompt,
+    sink: SessionSink()
+)
+
+let outcome = try await run.outcome()
+```
+
+The sink receives the exact envelope allocated for pull delivery and
+persistence. The sink-only actor path has no observational sender, so the
+sketch needs no hidden drainer. Inside `onEvent`, use the supplied
+`CancellationToken`, `cancelNow`, or `latestSnapshot`; do not await a mailbox
+method that is queued behind the sink acknowledgement.
+
+### Direct model-call observation
+
+The direct R3 path uses the same while-let pull shape and the same canonical
+`ModelRequest` and `AssistantEvent` values as Rust:
+
+```swift
+let stream = try await owner.streamModel(request: request)
+
+while let event = try await stream.nextEvent() {
+    consume(event)
+}
+```
+
+`stream.cancel()` followed by continued pulling preserves delivery of
+`.cancelled`; when no more events are wanted, use:
+
+```swift
+try await stream.cancelAndWait()
+```
+
+The exact Swift spellings are inferred by composing the documented async class,
+throwing-result, and optional mappings.
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#async-methods]
+[https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#error-handling]
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#option]
+
+## 8. Gaps and implementation risks
+
+### 8.1 Authoritative-stream gaps are resolved by design
+
+There is no documented lossless/backpressured overflow mode and no documented
+direct adaptation from `futures_core::Stream` or Tokio receivers.
+**UNRESOLVED: not answered by the documentation**; pages checked:
+`streaming.md#the-ffi_stream-attribute`, `streaming.md#buffer-capacity`,
+`streaming.md#stopping-streams`, and `experimental.md#feature-details`.
+[https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#the-ffi_stream-attribute]
+[https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#buffer-capacity]
+[https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#stopping-streams]
+[https://www.boltffi.dev/docs/experimental.md | docs/boltffi-swift-bindings/docs-snapshot/experimental.md#feature-details]
+The design does not need such a mode: an ordinary async pull method preserves
+the existing receiver.
+
+### 8.2 Transitive owned-value graph
+
+The in-scope request, event, snapshot, and control graph is not yet directly
+annotatable in full:
+
+- Open IDs such as `RunId`, `MessageId`, and `ToolCallId` are tuple newtypes
+  generated by the macro at `crates/pi-ai/src/ids.rs:6`.
+- `QueueSequence` and `EventSinkId` are tuple newtypes
+  (`crates/pi-agent-core/src/control.rs:19`,
+  `crates/pi-agent-runtime-tokio/src/lib.rs:35`).
+- `ControlError::QueueFull.capacity` is `usize`
+  (`crates/pi-agent-core/src/control.rs:68`,
+  `crates/pi-agent-core/src/control.rs:74`). This is a separate transitive
+  boundary type from the `QueueSequence` tuple newtype and from the error
+  enum's `#[non_exhaustive]` marker (`crates/pi-agent-core/src/control.rs:66`).
+- `Timestamp` is a non-ID `i64` tuple newtype and is reachable through every
+  user/assistant/tool-result timestamp and through the active assistant
+  snapshot (`crates/pi-ai/src/ids.rs:133`,
+  `crates/pi-ai/src/messages.rs:123`,
+  `crates/pi-ai/src/messages.rs:169`,
+  `crates/pi-ai/src/messages.rs:211`,
+  `crates/pi-ai/src/messages.rs:241`,
+  `crates/pi-ai/src/streaming.rs:1703`).
+- `Currency` is a non-ID `String` tuple newtype inside every `Cost`, including
+  costs reached from `RunOutcome`, terminal `AssistantMessage`, and active
+  `AssistantMessageSnapshot` (`crates/pi-ai/src/usage.rs:88`,
+  `crates/pi-ai/src/usage.rs:121`,
+  `crates/pi-agent-core/src/events.rs:59`,
+  `crates/pi-ai/src/messages.rs:165`,
+  `crates/pi-ai/src/streaming.rs:1701`).
+- `ReplayDropReason` is a non-ID `String` tuple newtype reached through
+  `AgentEvent::ContextPrepared.report -> HandoffReport.changes ->
+  HandoffChange::OpaqueReplayDropped`
+  (`crates/pi-ai/src/handoff.rs:44`,
+  `crates/pi-agent-core/src/events.rs:97`,
+  `crates/pi-agent-core/src/events.rs:103`,
+  `crates/pi-ai/src/handoff.rs:84`,
+  `crates/pi-ai/src/handoff.rs:92`,
+  `crates/pi-ai/src/handoff.rs:150`).
+- `AgentRecord::Custom` contains `Box<serde_json::value::RawValue>`
+  (`crates/pi-agent-core/src/state.rs:66`,
+  `crates/pi-agent-core/src/state.rs:70`).
+- `AgentSnapshot::pending_tool_calls` is `Arc<[ToolCallId]>`
+  (`crates/pi-agent-core/src/state.rs:190`).
+- `AgentSnapshot::streaming` is an independent
+  `Option<AssistantMessageSnapshot>` root, not a view of
+  `AgentSnapshot::state.transcript`
+  (`crates/pi-agent-core/src/state.rs:184`,
+  `crates/pi-agent-core/src/state.rs:188`). Its active/partial value separately
+  contains `DeferredHandle`, diagnostics, partial content, replay, usage,
+  optional cost, `Timestamp`, and an optional terminal `AssistantMessage`
+  (`crates/pi-ai/src/streaming.rs:1689`,
+  `crates/pi-ai/src/streaming.rs:1693`,
+  `crates/pi-ai/src/streaming.rs:1695`,
+  `crates/pi-ai/src/streaming.rs:1697`,
+  `crates/pi-ai/src/streaming.rs:1699`,
+  `crates/pi-ai/src/streaming.rs:1701`,
+  `crates/pi-ai/src/streaming.rs:1703`,
+  `crates/pi-ai/src/streaming.rs:1705`). This root therefore reaches
+  `DeferredHandle.data`, diagnostic `serde_json::Number` and
+  `BTreeMap<String, serde_json::Value>`, partial
+  `ContentBlock::ToolCall -> ToolCall.arguments`, `Currency`, and the complete
+  terminal-message graph independently of any committed record
+  (`crates/pi-ai/src/deferred.rs:39`,
+  `crates/pi-ai/src/messages.rs:182`,
+  `crates/pi-ai/src/messages.rs:217`,
+  `crates/pi-ai/src/messages.rs:278`,
+  `crates/pi-ai/src/messages.rs:306`,
+  `crates/pi-ai/src/usage.rs:121`).
+- `ReplayEnvelope` is not a scalar or opaque leaf. It contains
+  `schema_version`, a full `ReplayScope`, and an ordered `Vec<ReplayItem>`
+  (`crates/pi-ai/src/replay.rs:13`, `crates/pi-ai/src/replay.rs:15`,
+  `crates/pi-ai/src/replay.rs:17`, `crates/pi-ai/src/replay.rs:19`). Every item
+  carries `id`, `ordinal`, `ReplayTarget`, `ReplayKind`,
+  `ReplayApplicability`, `ReplayCompleteness`, and `OpaquePayload`
+  (`crates/pi-ai/src/replay.rs:135`, `crates/pi-ai/src/replay.rs:137`,
+  `crates/pi-ai/src/replay.rs:139`, `crates/pi-ai/src/replay.rs:141`,
+  `crates/pi-ai/src/replay.rs:143`, `crates/pi-ai/src/replay.rs:145`,
+  `crates/pi-ai/src/replay.rs:147`, `crates/pi-ai/src/replay.rs:149`). The four
+  targets are `Message`, `ContentBlock(ContentBlockId)`,
+  `ToolCall(ToolCallId)`, and `ProviderOutputItem { output_index }`; the three
+  payloads are `Utf8(String)`, `Bytes(Vec<u8>)`, and
+  `JsonBytes(Vec<u8>)` (`crates/pi-ai/src/replay.rs:179`,
+  `crates/pi-ai/src/replay.rs:183`, `crates/pi-ai/src/replay.rs:185`,
+  `crates/pi-ai/src/replay.rs:187`, `crates/pi-ai/src/replay.rs:276`,
+  `crates/pi-ai/src/replay.rs:278`, `crates/pi-ai/src/replay.rs:280`,
+  `crates/pi-ai/src/replay.rs:282`). The request/event/state/snapshot graph has
+  thirteen independent envelope roots:
+
+  1. `ModelRequest.context.messages -> Message::Assistant ->
+     AssistantMessage.replay` (`crates/pi-ai/src/runtime.rs:17`,
+     `crates/pi-ai/src/messages.rs:473`, `crates/pi-ai/src/messages.rs:36`,
+     `crates/pi-ai/src/messages.rs:157`).
+  2. Direct `AssistantEvent::Finished.message.replay`
+     (`crates/pi-ai/src/streaming.rs:521`,
+     `crates/pi-ai/src/messages.rs:157`).
+  3. Direct `AssistantEvent::Failed.message.replay`
+     (`crates/pi-ai/src/streaming.rs:528`,
+     `crates/pi-ai/src/messages.rs:157`).
+  4. Direct `AssistantEvent::Cancelled.message.replay`
+     (`crates/pi-ai/src/streaming.rs:534`,
+     `crates/pi-ai/src/messages.rs:157`).
+  5. `AgentEvent::AssistantUpdate` carrying `Finished`
+     (`crates/pi-agent-core/src/events.rs:113`,
+     `crates/pi-ai/src/streaming.rs:521`,
+     `crates/pi-ai/src/messages.rs:157`).
+  6. `AgentEvent::AssistantUpdate` carrying `Failed`
+     (`crates/pi-agent-core/src/events.rs:113`,
+     `crates/pi-ai/src/streaming.rs:528`,
+     `crates/pi-ai/src/messages.rs:157`).
+  7. `AgentEvent::AssistantUpdate` carrying `Cancelled`
+     (`crates/pi-agent-core/src/events.rs:113`,
+     `crates/pi-ai/src/streaming.rs:534`,
+     `crates/pi-ai/src/messages.rs:157`).
+  8. `AgentEvent::MessageCommitted` carrying an assistant `AgentRecord`
+     (`crates/pi-agent-core/src/events.rs:120`,
+     `crates/pi-agent-core/src/state.rs:64`,
+     `crates/pi-ai/src/messages.rs:36`, `crates/pi-ai/src/messages.rs:157`).
+  9. A standalone assistant `AgentRecord`
+     (`crates/pi-agent-core/src/state.rs:64`,
+     `crates/pi-ai/src/messages.rs:36`, `crates/pi-ai/src/messages.rs:157`).
+  10. A direct `AgentState.transcript` assistant record
+      (`crates/pi-agent-core/src/state.rs:33`,
+      `crates/pi-agent-core/src/state.rs:64`,
+      `crates/pi-ai/src/messages.rs:36`, `crates/pi-ai/src/messages.rs:157`).
+  11. `AgentSnapshot.state.transcript` containing an assistant record
+      (`crates/pi-agent-core/src/state.rs:184`,
+      `crates/pi-agent-core/src/state.rs:33`,
+      `crates/pi-agent-core/src/state.rs:64`,
+      `crates/pi-ai/src/messages.rs:36`, `crates/pi-ai/src/messages.rs:157`).
+  12. `AgentSnapshot.streaming.replay`
+      (`crates/pi-agent-core/src/state.rs:188`,
+      `crates/pi-ai/src/streaming.rs:1697`).
+  13. `AgentSnapshot.streaming.terminal_message.replay`
+      (`crates/pi-agent-core/src/state.rs:188`,
+      `crates/pi-ai/src/streaming.rs:1705`,
+      `crates/pi-ai/src/messages.rs:157`).
+
+  Each root must be generated and round-tripped with its own distinct,
+  nonempty envelope. Every envelope uses the exact canonical `schema_version`
+  and root-specific values for all five `ReplayScope` fields, item count/order,
+  every item
+  ID/ordinal/kind/applicability/completeness, target IDs or indexes, and payload
+  strings or bytes. Each envelope independently exercises all four
+  `ReplayTarget` forms and all three `OpaquePayload` forms. An empty envelope,
+  a reused sentinel set, or a successful path through any other root is not
+  evidence for that root.
+- Replay also has direct event roots before terminal assembly:
+  `AssistantEvent::ReplayItemStarted` carries `ReplayTarget`, and
+  `AssistantEvent::ReplayData` carries `ReplayDataOperation`
+  (`crates/pi-ai/src/streaming.rs:474`,
+  `crates/pi-ai/src/streaming.rs:480`,
+  `crates/pi-ai/src/streaming.rs:488`,
+  `crates/pi-ai/src/streaming.rs:492`). `ReplayDataOperation` has the five
+  tuple-style forms `ReplaceUtf8`, `AppendUtf8`, `ReplaceBytes`,
+  `AppendBytes`, and `ReplaceJsonBytes`
+  (`crates/pi-ai/src/streaming.rs:563`,
+  `crates/pi-ai/src/streaming.rs:565`,
+  `crates/pi-ai/src/streaming.rs:567`,
+  `crates/pi-ai/src/streaming.rs:569`,
+  `crates/pi-ai/src/streaming.rs:571`,
+  `crates/pi-ai/src/streaming.rs:573`). Each target form and operation form
+  must be proven once as a standalone `AssistantEvent` and again nested in
+  `AgentEvent::AssistantUpdate` (`crates/pi-agent-core/src/events.rs:113`,
+  `crates/pi-agent-core/src/events.rs:117`).
+- `AgentEvent::ContextPrepared.report` reaches
+  `HandoffReport::source_models: BTreeSet<ModelFingerprint>`
+  (`crates/pi-agent-core/src/events.rs:97`,
+  `crates/pi-agent-core/src/events.rs:103`,
+  `crates/pi-ai/src/handoff.rs:144`,
+  `crates/pi-ai/src/handoff.rs:146`).
+- `RunOutcome` reaches `Cost`, whose `currency` is the `Currency` tuple newtype
+  and whose `micros` is `i128`
+  (`crates/pi-agent-core/src/events.rs:59`,
+  `crates/pi-ai/src/usage.rs:119`,
+  `crates/pi-ai/src/usage.rs:121`,
+  `crates/pi-ai/src/usage.rs:123`).
+- Direct `ModelRequest::options` reaches
+  `SimpleGenerationOptions::sampling: OrderedJsonObject`. That type is itself
+  a tuple newtype over `IndexMap<OrderedJsonString, OrderedJsonValue>`; the
+  recursive value graph contains the tuple newtypes `OrderedJsonString` and
+  `OrderedJsonArray`, and arrays recursively contain `OrderedJsonValue`
+  (`crates/pi-ai/src/runtime.rs:19`,
+  `crates/pi-ai/src/options.rs:598`,
+  `crates/pi-ai/src/json_compat.rs:24`,
+  `crates/pi-ai/src/json_compat.rs:114`,
+  `crates/pi-ai/src/json_compat.rs:227`,
+  `crates/pi-ai/src/json_compat.rs:324`,
+  `crates/pi-ai/src/json_compat.rs:335`,
+  `crates/pi-ai/src/json_compat.rs:337`,
+  `crates/pi-ai/src/json_compat.rs:339`).
+- `SimpleGenerationOptions::headers` is the canonical `HeaderMapSpec` alias for
+  `BTreeMap<String, Option<String>>`
+  (`crates/pi-ai/src/options.rs:602`,
+  `crates/pi-ai/src/model.rs:17`).
+- `SimpleGenerationOptions::api_options` reaches
+  `ErasedApiOptionsPatch::value: Box<RawValue>`
+  (`crates/pi-ai/src/options.rs:611`,
+  `crates/pi-ai/src/options.rs:294`,
+  `crates/pi-ai/src/options.rs:300`).
+- `ToolCall.arguments` is `serde_json::Value`
+  (`crates/pi-ai/src/messages.rs:300`,
+  `crates/pi-ai/src/messages.rs:306`). It reaches every terminal
+  `AssistantMessage` that contains a tool-call content block and therefore
+  `AssistantEvent::{Finished, Failed, Cancelled}`
+  (`crates/pi-ai/src/messages.rs:155`,
+  `crates/pi-ai/src/messages.rs:278`,
+  `crates/pi-ai/src/messages.rs:282`,
+  `crates/pi-ai/src/streaming.rs:521`,
+  `crates/pi-ai/src/streaming.rs:527`,
+  `crates/pi-ai/src/streaming.rs:533`). The same value independently reaches
+  `AgentEvent::ToolExecutionStarted`
+  (`crates/pi-agent-core/src/events.rs:125`,
+  `crates/pi-agent-core/src/events.rs:127`), assistant
+  `AgentEvent::MessageCommitted` values, `AgentState::transcript`, and
+  `AgentSnapshot::state`
+  (`crates/pi-agent-core/src/events.rs:120`,
+  `crates/pi-agent-core/src/events.rs:122`,
+  `crates/pi-agent-core/src/state.rs:33`,
+  `crates/pi-agent-core/src/state.rs:184`). It is also a direct-request path
+  through `ModelRequest.context -> Context.messages`
+  (`crates/pi-ai/src/runtime.rs:17`,
+  `crates/pi-ai/src/messages.rs:473`). Independently, the same arguments can
+  be present in active partial content at
+  `AgentSnapshot.streaming -> AssistantMessageSnapshot.content`
+  (`crates/pi-agent-core/src/state.rs:188`,
+  `crates/pi-ai/src/streaming.rs:1695`,
+  `crates/pi-ai/src/messages.rs:278`,
+  `crates/pi-ai/src/messages.rs:306`) and again inside that snapshot's optional
+  `terminal_message` (`crates/pi-ai/src/streaming.rs:1705`).
+- `ToolSpec.parameters` is another `serde_json::Value` root, and reaches direct
+  `ModelRequest.context` through `Context.tools`
+  (`crates/pi-ai/src/messages.rs:311`,
+  `crates/pi-ai/src/messages.rs:319`,
+  `crates/pi-ai/src/messages.rs:475`,
+  `crates/pi-ai/src/runtime.rs:17`).
+- `DeferredHandle.data` is `Option<serde_json::Value>` and reaches all three
+  terminal assistant events through `AssistantMessage.deferred`
+  (`crates/pi-ai/src/deferred.rs:39`,
+  `crates/pi-ai/src/messages.rs:143`,
+  `crates/pi-ai/src/streaming.rs:521`,
+  `crates/pi-ai/src/streaming.rs:527`,
+  `crates/pi-ai/src/streaming.rs:533`). A committed terminal assistant also
+  carries it into `AgentEvent::MessageCommitted`, the transcript, and snapshots
+  through the record paths cited above; `Message::Assistant` in
+  `Context.messages` carries the same value into a later direct
+  `ModelRequest.context`
+  (`crates/pi-ai/src/messages.rs:36`,
+  `crates/pi-ai/src/messages.rs:473`,
+  `crates/pi-ai/src/runtime.rs:17`). Independently, an active
+  `AgentSnapshot.streaming` carries the handle directly in
+  `AssistantMessageSnapshot.deferred` and may carry it again in
+  `terminal_message`
+  (`crates/pi-agent-core/src/state.rs:188`,
+  `crates/pi-ai/src/streaming.rs:1689`,
+  `crates/pi-ai/src/streaming.rs:1705`).
+- `ToolUpdate.details` and `ToolOutput.details` are each
+  `Option<Box<RawValue>>`; they reach, respectively,
+  `AgentEvent::ToolExecutionUpdated` and
+  `AgentEvent::ToolExecutionFinished`
+  (`crates/pi-agent-core/src/tools.rs:89`,
+  `crates/pi-agent-core/src/tools.rs:93`,
+  `crates/pi-agent-core/src/tools.rs:47`,
+  `crates/pi-agent-core/src/tools.rs:51`,
+  `crates/pi-agent-core/src/events.rs:130`,
+  `crates/pi-agent-core/src/events.rs:134`,
+  `crates/pi-agent-core/src/events.rs:137`,
+  `crates/pi-agent-core/src/events.rs:141`).
+- `ToolResultMessage.details` reaches
+  `VersionedExtension.value: Box<RawValue>`
+  (`crates/pi-ai/src/messages.rs:222`,
+  `crates/pi-ai/src/messages.rs:233`,
+  `crates/pi-ai/src/model.rs:919`,
+  `crates/pi-ai/src/model.rs:923`). The Agent constructs that extension from
+  `ToolOutput.details`, commits the `ToolResultMessage` as an `AgentRecord`, and
+  retains it in `AgentState::transcript` and `AgentSnapshot::state`
+  (`crates/pi-agent-core/src/run.rs:1673`,
+  `crates/pi-agent-core/src/run.rs:1682`,
+  `crates/pi-agent-core/src/run.rs:1686`,
+  `crates/pi-agent-core/src/run.rs:1278`,
+  `crates/pi-agent-core/src/run.rs:1282`,
+  `crates/pi-agent-core/src/state.rs:33`,
+  `crates/pi-agent-core/src/state.rs:184`). `Message::ToolResult` in
+  `Context.messages` also makes the same extension part of the complete direct
+  `ModelRequest.context` value graph
+  (`crates/pi-ai/src/messages.rs:38`,
+  `crates/pi-ai/src/messages.rs:473`,
+  `crates/pi-ai/src/runtime.rs:17`).
+- `GrammarVariants` is `BTreeMap<GrammarFormat, String>`. It is a third
+  independent `BTreeMap` path, beyond headers and diagnostic details, and
+  reaches a direct request through
+  `ToolSpec.constrained_sampling -> ConstrainedSamplingConfig::Grammar ->
+  Context.tools -> ModelRequest.context`
+  (`crates/pi-ai/src/messages.rs:325`,
+  `crates/pi-ai/src/messages.rs:334`,
+  `crates/pi-ai/src/messages.rs:379`,
+  `crates/pi-ai/src/messages.rs:387`,
+  `crates/pi-ai/src/messages.rs:389`,
+  `crates/pi-ai/src/messages.rs:418`,
+  `crates/pi-ai/src/messages.rs:475`,
+  `crates/pi-ai/src/runtime.rs:17`).
+- `AssistantEvent::DiagnosticAdded` directly carries
+  `AssistantMessageDiagnostic`; that record reaches
+  `DiagnosticErrorCode::Number(serde_json::Number)` and
+  `details: BTreeMap<String, serde_json::Value>`
+  (`crates/pi-ai/src/streaming.rs:426`,
+  `crates/pi-ai/src/streaming.rs:430`,
+  `crates/pi-ai/src/messages.rs:176`,
+  `crates/pi-ai/src/messages.rs:182`,
+  `crates/pi-ai/src/messages.rs:204`,
+  `crates/pi-ai/src/messages.rs:217`). The same two types are also reachable
+  through the `AssistantMessage::diagnostics` field carried by
+  `AssistantEvent::{Finished, Failed, Cancelled}`
+  (`crates/pi-ai/src/messages.rs:150`,
+  `crates/pi-ai/src/messages.rs:152`,
+  `crates/pi-ai/src/streaming.rs:521`,
+  `crates/pi-ai/src/streaming.rs:527`,
+  `crates/pi-ai/src/streaming.rs:533`). Committed assistants retain diagnostics
+  in records and snapshots, and `Message::Assistant` in `Context.messages`
+  carries them into later direct requests
+  (`crates/pi-ai/src/messages.rs:36`,
+  `crates/pi-ai/src/messages.rs:473`,
+  `crates/pi-agent-core/src/state.rs:33`,
+  `crates/pi-agent-core/src/state.rs:184`,
+  `crates/pi-ai/src/runtime.rs:17`). Independently, active snapshots carry the
+  diagnostic vector directly in `AssistantMessageSnapshot.diagnostics` and
+  may carry the same graph again through `terminal_message`
+  (`crates/pi-agent-core/src/state.rs:188`,
+  `crates/pi-ai/src/streaming.rs:1693`,
+  `crates/pi-ai/src/streaming.rs:1705`).
+- Eight canonical data enums in this graph use tuple-style variants:
+  `Message`, `AgentRecord`, `DiagnosticErrorCode`, `ConstrainedSampling`,
+  `OrderedJsonValue`, `ReplayTarget`, `OpaquePayload`, and
+  `ReplayDataOperation` (`crates/pi-ai/src/messages.rs:32`,
+  `crates/pi-agent-core/src/state.rs:62`,
+  `crates/pi-ai/src/messages.rs:178`,
+  `crates/pi-ai/src/messages.rs:334`,
+  `crates/pi-ai/src/json_compat.rs:324`,
+  `crates/pi-ai/src/replay.rs:179`,
+  `crates/pi-ai/src/replay.rs:276`,
+  `crates/pi-ai/src/streaming.rs:563`). They are a distinct syntax gate from
+  tuple-newtype records and from tuple-payload error variants.
+
+The numeric quick-reference table lists `i8` through `i64` and `u8` through
+`u64`, but does not list `usize`. The primitives section contains an isolated
+`usize` function-argument example; it does not state whether `usize` is
+supported as a field of an error variant. For
+`ControlError::QueueFull.capacity`, **UNRESOLVED: not answered by the
+documentation**. Pages checked: `types.md#quick-reference`,
+`types.md#primitives`, `errors.md#enum-errors`, and
+`errors.md#enums-with-payloads`.
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference]
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#primitives]
+[https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors]
+[https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enums-with-payloads]
+
+Tuple-newtype generation, `RawValue`, `Arc<[T]>`, `IndexMap`, `BTreeMap`,
+`BTreeSet`, `serde_json::Number`, `serde_json::Value`, and direct
+`i128`/`u128` mapping are
+**UNRESOLVED: not answered by the documentation**. Pages checked:
+`records.md#structs`, `types.md#records`, `types.md#quick-reference`,
+`types.md#collections`, `types.md#nested-collections`,
+`types.md#built-in-custom-types`, `types.md#whats-not-supported`, and
+`custom-types.md#representation-types`.
+[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs]
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records]
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference]
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#collections]
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#nested-collections]
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#built-in-custom-types]
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported]
+[https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#representation-types]
+
+Tuple-style data-enum variant generation is also
+**UNRESOLVED: not answered by the documentation**. The records page shows unit
+variants and struct-style associated-data variants, but does not show tuple
+variants. Pages checked: `records.md#enums`,
+`records.md#enums-with-associated-data`, and `types.md#records`.
+[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums]
+[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data]
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records]
+The unresolved result applies separately to `Message`, `AgentRecord`,
+`DiagnosticErrorCode`, `ConstrainedSampling`, `OrderedJsonValue`,
+`ReplayTarget`, `OpaquePayload`, and `ReplayDataOperation`. Generation and an
+exact Swift round trip are required for every variant of every enum; success
+for a shared payload type or for one tuple-style enum cannot be generalized to
+another. Failure returns the implementation to the canonical inline Rust type
+design; it must not produce a binding-only enum or envelope.
+
+The tuple-newtype unresolved result applies independently to the macro IDs,
+`QueueSequence`, `EventSinkId`, `Timestamp`, `Currency`,
+`ReplayDropReason`, `OrderedJsonString`, `OrderedJsonObject`, and
+`OrderedJsonArray`; the design does not treat a successful ID probe as evidence
+for any of the other wrappers. The records page demonstrates named-field
+structs but does not establish tuple-newtype generation.
+**UNRESOLVED: not answered by the documentation**. Pages checked:
+`records.md#structs`, `types.md#records`, and
+`custom-types.md#representation-types`.
+[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs]
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records]
+[https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#representation-types]
+
+These are hard generation gates, not omissions to be patched with lossy
+strings. Until a direct mapping or lossless inline canonical conversion is
+proven, do not annotate the whole affected enum/value graph:
+
+- `BTreeSet<ModelFingerprint>` gates `AgentEvent::ContextPrepared`, and because
+  `AgentEvent` is annotated as one payload enum, gates the exported
+  `AgentEvent`/`AgentEventEnvelope` pull and sink surface. The same event case
+  separately reaches `ReplayDropReason` through `HandoffReport.changes`, so
+  resolving `BTreeSet` alone does not resolve `ContextPrepared`
+  (`crates/pi-agent-core/src/events.rs:97`,
+  `crates/pi-agent-core/src/events.rs:103`,
+  `crates/pi-ai/src/handoff.rs:92`,
+  `crates/pi-ai/src/handoff.rs:146`,
+  `crates/pi-ai/src/handoff.rs:150`).
+- `ControlError::QueueFull.capacity` has its own generated error-payload gate.
+  A generation and Swift catch/payload-fidelity test must preserve exact `usize`
+  values; success for `QueueSequence`, another numeric payload, or
+  `ControlError`'s `#[non_exhaustive]` switch shape is not evidence for this
+  field (`crates/pi-agent-core/src/control.rs:68`,
+  `crates/pi-agent-core/src/control.rs:74`). The documentation does not state
+  support for `usize` error payloads. **UNRESOLVED: not answered by the
+  documentation**. Pages checked: `types.md#quick-reference`,
+  `types.md#primitives`, and `errors.md#enums-with-payloads`.
+  [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference]
+  [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#primitives]
+  [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enums-with-payloads]
+- `serde_json::Value` must be proven on four independent canonical roots.
+  `ToolCall.arguments` gates terminal `AssistantEvent` values,
+  `AgentEvent::ToolExecutionStarted`, assistant committed records and
+  `AgentSnapshot.state`, the separate active
+  `AgentSnapshot.streaming.content` and `.terminal_message` paths, and direct
+  `ModelRequest.context`; `ToolSpec.parameters` gates
+  direct requests through `Context.tools`; `DeferredHandle.data` gates all
+  terminal `AssistantEvent` values, the terminal messages later committed into
+  records and `AgentSnapshot.state`, the separate
+  `AgentSnapshot.streaming.deferred` and `.terminal_message` paths, and later
+  direct requests containing those messages.
+  `AssistantMessageDiagnostic.details` is a fourth use inside
+  `DiagnosticAdded`, terminal messages, committed records/snapshots, and later
+  direct requests, and independently inside
+  `AgentSnapshot.streaming.diagnostics` and `.terminal_message`. None of the
+  Agent pull, sink, direct assistant pull, record/snapshot, active snapshot, or
+  direct request roots advances until its reachable `Value` fields generate
+  and preserve the full values.
+- `RawValue` must be proven on every ownership/container path:
+  `AgentRecord::Custom.payload`, `ErasedApiOptionsPatch::value`, transient
+  `ToolUpdate.details`/`ToolOutput.details` in
+  `ToolExecutionUpdated`/`ToolExecutionFinished`, and durable
+  `ToolResultMessage.details -> VersionedExtension.value` in committed records
+  and snapshots and in later direct requests carrying those tool-result
+  messages. A successful probe of one `Box<RawValue>` occurrence does not by
+  itself validate every enclosing event, option, record, snapshot, and request
+  root.
+- `BTreeMap` must be proven separately for request headers
+  (`BTreeMap<String, Option<String>>`), diagnostic details
+  (`BTreeMap<String, serde_json::Value>`), and `GrammarVariants`
+  (`BTreeMap<GrammarFormat, String>`) inside `ToolSpec` on the direct-request
+  path. Diagnostic details also occur in committed records/snapshots, in the
+  independent `AgentSnapshot.streaming.diagnostics` and `.terminal_message`
+  paths, and in later direct requests. Different key/value graphs and nesting
+  mean that resolving only one use leaves the other request/event/record/
+  snapshot roots gated.
+- `serde_json::Number` gates `AssistantEvent::DiagnosticAdded` and the three
+  terminal variants through their complete `AssistantMessage`, and therefore
+  also gates nested `AgentEvent::AssistantUpdate`, committed assistant records,
+  `AgentSnapshot.state`, the independent
+  `AgentSnapshot.streaming.diagnostics` and `.terminal_message` paths, and
+  later direct requests containing those messages.
+- Replay fidelity gates thirteen independent `ReplayEnvelope` roots, each of
+  which must be nonempty: (1) a direct `ModelRequest` assistant message; (2)
+  direct `AssistantEvent::Finished`; (3) direct `AssistantEvent::Failed`; (4)
+  direct `AssistantEvent::Cancelled`; (5) `AgentEvent::AssistantUpdate` carrying
+  `Finished`; (6) `AgentEvent::AssistantUpdate` carrying `Failed`; (7)
+  `AgentEvent::AssistantUpdate` carrying `Cancelled`; (8) assistant
+  `AgentEvent::MessageCommitted`; (9) a standalone assistant `AgentRecord`;
+  (10) direct `AgentState.transcript`; (11) `AgentSnapshot.state.transcript`;
+  (12) `AgentSnapshot.streaming.replay`; and (13)
+  `AgentSnapshot.streaming.terminal_message.replay`
+  (`crates/pi-ai/src/runtime.rs:17`, `crates/pi-ai/src/messages.rs:36`,
+  `crates/pi-ai/src/messages.rs:157`, `crates/pi-ai/src/messages.rs:473`,
+  `crates/pi-ai/src/streaming.rs:521`, `crates/pi-ai/src/streaming.rs:528`,
+  `crates/pi-ai/src/streaming.rs:534`,
+  `crates/pi-agent-core/src/events.rs:113`,
+  `crates/pi-agent-core/src/events.rs:120`,
+  `crates/pi-agent-core/src/state.rs:33`,
+  `crates/pi-agent-core/src/state.rs:64`,
+  `crates/pi-agent-core/src/state.rs:184`,
+  `crates/pi-agent-core/src/state.rs:188`,
+  `crates/pi-ai/src/streaming.rs:1697`,
+  `crates/pi-ai/src/streaming.rs:1705`). Each envelope must preserve the exact
+  canonical schema version, a distinct root-specific scope/item sentinel set,
+  ordered nonempty items, every item field, all four `ReplayTarget` forms, and
+  all three `OpaquePayload` forms
+  (`crates/pi-ai/src/replay.rs:13`, `crates/pi-ai/src/replay.rs:88`,
+  `crates/pi-ai/src/replay.rs:135`, `crates/pi-ai/src/replay.rs:179`,
+  `crates/pi-ai/src/replay.rs:276`). The standalone
+  `AssistantEvent::{ReplayItemStarted,ReplayData}` matrix and its corresponding
+  nested `AgentEvent::AssistantUpdate` matrix are additional direct-event gates;
+  together they must preserve all four targets and all five
+  `ReplayDataOperation` forms with distinct direct/nested sentinels
+  (`crates/pi-ai/src/streaming.rs:474`,
+  `crates/pi-ai/src/streaming.rs:488`,
+  `crates/pi-ai/src/streaming.rs:563`,
+  `crates/pi-agent-core/src/events.rs:113`). An empty replay vector, a shared
+  sentinel set, or one successful path cannot discharge another root.
+- Tuple-style data-enum syntax independently gates every variant of `Message`,
+  `AgentRecord`, `DiagnosticErrorCode`, `ConstrainedSampling`,
+  `OrderedJsonValue`, `ReplayTarget`, `OpaquePayload`, and
+  `ReplayDataOperation`. It is not discharged by the separate tuple-newtype
+  or tuple-payload error probes. The records documentation does not establish
+  tuple-variant syntax. **UNRESOLVED: not answered by the documentation**.
+  Pages checked: `records.md#enums`,
+  `records.md#enums-with-associated-data`, and `types.md#records`.
+  [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums]
+  [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data]
+  [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records]
+- Every tuple wrapper is a separate fidelity gate: IDs and queue/sink
+  sequences on their event/control roots; `Timestamp` on messages,
+  diagnostics, terminal events, and active snapshots; `Currency` on every
+  `Cost` in outcomes, terminal messages, and active snapshots;
+  `ReplayDropReason` on `ContextPrepared`; and `OrderedJsonString`,
+  `OrderedJsonObject`, and `OrderedJsonArray` on the recursively nested
+  sampling graph. `Arc<[ToolCallId]>`, the `IndexMap` storage beneath ordered
+  JSON, and `i128` cost remain separate gates. Resolving JSON/container paths
+  or a tuple-ID probe does not resolve any of these types.
+
+The documented custom-type mechanisms can convert a whole owner-defined type to
+a supported representation, but they require conversion code and conversion
+failure panics.
+[https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#choosing-an-approach]
+[https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#conversion-errors]
+Any use must remain an inline conversion for the same canonical type and must
+preserve its full value exactly; it may not introduce a parallel Swift-only
+record hierarchy. Naked 128-bit method parameters or returns remain unresolved
+even if a whole record receives a custom conversion.
+
+### 8.3 `TokioAgentError::Agent` payload shape
+
+Current `TokioAgentError` contains `Agent(AgentError)`
+(`crates/pi-agent-runtime-tokio/src/lib.rs:76`). That one variant raises two
+separate mapping questions:
+
+1. It is a tuple-payload error variant rather than a unit or struct-style
+   variant. The documented error examples show unit variants and struct-style
+   payload variants, but do not show a tuple-payload error variant.
+   **UNRESOLVED: not answered by the documentation**. Pages checked:
+   `errors.md#supported-error-types`, `errors.md#enum-errors`, and
+   `errors.md#enums-with-payloads`.
+   [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#supported-error-types]
+   [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors]
+   [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enums-with-payloads]
+2. Its payload type is itself the canonical `AgentError` error enum. The
+   documented payload-error fields are `String` and `u32`; the page does not say
+   whether an error enum may contain another error type as a payload.
+   **UNRESOLVED: not answered by the documentation**. Pages checked:
+   `errors.md#supported-error-types`, `errors.md#enum-errors`, and
+   `errors.md#enums-with-payloads`.
+   [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#supported-error-types]
+   [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors]
+   [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enums-with-payloads]
+
+Therefore annotation of `TokioAgentError`, and consequently every exported
+method returning `Result<_, TokioAgentError>`, is gated on a minimal generation
+and Swift throwing/catching test for both shapes. If either fails, implementation
+must return to the canonical Rust error design; it must not flatten
+`AgentError` into a binding-only string or parallel error envelope. The
+documentation does establish that supported async `Result` errors become native
+async errors, but that rule applies only after the error type itself is
+supported.
+[https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#error-handling]
+[https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#async-errors]
+
+### 8.4 Non-exhaustive enums
+
+All six current in-scope occurrences are gates:
+
+1. `AgentEvent` (`crates/pi-agent-core/src/events.rs:78`).
+2. `AssistantEvent` (`crates/pi-ai/src/streaming.rs:357`).
+3. `RequestStartErrorKind` (`crates/pi-ai/src/runtime.rs:23`), which is the
+   `kind` field of directly in-scope `RequestStartError`
+   (`crates/pi-ai/src/runtime.rs:48`, `crates/pi-ai/src/runtime.rs:50`).
+4. `TokioAgentError` (`crates/pi-agent-runtime-tokio/src/lib.rs:68`).
+5. `AgentError` (`crates/pi-agent-core/src/error.rs:12`).
+6. `ControlError` (`crates/pi-agent-core/src/control.rs:66`).
+
+Target handling of `#[non_exhaustive]` data enums, error enums, or an error
+record containing a non-exhaustive enum is
+**UNRESOLVED: not answered by the documentation**. Pages checked:
+`records.md#enums`, `records.md#enums-with-associated-data`,
+`errors.md#enum-errors`, and `errors.md#enums-with-payloads`.
+[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums]
+[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data]
+[https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors]
+[https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enums-with-payloads]
+
+Do not silently remove any open-world marker to satisfy generation. Milestone
+2 must generate each occurrence separately and compile a Swift switch/catch
+smoke test for it before enabling the dependent surface. Failure for
+`AgentEvent` blocks Agent pulls/sinks; failure for `AssistantEvent` blocks both
+direct and nested assistant delivery; failure for `RequestStartErrorKind`
+blocks `TokioRuntimeOwner::stream_model`; failure for the three current error
+enums blocks every method returning the corresponding error. A successful test
+for one occurrence is not evidence for another.
+`ControlError` also remains independently gated on exact generation of its
+`QueueFull.capacity: usize` payload; passing the non-exhaustive switch/catch
+probe alone is insufficient (`crates/pi-agent-core/src/control.rs:68`,
+`crates/pi-agent-core/src/control.rs:74`). The documentation does not establish
+`usize` error payloads. **UNRESOLVED: not answered by the documentation**.
+Pages checked: `types.md#quick-reference`, `types.md#primitives`, and
+`errors.md#enums-with-payloads`.
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference]
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#primitives]
+[https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enums-with-payloads]
+
+### 8.5 Feature gating and multi-crate discovery
+
+The intended integration uses optional inline attributes so ordinary Rust builds
+do not require binding generation. The documentation shows direct attributes
+after `use boltffi::*`, but does not state whether discovery supports
+`cfg_attr`, optional build dependencies, or annotated types from dependency
+crates when one `source_crate` generates the package.
+**UNRESOLVED: not answered by the documentation**; pages checked:
 `installation.md#add-to-your-project`, `installation.md#create-buildrs`,
 `getting-started.md#write-your-code`, and
 `configuration.md#package-identity`.
@@ -271,1072 +2486,581 @@ script themselves may safely be optional. Pages checked:
 [https://www.boltffi.dev/docs/installation.md | docs/boltffi-swift-bindings/docs-snapshot/installation.md#create-buildrs]
 [https://www.boltffi.dev/docs/getting-started.md | docs/boltffi-swift-bindings/docs-snapshot/getting-started.md#write-your-code]
 [https://www.boltffi.dev/docs/configuration.md | docs/boltffi-swift-bindings/docs-snapshot/configuration.md#package-identity]
+Milestone 2 must prove this with the actual `pi-ai`, `pi-ai-openai`,
+`pi-agent-core`, and `pi-agent-runtime-tokio` dependency graph before broad
+annotation.
 
-The exact intended attribute placement is:
+### 8.6 Callback argument direction
 
-| Existing item kind | Attribute on the existing item | Scope in this repository |
-|---|---|---|
-| Concrete value struct or enum whose entire field graph is supported | Under the documented `use boltffi::*` import, put the proposed `#[cfg_attr(feature = "boltffi", data)]` on the item | IDs, messages, replay, events, options, outcomes, catalog/auth/session values after their transitive blockers are resolved. `#[data]` is the documented record/enum attribute. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] |
-| Inherent methods on a data record | Under the documented wildcard import, put the proposed `#[cfg_attr(feature = "boltffi", data(impl))]` on an existing `impl` only when every public method in that impl has a documented signature | Concrete constructors, `&self` getters returning owned values, documented `&mut self` record mutators, and static methods. `#[data(impl)]` is documented, but record-method omission is not. **UNRESOLVED: not answered by the documentation** — `#[skip]` is shown only inside class `#[export]` impls, not `#[data(impl)]`; pages checked: `records.md#methods-and-constructors`, `classes.md#skipping-methods`. Consequently a mixed record impl cannot be selectively exported attribute-only on the present evidence. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#skipping-methods] |
-| Method defined by a trait implementation | No attribute placement is authorized by the snapshot | `Models::default` is defined in `impl Default for Models` and `ApiRequestOptions::from` is defined in `impl From<&SimpleGenerationOptions> for ApiRequestOptions`; neither is an inherent implementation (`crates/pi-ai/src/models.rs:99`, `crates/pi-ai/src/options.rs:468`). The record and class pages demonstrate annotated inherent implementations, not exporting methods from `impl Trait for Type`. **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#methods-and-constructors`, `records.md#static-methods`, `classes.md#defining-a-class`, `classes.md#static-methods`. An inherent forwarding method would change the crate API and therefore violate R2. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#static-methods] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#static-methods] |
-| Rust-owned reference object with only documented `&self`/static methods | Under the documented wildcard import, put the proposed `#[cfg_attr(feature = "boltffi", export)]` on the existing inherent `impl`; class-only omissions may use proposed `#[cfg_attr(feature = "boltffi", skip)]` | `AgentControl`, `CancellationToken`, `Models`, `TokioAgentHandle`, and eligible in-memory session impls, subject to every public signature and the default `Send + Sync` compile-time check. The struct and its private fields stay private; only impl methods are exposed. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#thread-safety] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#skipping-methods] |
-| Rust-owned reference object with an existing `&mut self` method | Put proposed `#[cfg_attr(feature = "boltffi", export(single_threaded))]` on the existing class impl, with class `#[skip]` only where omitting a method is acceptable | Required for the `impl crate::Agent` containing `set_tool_execution_mode`, `reset_transcript`, and `reset_all` (`crates/pi-agent-core/src/run.rs:138`), and for `impl TokioAgentRun` containing `next_event` (`crates/pi-agent-runtime-tokio/src/lib.rs:131`). The same attribute would be required if `CustomRecordKinds`, `ToolRegistry`, or `CommittedEventReplay` are exposed as classes with their existing mutators. This mode disables both the `Send + Sync` and `&mut self` checks and makes target-side serialization the consumer's responsibility. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#single-threaded-mode] |
-| Free function or supported constant | Under the documented wildcard import, put the proposed `#[cfg_attr(feature = "boltffi", export)]` on that existing item | Migration, replay, OAuth, and constants listed in the inventory when their signatures are concrete and supported. [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#functions] [https://www.boltffi.dev/docs/constants.md | docs/boltffi-swift-bindings/docs-snapshot/constants.md#global-constants] |
-| Throwable error struct or enum | Under the documented wildcard import, put the proposed `#[cfg_attr(feature = "boltffi", error)]` on that existing error item | `AgentError`, `ControlError`, `ToolError`, `ToolUpdateError`, `RequestStartError`, provider/auth/catalog/options/session errors, and `CancellationError`. Error structs and enums are the documented `Result` error mapping. [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#struct-errors] [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors] |
-| Host-implemented callback trait with documented signatures | Under the documented wildcard import, put the proposed `#[cfg_attr(feature = "boltffi", export)]` on the existing trait | Synchronous concrete traits can be candidates; async traits qualify only if their methods are actual `async fn` under the documented form. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#traits] [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] |
-| Stream-producing class method | Under the documented wildcard import, put the proposed `#[cfg_attr(feature = "boltffi", ffi_stream(item = AgentEvent, mode = "async"))]` or the `AssistantEvent` equivalent on the method | **No existing method qualifies:** the documented attribute requires `Arc<EventSubscription<T>>`, which no inventoried native stream method returns. [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#the-ffi_stream-attribute] |
-
-For the two rejected mutable-class cases, the exact partial attachment would be
-`#[cfg_attr(feature = "boltffi", export(single_threaded))]` on the existing
-`impl crate::Agent` at `crates/pi-agent-core/src/run.rs:138` and on the existing
-`impl TokioAgentRun` at `crates/pi-agent-runtime-tokio/src/lib.rs:131`. The
-former is the only documented class mode that permits its
-`set_tool_execution_mode`, `reset_transcript`, and `reset_all` mutable
-receivers; the latter is the only documented class mode that permits
-`next_event(&mut self)`. That mode disables both checks and places serialization
-on the Swift consumer.
-[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#single-threaded-mode]
-
-Compiling either impl as a partial experiment would additionally require the
-documented class `#[skip]` on methods whose signatures remain blocked—for
-example, the bare Agent stream methods and `TokioAgentRun::{events,outcome}`.
-That is not the R1 design: omitting inventoried methods fails the requirement,
-and `#[skip]` has no documented record-impl counterpart. Therefore no complete
-attribute set is proposed for either impl until the stream and consuming-method
-gaps are resolved. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#skipping-methods]
-[https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#the-ffi_stream-attribute]
-[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors]
-
-Likewise, no `#[data(impl)]` is proposed for the mixed record impls named in
-section 3, and no `#[export]` is proposed for the consuming
-`ModelsBuilder`/`ProviderRegistrationBuilder` impls. The record and class method
-pages do not answer how to expose those consuming transitions, and the record
-page provides no selective omission attribute. **UNRESOLVED: not answered by
-the documentation**; pages checked: `records.md#methods-and-constructors`,
-`classes.md#methods`, `classes.md#skipping-methods`.
-[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors]
-[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods]
-[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#skipping-methods]
-
-The code-generation flow is: initialize root configuration, run
-`boltffi check`, generate source with `boltffi generate swift` for iteration,
-then produce the distributable Apple artifact with `boltffi pack apple`.
-[https://www.boltffi.dev/docs/quick-start.md | docs/boltffi-swift-bindings/docs-snapshot/quick-start.md#5-build-and-generate-bindings]
-[https://www.boltffi.dev/docs/installation.md | docs/boltffi-swift-bindings/docs-snapshot/installation.md#verify-installation]
-[https://www.boltffi.dev/docs/packaging.md | docs/boltffi-swift-bindings/docs-snapshot/packaging.md#step-by-step-workflow]
-The root configuration can set the Swift module name and package layout.
-[https://www.boltffi.dev/docs/configuration.md | docs/boltffi-swift-bindings/docs-snapshot/configuration.md#swift-module-name]
-[https://www.boltffi.dev/docs/configuration.md | docs/boltffi-swift-bindings/docs-snapshot/configuration.md#swiftpm-layouts]
-
-### R2 verdict
-
-**R2 fails for the inventoried surface.** Even the smallest documented setup
-requires Cargo/build-script/crate-type changes in addition to item attributes.
-[https://www.boltffi.dev/docs/installation.md | docs/boltffi-swift-bindings/docs-snapshot/installation.md#add-to-your-project]
-[https://www.boltffi.dev/docs/installation.md | docs/boltffi-swift-bindings/docs-snapshot/installation.md#create-buildrs]
-More importantly, native stream methods need new adapter methods returning
-`Arc<EventSubscription<T>>`, unsupported external/recursive types need
-conversion implementations, documented generic free functions/structs/traits
-need concrete counterparts, boxed-future traits need signature changes or
-adapter traits,
-whole owner-defined values with unsupported fields need manual conversion,
-and consuming or mixed record impls have no documented direct resolution.
-Generic inherent methods/constructors, generic enums, and generic aliases also
-have no documented resolution.
-Naked `i128`/`u128` arguments and returns, methods defined only by trait
-implementations, borrowed data-record/enum inputs, and owned Rust-class inputs
-have no documented direct mapping. Mutable Agent/run methods are attribute-only
-only through `#[export(single_threaded)]`, which transfers serialization
-responsibility to Swift. The documented nearest mechanisms are an
-`EventSubscription<T>` stream method, whole-type `custom_type!` or
-`CustomFfiConvertible` conversion, concrete nongeneric exports, and exported
-`async fn` callback traits respectively; the snapshot gives no corresponding
-mechanism for the four naked-signature/trait-impl/input-direction gaps.
-[https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#creating-streams]
-[https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#choosing-an-approach]
-[https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations]
+As flagged in section 1, the documented callback examples do not establish an
+async protocol method with an owned Rust-backed class argument. If
+`CancellationToken` fails the smoke test, the gap must be reported to the owner.
+The design does not substitute an integer token, global cancellation command,
+or unacknowledged stream callback.
 [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods]
-[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference]
-[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors]
-[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#skipping-methods]
-[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#single-threaded-mode]
-[https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#structs-and-enums]
-[https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes]
-[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#static-methods]
-[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#static-methods]
-Those are contract additions or conversion code, so they are forbidden by R2.
-
-## 3. Mapping table
-
-### Reading the table
-
-The selected boundary is the **Send/Tokio family**. Exported classes are
-`Send + Sync` by default, while the single-threaded class mode exists for objects
-that cannot meet that bound. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#thread-safety]
-Because the application-facing actor is explicitly Tokio/Send and the native
-contracts carry `Arc`, `SendBoxFuture`, and `SendBoxStream`, choosing the Local
-family would expose a different Rust contract. The Local rows remain the
-inventory's stated exclusions.
-
-Item paths are shortened after their first occurrence to keep the table
-readable. In particular, the `TokioAgentHandle`, `TokioAgentRun`,
-`AgentEventSink`, `EventSinkId`, and `TokioAgentError` rows retain the inventory's
-`pi_agent_runtime_tokio` namespace even where the prefix is not repeated.
-
-Coverage accounting: the inventory contains 382 rows whose Relevance cell
-includes `core` or `extended`: 380 pure `core`/`extended` rows plus two mixed
-rows. Every one of those 382 rows is represented in this section or by a
-cross-cutting gap in section 5; grouped mapping rows do not remove an inventory
-row from that accounting.
-
-Each status has this exact meaning:
-
-- **Direct data**: add `#[data]` after importing the macro; a supported struct or payload enum
-  becomes a Swift value struct or enum. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs]
-  [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums]
-- **Direct class/method**: add `#[export]` to an inherent `impl` whose exposed
-  instance methods take `&self`; an existing supported method becomes a Swift
-  class method, and the class must pass the default `Send + Sync` check.
-  [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class]
-  [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods]
-  [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#thread-safety]
-- **Single-threaded class/method**: an existing class method taking `&mut self`
-  requires `#[export(single_threaded)]`; that attribute disables both the
-  default `Send + Sync` check and the ban on mutable receivers, leaving all
-  target-side serialization to the consumer.
-  [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#single-threaded-mode]
-- **Direct async/throws**: an existing `async fn` maps to Swift `async`, and its
-  `Result` maps to `throws`. [https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#error-handling]
-- **Direct protocol**: add `#[export]` to a concrete host-implemented
-  trait whose method signatures otherwise qualify. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#traits]
-- **Direct error**: add `#[error]` to a struct or enum used as `Result`'s
-  error, yielding a Swift `Error` and throwing calls. [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#supported-error-types]
-- **Direct constant/function**: add `#[export]` to a supported constant
-  or free function. [https://www.boltffi.dev/docs/constants.md | docs/boltffi-swift-bindings/docs-snapshot/constants.md#global-constants]
-  [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#functions]
-- **Blocked — documented generic/reference/type/trait/stream shape**: the
-  indicated native shape exceeds a documented boundary. Generic free functions
-  and references returned by free functions are unsupported; generic structs,
-  arbitrary trait objects, and non-static lifetimes are unsupported; generic
-  traits and associated types are unsupported; a generated stream requires
-  `Arc<EventSubscription<T>>`.
-  [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations]
-  [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported]
-  [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#limitations]
-  [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#the-ffi_stream-attribute]
-- **UNRESOLVED: not answered by the documentation — consuming method**: the record and class method pages document
-  constructors/static methods, `&self`, and (under their respective rules)
-  `&mut self`, but do not document an instance method that consumes an existing
-  value with `self`. Pages checked: `records.md#methods-and-constructors` and
-  `classes.md#methods`.
-  [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors]
-  [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods]
-- **UNRESOLVED: not answered by the documentation — borrowed data input**:
-  the function page demonstrates owned `#[data]` struct/enum arguments, `&str`,
-  slices, and `&Class`, but it does not demonstrate `&Record` or `&Enum`.
-  Pages checked: `functions.md#primitives-and-strings`,
-  `functions.md#structs-and-enums`, `functions.md#slices`,
-  `functions.md#classes`, and `records.md#instance-methods`.
-  [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#primitives-and-strings]
-  [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#structs-and-enums]
-  [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#slices]
-  [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes]
-  [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#instance-methods]
-- **UNRESOLVED: not answered by the documentation — owned class input**: the
-  function and class pages demonstrate `&Logger`/`&User` class parameters and
-  returning a class by value, but do not demonstrate passing a Rust-backed
-  class as an owned argument. Pages checked: `functions.md#classes` and
-  `classes.md#methods-that-take-or-return-classes`.
-  [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes]
-  [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes]
-- **UNRESOLVED: not answered by the documentation — trait-implementation
-  method**: the record and class pages demonstrate annotated inherent impls,
-  but do not describe exporting methods defined by `impl Trait for Type`.
-  Pages checked: `records.md#methods-and-constructors`,
-  `records.md#static-methods`, `classes.md#defining-a-class`, and
-  `classes.md#static-methods`.
-  [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors]
-  [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#static-methods]
-  [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class]
-  [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#static-methods]
-
-For record methods, “direct” applies to the whole existing `#[data(impl)]`
-block only when all of its public methods qualify. The documentation does not
-authorize `#[skip]` in `#[data(impl)]`, so mixed impls such as `AssistantEvent`
-(`is_terminal` plus reference-returning `terminal_message`), `Usage` (`zero`
-plus `u128`-returning methods), `Currency` (`usd` plus an unresolved generic
-constructor and a non-static-reference method), `SessionEntry`,
-`ProvisionedEntry`, and `OperationRecord` cannot
-selectively expose only their supported members under R2. **UNRESOLVED: not
-answered by the documentation**; pages checked: `records.md#methods-and-constructors`
-and `classes.md#skipping-methods`.
-[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors]
-[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#skipping-methods]
-
-“Direct” is always conditional on the complete transitive field graph being
-supported. A blocked leaf blocks every enclosing value even when the enclosing
-struct or enum is itself the documented record shape.
-[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs]
-
-### `pi_agent_core` and Tokio actor
-
-| Inventory item and Rust source | BoltFFI-to-Swift mapping and verdict |
-|---|---|
-| `Agent` (`crates/pi-agent-core/src/restore.rs:128`) | Class candidate: the struct and its fields stay private and only methods on annotated impls are exposed, so its private trait-object fields are not a data-record representability question. The run impl contains multiple `&mut self` methods and therefore requires `#[export(single_threaded)]`, which disables both default safety checks and makes Swift-side serialization mandatory; constructor and method signatures remain independently blocked below. **UNRESOLVED: not answered by the documentation** — whether two existing inherent impl blocks for one class can both be annotated and merged; pages checked: `classes.md#defining-a-class`, `classes.md#methods`, `classes.md#single-threaded-mode`. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#single-threaded-mode] |
-| `Agent::new`, `Agent::restore` (`crates/pi-agent-core/src/run.rs:140`, `crates/pi-agent-core/src/restore.rs:153`) | Blocked — both accept `Arc<dyn ModelRuntime>` and an owned `ToolRegistry`; restore also accepts callback trait objects. The callback docs cover host implementations crossing as `Box`/`Arc`, but do not document passing a Rust library implementation of a protocol back into another generated Rust class. Separately, the class-parameter examples use borrowed `&Class` and do not authorize the owned `ToolRegistry` input. **UNRESOLVED: not answered by the documentation**; pages checked: `callbacks.md#ownership`, `functions.md#classes`, `classes.md#methods-that-take-or-return-classes`, `types.md#whats-not-supported`. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#ownership] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| `Agent::{state,runtime,tools,snapshot}` (`crates/pi-agent-core/src/restore.rs:194`) | `snapshot` is intended as a direct owned class method after the snapshot graph maps. `state`, `runtime`, and `tools` return values containing references or arbitrary trait objects and are blocked by the global type restrictions on non-static lifetimes and trait objects. [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| `Agent::{state_mut,options,options_mut}` (`crates/pi-agent-core/src/run.rs:227`) | Blocked — their returned mutable and shared references carry non-static lifetimes, which the supported type boundary rejects. [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| `AgentState`, `AgentState::new` (`crates/pi-agent-core/src/state.rs:23`) | Intended direct data, blocked transitively by `AgentRecord::Custom(Box<RawValue>)`, which has no documented built-in mapping. `AgentState::new` uses `impl Into<String>`, but the free-function limitation does not establish a rule for generic inherent constructors. **UNRESOLVED: not answered by the documentation** for this constructor; pages checked: `records.md#constructors`, `classes.md#constructors`, `functions.md#limitations`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#built-in-custom-types] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] |
-| `AgentRecord`, `AgentRecord::{message_id,custom_type_name}` (`crates/pi-agent-core/src/state.rs:62`, `crates/pi-agent-core/src/state.rs:158`) | Intended payload enum, blocked by `Box<RawValue>`; both inspection helpers return references with non-static lifetimes and are also blocked. Payload enums are otherwise direct data. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| `AgentSnapshot`, `AgentSnapshot::new` (`crates/pi-agent-core/src/state.rs:180`) | Intended direct data, blocked by the transcript graph and undocumented `Arc<[ToolCallId]>` field; `Vec` is documented but `Arc<[T]>` is not. **UNRESOLVED: not answered by the documentation**; pages checked: `types.md#collections`, `records.md#structs`, `custom-types.md#containers`. [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#collections] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#containers] |
-| `AGENT_STATE_SCHEMA_VERSION`, `AGENT_SNAPSHOT_SCHEMA_VERSION`, `AGENT_INITIAL_SEQUENCE` (`crates/pi-agent-core/src/state.rs:10`) | Direct constants because their scalar types are among the documented constant values. [https://www.boltffi.dev/docs/constants.md | docs/boltffi-swift-bindings/docs-snapshot/constants.md#supported-values] |
-| `ModelRefResolver`, `CustomRecordKindRegistry` (`crates/pi-agent-core/src/restore.rs:21`) | Intended host protocols, but `ModelRefResolver::resolves(&ModelRef)` has a borrowed data-record input and `CustomRecordKindRegistry` has borrowed-string inputs. `&str` is documented, but `&Record` is not. **UNRESOLVED: not answered by the documentation** for the borrowed `ModelRef`; pages checked: `callbacks.md#traits`, `functions.md#primitives-and-strings`, `functions.md#structs-and-enums`, `functions.md#classes`. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#traits] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#primitives-and-strings] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#structs-and-enums] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] |
-| `CustomRecordKinds::{new,register}` (`crates/pi-agent-core/src/restore.rs:52`) | Class candidate; `register(&mut self, impl Into<String>)` would require `#[export(single_threaded)]` if made class-exportable. Whether the generic inherent method itself can export is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#methods-and-constructors`, `classes.md#methods`, `functions.md#limitations`. A record-impl choice also cannot document-select only `new`; record `#[skip]` is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#methods-and-constructors`, `classes.md#skipping-methods`. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#single-threaded-mode] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#skipping-methods] |
-| `migrate_agent_snapshot` (`crates/pi-agent-core/src/restore.rs:87`) | Intended direct free function after the blocked owned `AgentSnapshot` graph maps; its argument is owned data, the form demonstrated by the function page. [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#structs-and-enums] |
-| `AgentError` (`crates/pi-agent-core/src/error.rs:14`) | Intended direct error enum. Its `#[non_exhaustive]` behavior in generated Swift is undocumented. **UNRESOLVED: not answered by the documentation**; pages checked: `errors.md#enum-errors`, `records.md#enums`. [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] |
-| `AgentInput`, `AgentInput::records` (`crates/pi-agent-core/src/run.rs:68`) | Intended direct data, blocked by `AgentRecord`. `AgentInput::records` uses `impl IntoIterator`, but the free-function limitation does not establish a rule for generic inherent methods. **UNRESOLVED: not answered by the documentation** for this method; pages checked: `records.md#methods-and-constructors`, `classes.md#methods`, `functions.md#limitations`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] |
-| `PromptImage`, `PromptText` (`crates/pi-agent-core/src/run.rs:84`, `crates/pi-agent-core/src/run.rs:93`) | Direct data: fields are strings and `Vec<PromptImage>`, all documented record/container shapes. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs-with-strings-or-collections] |
-| `Agent::{run,prompt_text,prompt_records,continue_run,retry_last_turn}` (`crates/pi-agent-core/src/run.rs:283`) | Blocked — native methods return borrowed `SendBoxStream<'a, AgentEvent>`, not `Arc<EventSubscription<AgentEvent>>`. `prompt_records` additionally uses `impl IntoIterator`; whether that generic inherent method can export is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#methods-and-constructors`, `classes.md#methods`, `functions.md#limitations`. Every method also consumes an owned `CancellationToken` class capability, while the class-parameter examples demonstrate only borrowed `&Class`. **UNRESOLVED: not answered by the documentation** for that owned-class input; pages checked: `functions.md#classes`, `classes.md#methods-that-take-or-return-classes`. No documented attribute converts an arbitrary existing stream return type. [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#the-ffi_stream-attribute] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes] |
-| `Agent::{reset_transcript,reset_all}` (`crates/pi-agent-core/src/run.rs:350`) | Not ordinary direct methods: both take `&mut self`, so the existing Agent impl must use `#[export(single_threaded)]`. Their mapped calls can throw once `AgentError` maps, but BoltFFI then disables the `Send + Sync` and mutable-receiver checks and the Swift consumer must serialize every access to that Agent instance. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#single-threaded-mode] [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#supported-error-types] |
-| `AgentPhase`, `MessageRole`, `TurnOutcome`, `RunOutcome`, `AgentEvent`, `AgentEventEnvelope` (`crates/pi-agent-core/src/run.rs:30`, `crates/pi-agent-core/src/events.rs:15`) | Intended data enums/structs. `AgentEvent` and the dependent outcomes/envelope are blocked transitively by the canonical message/replay/tool/cost graph, including `Cost`'s undocumented `i128`. `AgentEvent` is non-exhaustive; its target behavior is **UNRESOLVED: not answered by the documentation**. Pages checked: `records.md#enums`, `errors.md#enum-errors`. Payload enums and ordinary structs are otherwise supported. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference] |
-| `Agent::{active_run_id,phase,last_error}` (`crates/pi-agent-core/src/run.rs:212`) | `active_run_id` and `phase` can be direct only if their returned values are owned; `last_error` returns a reference with a non-static lifetime and is blocked. [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| `AgentControl`, `Agent::control` (`crates/pi-agent-core/src/control.rs:107`, `crates/pi-agent-core/src/run.rs:172`) | Intended direct Rust-owned class and owned class getter. A Rust-backed class may be returned from another class method. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes] |
-| `AgentControl::{steer,follow_up}` (`crates/pi-agent-core/src/control.rs:154`) | Direct async throwing methods after `AgentRecord`, IDs, receipts, and `ControlError` map. [https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#error-handling] |
-| `AgentControl::{cancel,clear_steering,clear_follow_up,clear_all,set_steering_mode,steering_mode,set_follow_up_mode,follow_up_mode}` (`crates/pi-agent-core/src/control.rs:164`) | Direct synchronous class methods after IDs and queue-mode data map. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] |
-| `Agent::{set_steering_mode,steering_mode,set_follow_up_mode,follow_up_mode,clear_steering_queue,clear_follow_up_queue,clear_all_queues}` (`crates/pi-agent-core/src/run.rs:177`) | These signatures use `&self` and otherwise fit documented class methods after their data dependencies map. They live in the same existing impl as mutable methods, so the proposed impl-level attachment is nevertheless `#[export(single_threaded)]`, with Swift responsible for serializing all calls on the instance. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#single-threaded-mode] |
-| `Agent::set_tool_execution_mode` (`crates/pi-agent-core/src/run.rs:268`) | Not ordinary direct: it takes `&mut self` and therefore requires the containing Agent impl to use `#[export(single_threaded)]`; if `ToolExecutionMode` and `AgentError` map, the Swift call is synchronous and throwing, but target-side serialization is the consumer's responsibility. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#single-threaded-mode] [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#supported-error-types] |
-| `QueueSequence`, `QueueKind`, `QueueReceipt`, `QueueDrainMode` (`crates/pi-agent-core/src/control.rs:19`) | `QueueKind`, `QueueReceipt`, and `QueueDrainMode` are intended direct enum/record data. `QueueSequence` is a tuple newtype; tuple-newtype generation is undocumented. **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#structs`, `records.md#enums`, `types.md#records`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records] |
-| `ControlError` (`crates/pi-agent-core/src/control.rs:68`) | Intended direct error enum; non-exhaustive target behavior is **UNRESOLVED: not answered by the documentation** as for `AgentError`; pages checked: `errors.md#enum-errors`, `records.md#enums`. [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] |
-| `DEFAULT_QUEUE_CAPACITY` (`crates/pi-agent-core/src/control.rs:14`) | Direct scalar constant. [https://www.boltffi.dev/docs/constants.md | docs/boltffi-swift-bindings/docs-snapshot/constants.md#supported-values] |
-| `ToolSpec`, `ToolCallContext`, `ToolOutput`, `ToolUpdate` (`crates/pi-ai/src/messages.rs:311`, `crates/pi-agent-core/src/tools.rs:32`) | Intended record/enum data, blocked by `serde_json::Value`, `Box<RawValue>`, `GrammarVariants`/`BTreeMap`, and the broader message graph. These types have no documented built-in mappings. The documented nearest alternative is a custom conversion to a supported representation, which violates R2. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#choosing-an-approach] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#built-in-custom-types] |
-| `ToolOutput::new`, `ToolError::new`, `ToolUpdateError::new` (`crates/pi-agent-core/src/tools.rs:72`, `crates/pi-agent-core/src/tools.rs:143`, `crates/pi-agent-core/src/tools.rs:168`) | Each uses generic conversion input. Whether these generic inherent constructors can export is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#constructors`, `classes.md#constructors`, `functions.md#limitations`. The concrete result/error values remain candidates for data/error attributes. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] |
-| `ToolError`, `ToolUpdateError` (`crates/pi-agent-core/src/tools.rs:134`, `crates/pi-agent-core/src/tools.rs:161`) | Direct error structs once payload field types map. [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#struct-errors] |
-| `Tool` (`crates/pi-agent-core/src/tools.rs:201`) | Blocked as written. Its host protocol direction and `Arc` ownership are documented, but `spec()` returns `&ToolSpec` with a non-static lifetime and `execute()` returns `SendBoxFuture` rather than being `async fn`. `execute` also receives an owned `CancellationToken` class; only borrowed class parameters are demonstrated. **UNRESOLVED: not answered by the documentation** for that owned-class input; pages checked: `functions.md#classes`, `classes.md#methods-that-take-or-return-classes`. The documented async protocol form requires `#[async_trait]` plus `async fn`. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#ownership] [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes] |
-| `ToolUpdateSink` (`crates/pi-agent-core/src/tools.rs:184`) | The Swift host must receive and invoke a Rust library implementation. The docs describe a Swift implementation passed into Rust, not a generated proxy for a Rust implementation passed into a Swift callback. **UNRESOLVED: not answered by the documentation**; pages checked: `callbacks.md#traits`, `callbacks.md#ownership`, `callbacks.md#how-it-works`. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#traits] [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#ownership] [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#how-it-works] |
-| `ToolArgumentPreparer` (`crates/pi-agent-core/src/tools.rs:242`) | Intended direct host protocol, blocked by borrowed `serde_json::Value` input and undocumented JSON mapping. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#traits] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#built-in-custom-types] |
-| `ToolExecutionMode`, `ConstrainedSampling`, `ConstrainedSamplingConfig`, `JsonSchemaStrictMode`, `GrammarFormat` (`crates/pi-agent-core/src/tools.rs:21`, `crates/pi-ai/src/messages.rs:334`) | Intended direct data enums/struct; `ConstrainedSamplingConfig` is blocked transitively by its JSON/grammar map branches. Payload enums and structs are documented. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] |
-| `GrammarVariants` (`crates/pi-ai/src/messages.rs:418`) | Blocked/undocumented `BTreeMap` alias. The overview lists `HashMap` only as an exportable category; the type-page collections section documents vectors/slices and does not establish a Swift map mapping, `BTreeMap`, or nested-map behavior. The custom-type conversion mechanism is the nearest documented alternative. [https://www.boltffi.dev/docs/overview.md | docs/boltffi-swift-bindings/docs-snapshot/overview.md#what-you-can-export] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#collections] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#containers] |
-| `TypedTool<I,F>`, `TypedTool::{new,from_spec,with_execution_mode}` (`crates/pi-agent-core/src/tools.rs:277`) | `TypedTool<I,F>` is blocked by the documented prohibition on generic structs. Whether its generic inherent constructors and methods can export is separately **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#methods-and-constructors`, `classes.md#constructors`, `classes.md#methods`, `functions.md#limitations`. [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] |
-| `ToolRegistry`, `ToolRegistry::{new,register,register_with_argument_preparer,get,is_empty,len}` (`crates/pi-agent-core/src/tools.rs:491`) | Class candidate. `new`, `is_empty`, and `len` are signature candidates; registration is blocked with the current `Tool`/preparer protocols and, because both registration methods take `&mut self`, would require `#[export(single_threaded)]` even after that callback gap is resolved. `get` returns a reference with a non-static lifetime to an `Arc<dyn Tool>` and is blocked. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#single-threaded-mode] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| `ContextPolicy`, `MessageProjector`, `ToolPolicy`, `TurnPolicy` (`crates/pi-agent-core/src/policy.rs:116`) | Blocked — explicit boxed-future callback signatures, borrowed contexts, and trait-object members do not match the documented `async fn` callback form. Some contexts are type aliases; whether aliases themselves are exportable is **UNRESOLVED: not answered by the documentation**; pages checked: `types.md#quick-reference`, `types.md#whats-not-supported`, `callbacks.md#async-methods`. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| `AgentStateView`, `PreparedAgentRecords`, `PreparedContext`, `ContextError` (`crates/pi-agent-core/src/policy.rs:16`) | Intended records/error, blocked by borrowed fields and the transitive agent/message graph. Non-static lifetimes are unsupported. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors] |
-| `AgentRunContext<Tools>`, `AgentContext`, `BeforeToolCall<'a,Tools>`, `AfterToolCall<'a,Tools>`, `CompletedTurn<'a,Tools>`, `NextTurn<Tools>` (`crates/pi-agent-core/src/policy.rs:37`) | The generic structs and non-static lifetime-bearing values are blocked. `AgentContext` is a concrete alias whose expansion still contains the blocked graph, but whether a type alias itself can be exported is **UNRESOLVED: not answered by the documentation**; pages checked: `types.md#quick-reference`, `types.md#whats-not-supported`, `records.md#structs`. [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] |
-| `ToolAuthorization`, `ToolOutputPatch` (`crates/pi-agent-core/src/policy.rs:238`) | Intended record/payload-enum data, blocked transitively by tool outputs and JSON values. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] |
-| `TurnPolicyError` (`crates/pi-agent-core/src/policy.rs:459`) | Intended direct error after payload types map. [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors] |
-| `CommittedEventReplay::{new,apply,state,next_sequence,into_state}` (`crates/pi-agent-core/src/replay.rs:16`) | As a class, `new` and `next_sequence` are candidates. `apply(&mut self, &AgentEventEnvelope)` requires `#[export(single_threaded)]`, and its borrowed data-record input is independently **UNRESOLVED: not answered by the documentation**; the input pages demonstrate owned data and borrowed classes, not `&Record`. `state` returns a reference with a non-static lifetime and is blocked; `into_state(self)` is unresolved because consuming class/record methods are not described. As a record impl, no documented `#[skip]` can select only qualifying members. Pages checked: `functions.md#structs-and-enums`, `functions.md#classes`, `classes.md#single-threaded-mode`, `classes.md#methods`, `records.md#methods-and-constructors`, `classes.md#skipping-methods`, `types.md#whats-not-supported`. [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#structs-and-enums] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#single-threaded-mode] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#skipping-methods] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| `replay_committed_events` (`crates/pi-agent-core/src/replay.rs:112`) | Blocked — lifetime-generic borrowed input function. [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] |
-| `committed_record` (`crates/pi-agent-core/src/replay.rs:125`) | Returns owned `Option<AgentRecord>`, but accepts `&AgentEvent`. The function page documents owned data arguments, not borrowed enum inputs. **UNRESOLVED: not answered by the documentation**; pages checked: `functions.md#structs-and-enums`, `functions.md#classes`, `functions.md#option`. An owned-input forwarding function would change the native signature and fail R2. [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#structs-and-enums] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#option] |
-| `TokioAgentHandle`, `TokioAgentHandle::{new,spawn,with_capacities}` (`crates/pi-agent-runtime-tokio/src/lib.rs:158`) | `TokioAgentHandle` is a Send class candidate, but all three constructors consume an owned `Agent`. The class-parameter examples demonstrate `&Class` and class returns, not owned class arguments. **UNRESOLVED: not answered by the documentation**; pages checked: `functions.md#classes`, `classes.md#constructors`, `classes.md#methods-that-take-or-return-classes`. The `Agent` construction path is independently blocked, and Tokio work requires an active runtime because BoltFFI supplies no executor. [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes] [https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#runtime] |
-| `TokioAgentHandle::{prompt_text,continue_run,retry_last_turn,steer,follow_up,cancel,reset_transcript,reset_all,snapshot,wait_for_idle,shutdown}` (`crates/pi-agent-runtime-tokio/src/lib.rs:203`) | Direct async/throwing class methods after their input/result graphs map. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#async-methods] [https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#error-handling] |
-| `TokioAgentHandle::prompt_records` (`crates/pi-agent-runtime-tokio/src/lib.rs:230`) | The method uses `impl IntoIterator`, but the free-function limitation does not establish a rule for generic inherent methods. **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#methods-and-constructors`, `classes.md#methods`, `functions.md#limitations`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] |
-| `TokioAgentHandle::prompt_text_with_sink`, `subscribe`, `unsubscribe` (`crates/pi-agent-runtime-tokio/src/lib.rs:217`, `crates/pi-agent-runtime-tokio/src/lib.rs:306`) | Intended async methods, blocked by `AgentEventSink`'s non-documented boxed-future callback signature; `unsubscribe` is conditional on `EventSinkId`. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] |
-| `TokioAgentHandle::cancel_now` (`crates/pi-agent-runtime-tokio/src/lib.rs:301`) | Direct synchronous class method after `RunId` maps; this preserves the native re-entrant cancellation operation. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] |
-| `TokioAgentHandle::{latest_snapshot,snapshots}` (`crates/pi-agent-runtime-tokio/src/lib.rs:364`) | `latest_snapshot` is a direct owned getter after snapshot mapping. `snapshots` is blocked because `tokio::sync::watch::Receiver` is not a documented type and the method is not an `EventSubscription` stream. [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference] [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#the-ffi_stream-attribute] |
-| `TokioAgentRun` (`crates/pi-agent-runtime-tokio/src/lib.rs:126`) | Class candidate: its Tokio receiver fields stay private because only annotated impl methods are exposed, so they do not themselves need a data mapping. The existing impl contains `&mut self` methods and therefore requires `#[export(single_threaded)]`, which disables both default checks and makes Swift-side serialization mandatory; `events` and `outcome` remain signature gaps below. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#single-threaded-mode] |
-| `TokioAgentRun::events` (`crates/pi-agent-runtime-tokio/src/lib.rs:133`) | Blocked — returns a Tokio receiver behind a reference with a non-static lifetime, not `Arc<EventSubscription<AgentEvent>>`; both its type boundary and stream signature conflict with the documented mappings. [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#the-ffi_stream-attribute] |
-| `TokioAgentRun::next_event` (`crates/pi-agent-runtime-tokio/src/lib.rs:138`) | Not ordinary direct: this is an async `&mut self` method, so it can be a Swift async pull returning `AgentEvent?` only under `#[export(single_threaded)]` and after the event graph maps. The generated wrapper performs no thread-safety enforcement in that mode; Swift must serialize calls. It does not generate an async sequence. [https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#methods] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#single-threaded-mode] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#option] |
-| `TokioAgentRun::outcome` (`crates/pi-agent-runtime-tokio/src/lib.rs:143`) | The method is async but consumes `self`. **UNRESOLVED: not answered by the documentation** — consuming class methods are not specified; pages checked: `classes.md#methods`, `classes.md#memory-management`, `async.md#methods`. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#memory-management] [https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#methods] |
-| `AgentEventSink` (`crates/pi-agent-runtime-tokio/src/lib.rs:45`) | Blocked — host protocol direction is documented, but `on_event` returns `SendBoxFuture<'static, ()>` instead of being `async fn`; its acknowledgement is part of native ordering and cannot be replaced with an unacknowledged closure. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] |
-| `EventSinkId` (`crates/pi-agent-runtime-tokio/src/lib.rs:37`) | Opaque tuple-newtype mapping is undocumented. **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#structs`, `classes.md#defining-a-class`, `types.md#records`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records] |
-| `TokioAgentError` (`crates/pi-agent-runtime-tokio/src/lib.rs:70`) | Intended direct error enum; non-exhaustive target behavior is **UNRESOLVED: not answered by the documentation**; pages checked: `errors.md#enum-errors`, `records.md#enums`. [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] |
-| `DEFAULT_COMMAND_CAPACITY`, `DEFAULT_EVENT_CAPACITY` (`crates/pi-agent-runtime-tokio/src/lib.rs:30`) | Direct scalar constants. [https://www.boltffi.dev/docs/constants.md | docs/boltffi-swift-bindings/docs-snapshot/constants.md#supported-values] |
-
-### `pi_ai` runtime, models, cancellation, deferred, messages, and events
-
-| Inventory item and Rust source | BoltFFI-to-Swift mapping and verdict |
-|---|---|
-| `ModelRequest` (`crates/pi-ai/src/runtime.rs:13`) | Intended direct data, blocked transitively by `Context`, `SimpleGenerationOptions`, ordered JSON, and header maps. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] |
-| `ModelRuntime` (`crates/pi-ai/src/runtime.rs:87`) | Blocked — its method returns `SendBoxFuture<Result<AssistantStream, RequestStartError>>`, not the documented `async fn` trait method form, and it receives an owned `CancellationToken` class for which only borrowed-class parameter examples exist. The normal object is implemented by Rust `Models`, and that library-to-library trait-object route is not covered by the host callback page. **UNRESOLVED: not answered by the documentation** for both library-supplied protocol proxies and owned class inputs; pages checked: `callbacks.md#traits`, `callbacks.md#ownership`, `callbacks.md#async-methods`, `functions.md#classes`, `classes.md#methods-that-take-or-return-classes`. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#traits] [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#ownership] [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes] |
-| `RequestStartErrorKind`, `RequestStartError` (`crates/pi-ai/src/runtime.rs:25`) | Intended direct data enum plus direct error struct. Non-exhaustive enum behavior is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#enums`, `errors.md#enum-errors`. [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#struct-errors] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors] |
-| `RequestStartError::{new,with_model}` (`crates/pi-ai/src/runtime.rs:61`) | `new` uses `impl Into<String>`, but the free-function limitation does not establish a rule for generic inherent constructors. **UNRESOLVED: not answered by the documentation** for `new`; pages checked: `records.md#constructors`, `classes.md#constructors`, `functions.md#limitations`. `with_model(mut self, ...)` is not generic; it is **UNRESOLVED: not answered by the documentation** because consuming record/error methods are not described. The error/data method pages do not provide a selective omission mechanism for a mixed record impl. Pages checked: `records.md#methods-and-constructors`, `classes.md#methods`, `errors.md#struct-errors`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#struct-errors] |
-| `SendBoxFuture<'a,T>`, `SendBoxStream<'a,T>` (`crates/pi-ai/src/async_types.rs:11`) | Their expansions contain arbitrary future/stream trait objects and non-static lifetime parameters, which are blocked. Whether generic type aliases themselves can export is **UNRESOLVED: not answered by the documentation**; pages checked: `types.md#quick-reference`, `types.md#whats-not-supported`. [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference] |
-| `AssistantStream::{new,from_boxed,is_terminated}` (`crates/pi-ai/src/streaming.rs:1900`) | Blocked as a generated Swift stream: it wraps `SendBoxStream`, not `EventSubscription<AssistantEvent>`. `from_boxed` accepts that independently blocked alias. `new<S>` is a generic inherent constructor, whose exportability is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#constructors`, `classes.md#constructors`, `functions.md#limitations`. `is_terminated` alone is a synchronous method candidate if the wrapper class can otherwise export. [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#the-ffi_stream-attribute] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] |
-| `Models`, `Models::builder`, `ModelsBuilder` (`crates/pi-ai/src/models.rs:49`, `crates/pi-ai/src/models.rs:1445`) | `Models` and `ModelsBuilder` are class candidates: class structs and their private fields stay private, so private trait-object storage is not a field-mapping gap. Concretely, `Models` uses `Arc<ModelsInner>` and `RwLock`, and every stored callback capability shown in `ModelsInner` is declared `Send + Sync + 'static` (`crates/pi-ai/src/models.rs:49`, `crates/pi-ai/src/middleware.rs:337`, `crates/pi-ai/src/auth.rs:259`, `crates/pi-ai/src/catalog.rs:269`). That source shape is aligned with the default class check; the actual annotated build must still pass BoltFFI's compile-time `Send + Sync` assertion, and every public signature must map. The inherent `Models::builder` can return another Rust-backed class in principle; the consuming builder methods remain unresolved below. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#thread-safety] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes] |
-| `Models::default` (`crates/pi-ai/src/models.rs:99`) | This is defined by `impl Default for Models`, not an inherent static method. The class and record pages demonstrate annotated inherent impls only. **UNRESOLVED: not answered by the documentation**; pages checked: `classes.md#defining-a-class`, `classes.md#static-methods`, `records.md#methods-and-constructors`, `records.md#static-methods`. Adding an inherent forwarding constructor would be the nearest shape shown by the class page, but it changes the native API and fails R2; without `Models::default`, R1 is incomplete. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#static-methods] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#static-methods] |
-| `ModelsBuilder::{provider,build}` (`crates/pi-ai/src/models.rs:1501`) | `provider(mut self, ...)` and `build(self)` are **UNRESOLVED: not answered by the documentation** because both consume the existing builder. `provider` also accepts an owned `ProviderRegistration` class candidate, while the documented class parameters are borrowed; its callback graph is independently blocked. Pages checked: `classes.md#methods`, `records.md#methods-and-constructors`, `functions.md#classes`, `classes.md#methods-that-take-or-return-classes`. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes] |
-| `ModelsBuilder::{credential_store,auth_context,models_store,model_override_store}` (`crates/pi-ai/src/models.rs:1476`) | Every method consumes and returns the builder, which is **UNRESOLVED: not answered by the documentation**; their trait parameters are independently blocked by boxed-future, borrowed, consuming, and nested-trait-object signatures described below. Pages checked: `classes.md#methods`, `callbacks.md#async-methods`. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] |
-| `ModelsBuilder::{header_transform,payload_transform,erased_payload_transform,response_observer,attempt_middleware}` (`crates/pi-ai/src/models.rs:1507`) | Every method consumes and returns the builder, which is undocumented; the callback graphs are also blocked by boxed futures and borrowed/mutable-borrowed values. `PayloadTransform<A>` is a generic callback trait whose signature uses types selected through the associated types on `A: ApiFamily`; the generic trait shape and associated types are documented as unsupported. `payload_transform<A>` is itself a generic inherent method; its generic-method status is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#methods-and-constructors`, `classes.md#methods`, `functions.md#limitations`. Consuming class methods are also **UNRESOLVED: not answered by the documentation**; pages checked: `classes.md#methods`, `callbacks.md#limitations`. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#limitations] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] |
-| `ProviderRegistration`, `ProviderRegistration::builder`, `ProviderRegistrationBuilder::{new,display_name,base_url,headers,auth,catalog,catalog_source,models,filter_models,api,retry_policy,retry_classifier,build}` (`crates/pi-ai/src/provider.rs:2320`) | `ProviderRegistration::builder` and builder `new` use generic ID inputs; whether these generic inherent constructors can export is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#constructors`, `classes.md#constructors`, `functions.md#limitations`. Every other listed builder operation consumes the existing builder and is **UNRESOLVED: not answered by the documentation**; maps, protocol values, arbitrary trait-object closure aliases, and nested async callbacks independently block several signatures. Pages checked: `classes.md#methods`, `records.md#methods-and-constructors`, `types.md#whats-not-supported`, `callbacks.md#async-methods`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] |
-| `ProviderRegistrationError` (`crates/pi-ai/src/provider.rs:2529`) | Direct error enum after payload fields map. [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors] |
-| `Models::{stream_simple,stream_simple_with_auth}` (`crates/pi-ai/src/models.rs:762`) | Blocked — these are functions returning futures rather than declared `async fn`, their success value is `AssistantStream` rather than the documented generated stream shape, and they receive an owned `CancellationToken` class input whose direction is undocumented. The docs map declared async functions, not arbitrary future-returning functions. **UNRESOLVED: not answered by the documentation** for the owned class argument; pages checked: `functions.md#classes`, `classes.md#methods-that-take-or-return-classes`. [https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#standalone-functions] [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#the-ffi_stream-attribute] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes] |
-| `Models::{stream_api,stream_api_with_request_options}` (`crates/pi-ai/src/models.rs:785`) | Both methods are generic over `A: ApiFamily`. `ApiFamily` itself is a non-generic trait with five associated types; those associated types are documented as unsupported. Their future/stream returns also fail the documented forms. Whether the generic inherent methods themselves can export is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#methods-and-constructors`, `classes.md#methods`, `functions.md#limitations`. Both also take an owned `CancellationToken` class, an input direction not demonstrated by the docs. **UNRESOLVED: not answered by the documentation** for that input; pages checked: `functions.md#classes`, `classes.md#methods-that-take-or-return-classes`. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#limitations] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes] |
-| `Models::{fetch_deferred,fetch_deferred_with_auth,cancel_deferred,cancel_deferred_with_auth}` (`crates/pi-ai/src/models.rs:827`) | Blocked as written because they return future values rather than being declared `async fn`; their input/output graphs contain the blocked `DeferredHandle` and assistant message graph; and all take an owned `CancellationToken` class. **UNRESOLVED: not answered by the documentation** for that owned-class input; pages checked: `functions.md#classes`, `classes.md#methods-that-take-or-return-classes`. [https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#methods] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes] |
-| `Models::{providers,provider,models,filter_models,model}` (`crates/pi-ai/src/models.rs:115`) | Not direct as a group. Borrowed returns carry non-static lifetimes and are blocked; owned snapshots are blocked by undocumented `Arc<[T]>` aliases and the descriptor graph; `provider(&ProviderId)` and `model(&ModelRef)` have borrowed data inputs not demonstrated by the docs; `filter_models` has its own callback/collection graph. **UNRESOLVED: not answered by the documentation** for the borrowed inputs; pages checked: `functions.md#structs-and-enums`, `functions.md#classes`, `types.md#collections`. [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#structs-and-enums] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#collections] |
-| `Models::{check_auth,get_available,credential_info,resolve_auth,login,logout}` (`crates/pi-ai/src/models.rs:167`) | Blocked where the functions return futures rather than being `async fn`, accept the nested auth callback graph, or take the owned `CancellationToken` class used by every listed call. **UNRESOLVED: not answered by the documentation** for that owned-class input; pages checked: `functions.md#classes`, `classes.md#methods-that-take-or-return-classes`. Any actual exported `async fn -> Result` would map to Swift `async throws`. [https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#error-handling] [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes] |
-| `Models::credential_store` (`crates/pi-ai/src/models.rs:259`) | Blocked — returns a trait-object capability behind a reference with a non-static lifetime. [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| `Models::{catalog_snapshot,catalog_layers,set_provider,remove_provider,clear_providers,refresh_host_overrides,set_runtime_overrides,clear_runtime_overrides,refresh}` (`crates/pi-ai/src/models.rs:370`) | Not direct as a group: catalog data, callback registration, and future-return forms block individual methods. A generic conversion input appears on this method family; whether such a generic inherent method can export is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#methods-and-constructors`, `classes.md#methods`, `functions.md#limitations`. `catalog_snapshot(&ProviderId)` and `catalog_layers(&ProviderId)` additionally have borrowed data inputs, and `refresh` takes an owned `CancellationToken` class; neither direction is demonstrated. **UNRESOLVED: not answered by the documentation**; pages checked: `functions.md#structs-and-enums`, `functions.md#classes`, `classes.md#methods-that-take-or-return-classes`. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#methods] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#structs-and-enums] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes] |
-| `ProviderSnapshot`, `ModelSnapshot` (`crates/pi-ai/src/models.rs:42`) | Blocked/undocumented `Arc<[T]>` aliases. **UNRESOLVED: not answered by the documentation**; pages checked: `types.md#collections`, `custom-types.md#containers`. [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#collections] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#containers] |
-| `AuthCheck`, `AuthSource`, `ResolvedAuth`, `AuthResolutionPurpose` (`crates/pi-ai/src/provider.rs:211`) | Intended direct auth data structs/enums; blocked transitively where credential/header fields use unsupported graph leaves. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] |
-| `ResolveAuthRequest`, `ApiKeyResolveRequest` (`crates/pi-ai/src/provider.rs:146`, `crates/pi-ai/src/auth.rs:1372`) | Intended callback records, blocked by nested `Arc<dyn AuthContext>` and borrowed/capability fields. Arbitrary trait objects are outside the general supported type set. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| `SecretString`, `ApiKeyCredential`, `OAuthCredential`, `ProviderOAuthExtra`, `Credential`, `CredentialType`, `CredentialInfo`, `AuthResolutionOverrides` (`crates/pi-ai/src/auth.rs:27`, `crates/pi-ai/src/auth.rs:1347`) | Intended records/payload enums. The graph is blocked by opaque JSON and map types; tuple-newtype mapping for `SecretString` is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#structs`, `types.md#records`. `Duration` itself has a built-in Swift `TimeInterval` mapping. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#duration] |
-| `CredentialStore`, `CredentialLease`, and `CredentialStore::{read,list,acquire_lease}` / `CredentialLease::{current,replace,commit}` (`crates/pi-ai/src/auth.rs:247`) | Blocked — explicit boxed futures, a getter returning a reference with a non-static lifetime, a consuming async method, and a nested returned `Box<dyn CredentialLease>` exceed the documented host-protocol examples. The docs require actual async trait methods for generated async requirements. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| `AuthContext`, `AuthResolver`, `AuthInteraction`, `RedirectReceiver` (`crates/pi-ai/src/auth.rs:682`, `crates/pi-ai/src/provider.rs:248`) | Blocked — boxed-future methods, a URI reference return with a non-static lifetime, consuming receiver, and a protocol method returning another boxed protocol. Nested returned protocol objects and consuming protocol methods are undocumented. **UNRESOLVED: not answered by the documentation**; pages checked: `callbacks.md#ownership`, `callbacks.md#async-methods`, `classes.md#memory-management`. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#ownership] [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#memory-management] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| `AuthHostCapabilities`, `AuthPrompt`, `AuthAnswer`, `AuthSelectOption`, `AuthEvent`, `AuthInfoLink`, `RedirectReceiverRequest`, `RedirectStrategy`, `AuthHtmlPage`, `RedirectArrival`, `RedirectStrategyDescription` (`crates/pi-ai/src/auth.rs:922`) | Intended direct record/enum data graph; `url::Url` maps directly, while newtypes and any opaque JSON branches retain their separate gaps. Payload enums and nested records are documented constructs. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#url] |
-| `AuthChallengeId` (`crates/pi-ai/src/ids.rs:99`) | Open string tuple-newtype mapping is undocumented. **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#structs`, `types.md#records`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records] |
-| `AuthInteractionError`, `AuthError`, `StoreError` (`crates/pi-ai/src/auth.rs:1043`, `crates/pi-ai/src/catalog.rs:1481`) | Intended direct error enums/struct; blocked only by unsupported payload leaves, with non-exhaustive behavior unresolved. [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors] [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#struct-errors] |
-| `ProviderAuthResolver`, `EnvironmentApiKeyAuth`, `AnonymousAuthResolver`, `EmptyAuthContext`, `MapAuthContext`, `InMemoryCredentialStore`, `SystemAuthClock` (`crates/pi-ai/src/auth.rs:1728`) | Intended direct Rust-owned classes for library implementations. Methods involving blocked protocols, maps, non-static references, or future returns remain blocked. Rust-backed class mapping itself is documented. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| `ApiKeyAuth`, `AuthClock` (`crates/pi-ai/src/auth.rs:1384`, `crates/pi-ai/src/auth.rs:1695`) | Intended host protocols; blocked where methods use boxed futures or borrowed request graphs. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] |
-| `ProviderAuthResolver::{new,with_clock}`, `EnvironmentApiKeyAuth::new`, `MapAuthContext::{new,with_file}`, `InMemoryCredentialStore::new` (`crates/pi-ai/src/auth.rs:1749`, `crates/pi-ai/src/auth.rs:817`) | The `new` items are class-constructor candidates only where map and protocol inputs map. Constructors using `impl Into`/`impl IntoIterator` are generic inherent constructors, whose mapping is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#constructors`, `classes.md#constructors`, `functions.md#limitations`. `ProviderAuthResolver::with_clock(mut self, ...)` and `MapAuthContext::with_file(mut self, ...)` consume the existing class and are **UNRESOLVED: not answered by the documentation**; pages checked: `classes.md#methods`, `records.md#methods-and-constructors`. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#constructors] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] |
-| `OAuthAuth` (`crates/pi-ai/src/auth.rs:1643`) | Blocked — its async operations return `SendBoxFuture` instead of using actual `async fn`. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] |
-| `PkcePair`, `OAuthAuthorizationInput` (`crates/pi-ai/src/oauth.rs:22`, `crates/pi-ai/src/oauth.rs:97`) | Direct data records with supported optional/string fields. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#optional-fields] |
-| `generate_pkce`, `generate_oauth_state`, `validate_oauth_state`, `parse_oauth_authorization_input` (`crates/pi-ai/src/oauth.rs:30`) | Direct free-function candidates after their errors map: the generators take no inputs, while validation/parsing use the documented `&str` parameter shape; fallible functions become throwing calls. [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#functions] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#primitives-and-strings] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#result] |
-| `redirect_strategy_supported` (`crates/pi-ai/src/auth.rs:2377`) | Not direct: both parameters are borrowed data values, `&RedirectStrategy` and `&AuthHostCapabilities`. The function docs demonstrate owned structs/enums and borrowed classes, not borrowed record/enum inputs. **UNRESOLVED: not answered by the documentation**; pages checked: `functions.md#structs-and-enums`, `functions.md#classes`. An owned-input forwarder would require a new signature and fail R2. [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#structs-and-enums] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] |
-| `select_first_valid<T,LeftFactory,LeftFuture,RightFactory,RightFuture>`, `OAuthDeviceCodePollResult<T>`, `OAuthDeviceCodePoll<T>`, `OAuthDeviceCodePollOptions<T>`, `OAuthDeviceCodePollOptions::new`, `poll_oauth_device_code_flow<T>` (`crates/pi-ai/src/oauth.rs:155`) | `select_first_valid` and `poll_oauth_device_code_flow` are generic free functions and are blocked. `OAuthDeviceCodePoll<T>` is a generic callback trait and is blocked; its boxed-future method is independently incompatible with the documented async-trait form. `OAuthDeviceCodePollOptions<T>` is a generic struct and is blocked. `OAuthDeviceCodePollResult<T>` is a generic enum, which the type-page prohibition on generic structs does not cover; its mapping is **UNRESOLVED: not answered by the documentation**; pages checked: `types.md#whats-not-supported`, `records.md#enums-with-associated-data`. `OAuthDeviceCodePollOptions::new` is a generic inherent constructor, whose mapping is also **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#constructors`, `classes.md#constructors`, `functions.md#limitations`. [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#limitations] [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors] |
-| `OAuthDeviceCodeRuntime` (`crates/pi-ai/src/oauth.rs:268`) | Intended host protocol, blocked by its explicit async carrier signatures if not declared as actual `async fn`. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] |
-| `SystemOAuthDeviceCodeRuntime` (`crates/pi-ai/src/oauth.rs:295`) | Intended direct Rust-backed class, with individual methods blocked where future carriers are unsupported. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class] |
-| `create_supported_redirect_receiver` (`crates/pi-ai/src/auth.rs:2393`) | Although declared async, it returns `Box<dyn RedirectReceiver>` and accepts both a host-protocol object and an owned `CancellationToken` class. Returned host-protocol objects and owned class inputs are undocumented. **UNRESOLVED: not answered by the documentation**; pages checked: `callbacks.md#ownership`, `async.md#standalone-functions`, `functions.md#classes`, `classes.md#methods-that-take-or-return-classes`. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#ownership] [https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#standalone-functions] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes] |
-| `std::time::Duration`, `url::Url` (`crates/pi-ai/src/oauth.rs:13`) | Direct built-in custom types mapping to Swift `TimeInterval` and `URL`. [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#duration] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#url] |
-| `ProviderDescriptor` (`crates/pi-ai/src/provider.rs:44`) | Intended direct data; `url::Url` is built in, but `HeaderMapSpec` blocks the full record. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#url] |
-| `HeaderMapSpec`, `http::HeaderMap` (`crates/pi-ai/src/model.rs:17`, `crates/pi-ai/src/provider.rs:100`) | Blocked/undocumented map types. The overview merely lists `HashMap` as exportable; the type-page collections section documents vectors/slices and establishes no Swift mapping for `HashMap`, `BTreeMap`, nested maps, or `http::HeaderMap`. Custom conversion is the nearest documented mechanism and violates R2. [https://www.boltffi.dev/docs/overview.md | docs/boltffi-swift-bindings/docs-snapshot/overview.md#what-you-can-export] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#collections] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#choosing-an-approach] |
-| `ModelCatalog`, `ModelCatalogSource`, `ModelsStore`, `ModelOverrideStore` (`crates/pi-ai/src/provider.rs:353`, `crates/pi-ai/src/catalog.rs:243`) | Intended host protocols, blocked by boxed-future methods, returns with non-static lifetimes, callback capability fields, or unsupported collection graphs. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| `StaticModelCatalog`, `ProviderCatalogState` (`crates/pi-ai/src/provider.rs:388`, `crates/pi-ai/src/catalog.rs:538`) | Intended Rust-backed classes/data, blocked transitively by descriptor snapshots, dynamic-source protocols, and unsupported collections. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] |
-| `CatalogFetchContext`, `CatalogCandidate`, `CatalogSnapshot`, `PersistedCatalogSnapshot`, `ProviderCatalogLayers`, `ModelOverride`, `ModelOverrideAction`, `ModelOverridePatch`, `RefreshRequest`, `RefreshReport`, `ProviderRefreshResult` (`crates/pi-ai/src/catalog.rs:231`) | Intended data records/payload enums; blocked wherever the descriptor, JSON, map, set, `Arc` slice, or callback graph is nested. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] |
-| `CatalogError`, `CatalogErrorReport`, `StoreError`, `OverrideError` (`crates/pi-ai/src/catalog.rs:1421`) | Intended direct error/report structs after payload graphs map. `CatalogErrorReport` is data rather than necessarily a thrown error and should use `#[data]`; error items use `#[error]`. [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#struct-errors] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] |
-| `ModelAvailabilityFilter` (`crates/pi-ai/src/provider.rs:2309`) | Its expansion is an arbitrary `Fn` trait object and is blocked by the general type restriction. Whether a type alias itself can export is **UNRESOLVED: not answered by the documentation**; pages checked: `types.md#quick-reference`, `types.md#whats-not-supported`. [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference] |
-| `ChatApi`, `RetryClassifier`, `ErasedApiHandler`, `HttpTransport`, `RetrySleeper` (`crates/pi-ai/src/provider.rs:877`, `crates/pi-ai/src/retry.rs:273`) | Intended host protocols, blocked by boxed-future/stream return carriers, borrowed contexts, and nested callback objects. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| `ResolvedApiRequest`, `ResolvedDeferredRequest`, `ApiCallOptions<'a>`, `ApiExecutionContext<'a>`, `DeferredExecutionContext<'a>`, `ProviderResponseStream` (`crates/pi-ai/src/provider.rs:559`) | Intended request/context records, blocked by non-static borrowed fields, trait-object slices, and the boxed response-stream alias. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| `AiError`, `AiErrorKind`, `RetryPolicy`, `AttemptFailure`, `RetryDecision` (`crates/pi-ai/src/provider.rs:448`, `crates/pi-ai/src/retry.rs:15`) | Intended direct error/data graph after nested values map. Payload error enums are documented. [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enums-with-payloads] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] |
-| `HttpChatApi`, `HttpChatApi::{new,with_retry_sleeper}` (`crates/pi-ai/src/provider.rs:959`) | `HttpChatApi` is a Rust-backed class candidate. `new` is blocked by callback-object inputs. `with_retry_sleeper(mut self, ...)` consumes the existing class and is **UNRESOLVED: not answered by the documentation** in addition to its callback blocker; pages checked: `classes.md#methods`, `records.md#methods-and-constructors`. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class] [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#storing-traits] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] |
-| `HttpRequest`, `HttpBody`, `HttpResponse`, `TransportError` (`crates/pi-ai/src/middleware.rs:20`) | Request/response/error records are intended data/error, but `HttpBody` and response body are boxed streams rather than `EventSubscription`; header and HTTP types also lack mappings. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#the-ffi_stream-attribute] [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#struct-errors] |
-| `ModelDescriptor`, `CommonModelDescriptor`, `ModalityCapabilities`, `ModelLimits`, `ModelPricing`, `TokenPriceRates`, `RequestWidePriceTier`, `CacheWriteRetentionPricing` (`crates/pi-ai/src/model.rs:29`, `crates/pi-ai/src/usage.rs:202`) | Intended nested records. The complete graph is blocked by `BTreeSet`, `BTreeMap`, tuple newtypes, ordered/raw JSON, generic thinking maps, and `MoneyRate`'s `i128` value. The primitive quick reference ends at 64-bit integers, so `i128` is **UNRESOLVED: not answered by the documentation**; pages checked: `types.md#quick-reference`, `records.md#nested-structs`, `custom-types.md#choosing-an-approach`. A custom conversion to a supported representation is the documented nearest alternative, but requires new conversion code and violates R2. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#choosing-an-approach] |
-| `Modality`, `MaxTokensField`, `OpenAiThinkingFormat`, `ThinkingTokenBudgetField`, `CacheControlFormat`, `DeferredToolsMode`, `SessionAffinityFormat`, `ChatTemplateVariableName`, `OpenRouterDataCollection`, `NullableString`, `OpenAiThinkingValue`, `AnthropicThinkingValue`, `AnthropicEffort` (`crates/pi-ai/src/model.rs:78`) | Direct data enums; payload-bearing siblings remain subject to their payload blockers. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] |
-| `MoneyRate`, `MoneyRate::{new,cost_for_tokens}` (`crates/pi-ai/src/usage.rs:130`) | The tuple-newtype form and its `i128` representation/return are undocumented; the primitive quick reference stops at `i64`/`u64`. Whole owner-defined `MoneyRate` could use `#[custom_ffi]` plus `CustomFfiConvertible`, but that requires conversion code and violates R2. It does not resolve the naked `Result<i128, _>` return of `cost_for_tokens`; the custom-type page documents converting a whole owner-defined type, not overriding a bare primitive signature. `cost_for_tokens(self, ...)` also consumes the record. **UNRESOLVED: not answered by the documentation** for naked `i128` returns and consuming methods; pages checked: `records.md#structs`, `records.md#methods-and-constructors`, `types.md#quick-reference`, `custom-types.md#the-customfficonvertible-trait`, `custom-types.md#representation-types`. Preserving the method requires a signature/wrapper change unless documentation adds a primitive mapping. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#the-customfficonvertible-trait] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#representation-types] |
-| `ApiModelConfig`, `ApiModelConfig::api_id`, `OpenAiCompletionsModelConfig`, `OpenAiCompletionsCompat`, `OpenAiResponsesModelConfig`, `OpenAiResponsesCompat`, `AnthropicMessagesModelConfig`, `AnthropicMessagesCompat`, `AnthropicFallbackModel`, `GoogleModelConfig`, `BedrockModelConfig`, `BedrockCompat`, `MistralModelConfig` (`crates/pi-ai/src/model.rs:112`) | Intended direct payload enum/records and owned method; blocked transitively by generic `ThinkingLevelMap<T>`, `ExtensionMap`, ordered JSON, and map aliases. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] |
-| `ChatTemplateValues`, `ExtensionMap` (`crates/pi-ai/src/model.rs:13`, `crates/pi-ai/src/model.rs:25`) | Blocked — `IndexMap` and `BTreeMap` aliases are not in the documented collection set. The nearest documented alternative is a custom type conversion. [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#collections] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#containers] |
-| `ChatTemplateKwargValue`, `ChatTemplateVariable`, `OpenRouterRouting`, `OpenRouterSort`, `OpenRouterSortOptions`, `OpenRouterMaxPrice`, `JsonNumberOrString`, `OpenRouterMetricPreference`, `OpenRouterPercentiles`, `VercelGatewayRouting` (`crates/pi-ai/src/model.rs:269`) | Intended direct data enum/record graph, blocked where `serde_json::Number`, ordered maps, or nested blocked values occur. Payload enums and nested records are supported as constructs. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] |
-| `CustomApiModelConfig`, `VersionedExtension` (`crates/pi-ai/src/model.rs:741`, `crates/pi-ai/src/model.rs:919`) | Intended records, blocked by exact `Box<RawValue>`. The documented nearest alternative is custom conversion to a supported representation; implementing it is extra code and invalid conversion panics. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#choosing-an-approach] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#conversion-errors] |
-| `ThinkingLevelMap<T>`, `LevelSupport<T>`, `ReasoningLevelResolution<T>`, `ThinkingLevelMap::{get,resolve}` (`crates/pi-ai/src/model.rs:763`) | `ThinkingLevelMap<T>` and `ReasoningLevelResolution<T>` are generic structs and are blocked. `get` additionally returns a reference with a non-static lifetime. `LevelSupport<T>` is a generic enum, and the documentation's prohibition names generic structs rather than generic enums; its mapping is **UNRESOLVED: not answered by the documentation**; pages checked: `types.md#whats-not-supported`, `records.md#enums-with-associated-data`. Whether `get` and `resolve` can export as inherent methods on a generic type is also **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#methods-and-constructors`, `classes.md#methods`, `functions.md#limitations`. [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] |
-| `OrderedJsonObject`, `OrderedJsonArray`, `OrderedJsonValue`, `OrderedJsonString` (`crates/pi-ai/src/json_compat.rs:24`) | Blocked/undocumented recursive ordered JSON graph. The nested-collections section demonstrates nested `Vec`, not maps; neither it nor the overview's bare `HashMap` listing documents recursive records, `IndexMap`, nested maps, or exact UTF-16 string storage. **UNRESOLVED: not answered by the documentation**; pages checked: `overview.md#what-you-can-export`, `types.md#nested-collections`, `records.md#nested-structs`, `custom-types.md#containers`. The inventory also identifies generic inherent mutators/iterators on this graph; their method mapping is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#methods-and-constructors`, `classes.md#methods`, `functions.md#limitations`. [https://www.boltffi.dev/docs/overview.md | docs/boltffi-swift-bindings/docs-snapshot/overview.md#what-you-can-export] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#nested-collections] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#containers] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] |
-| `ProviderId`, `ModelId`, `ApiId`, `ExtensionId`, `ModelRef` (`crates/pi-ai/src/ids.rs:58`) | `ModelRef` is intended direct data after its ID fields map. The open IDs are tuple newtypes whose mapping is unresolved; their getters return references with non-static lifetimes and are blocked. Their `impl Into` constructors are generic inherent constructors, whose mapping is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#constructors`, `classes.md#constructors`, `functions.md#limitations`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] |
-| `ModelPricing::{rates_for,calculate_cost,calculate_cost_with_multiplier}` (`crates/pi-ai/src/usage.rs:213`) | All three accept borrowed `&Usage`, a borrowed-data input not demonstrated by the docs; `rates_for` also returns `&TokenPriceRates` with a non-static lifetime and is blocked. `calculate_cost` returns owner-defined `Cost`, whose `micros` field is `i128`; a whole-type custom conversion is documented but adds code and fails R2. `calculate_cost_with_multiplier` instead has naked `i128` numerator/denominator arguments. The custom-type page documents whole external or owner-defined type conversion, not overriding bare primitive parameters. **UNRESOLVED: not answered by the documentation** for borrowed record inputs and naked `i128` arguments; pages checked: `functions.md#structs-and-enums`, `functions.md#classes`, `types.md#whats-not-supported`, `types.md#quick-reference`, `custom-types.md#the-customfficonvertible-trait`, `custom-types.md#representation-types`. The naked arguments require a signature/wrapper change unless documentation adds a mapping. [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#structs-and-enums] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#the-customfficonvertible-trait] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#representation-types] |
-| `Currency`, `CacheWriteRetention`, `Cost`, `CostArithmeticError` (`crates/pi-ai/src/usage.rs:88`) | `CacheWriteRetention` is a direct enum candidate and `CostArithmeticError` a direct error candidate. `Currency` is a tuple newtype whose mapping is unresolved. `Cost` is not direct because `micros` is `i128`, absent from the primitive quick reference. Whole owner-defined `Cost` could use `#[custom_ffi]` plus `CustomFfiConvertible`, which adds conversion code and fails R2; this does not establish any bare-primitive signature mapping. **UNRESOLVED: not answered by the documentation** for direct `i128` fields; pages checked: `types.md#quick-reference`, `records.md#structs`, `custom-types.md#the-customfficonvertible-trait`, `custom-types.md#representation-types`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#the-customfficonvertible-trait] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#representation-types] |
-| `url::Url`, `serde_json::Number`, `serde_json::value::RawValue`, `indexmap::IndexMap`, `BTreeMap`, `BTreeSet` (`crates/pi-ai/src/model.rs:4`) | `url::Url` maps directly to Swift `URL`. The other five have no documented built-in mapping. The overview's bare `HashMap` listing does not establish mappings for other map/set types or nested maps, the collections section covers vectors/slices, and `HashSet` alone is explicitly listed as unsupported. [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#url] [https://www.boltffi.dev/docs/overview.md | docs/boltffi-swift-bindings/docs-snapshot/overview.md#what-you-can-export] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#collections] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| `HeaderTransform`, `HeaderTransformContext`, `MiddlewareError` (`crates/pi-ai/src/middleware.rs:325`) | Intended host protocol, callback record, and error. Blocked by boxed-future method, borrowed context, and header-map graph. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| `PayloadTransform<A>`, `PayloadTransformContext<'a,A>`, `PayloadTransformResult<T>` (`crates/pi-ai/src/middleware.rs:358`) | `PayloadTransform<A>` is a generic trait with associated API-family types and is blocked; its boxed-future method is independently incompatible with the documented async-trait form. `PayloadTransformContext<'a,A>` is a generic, lifetime-bearing struct and is blocked. `PayloadTransformResult<T>` is a generic enum, which the generic-struct prohibition does not cover; its mapping is **UNRESOLVED: not answered by the documentation**; pages checked: `types.md#whats-not-supported`, `records.md#enums-with-associated-data`. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#limitations] [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] |
-| `ErasedPayloadTransform`, `ErasedPayloadContext`, `ProviderPayload`, `PayloadTransformDisposition` (`crates/pi-ai/src/middleware.rs:440`) | Intended protocol and payload records/enums, blocked by boxed-future methods, borrowed contexts, arbitrary erased payload storage, and JSON types. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| `ResponseObserver`, `ResponseObservationContext`, `ProviderResponseMetadata` (`crates/pi-ai/src/middleware.rs:686`) | Intended protocol/data, blocked by boxed-future/borrowed context and header metadata. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] |
-| `AttemptMiddleware`, `HttpRequest` (`crates/pi-ai/src/middleware.rs:742`) | Blocked — callback mutably borrows a request and returns a boxed future; the documented async protocol form is an actual `async fn`, and non-static borrowing is unsupported. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| `ApiFamily` (`crates/pi-ai/src/options.rs:368`) | Blocked — this is a non-generic trait with five associated types, and associated types are documented as unsupported. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#limitations] |
-| `TypedModelDescriptor<A>`, `SimpleLoweringContext<'a,A>`, `EncodeContext<'a,A>` (`crates/pi-ai/src/options.rs:316`) | Blocked — generic/lifetime-bearing structs. [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| `ErasedApiFullOptions`, `ErasedApiFullOptions::{new,downcast_ref}` (`crates/pi-ai/src/options.rs:410`) | The record is blocked because it stores an arbitrary `Any` trait object; `downcast_ref` is independently blocked by its reference return with a non-static lifetime. Whether the generic inherent `new<A>` and `downcast_ref<A>` methods can export is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#methods-and-constructors`, `classes.md#methods`, `functions.md#limitations`. [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] |
-| `ApiOptionsInput<A>`, `ApiOptionsInput::from_sources` (`crates/pi-ai/src/options.rs:525`) | This is a generic data enum over associated API-family values. The type-page prohibition names generic structs rather than generic enums, and neither it nor the record page answers this shape. `from_sources` is an inherent method on that generic enum, and the free-function page does not answer generic inherent methods. **UNRESOLVED: not answered by the documentation** for both items; pages checked: `types.md#whats-not-supported`, `records.md#enums-with-associated-data`, `records.md#methods-and-constructors`, `classes.md#methods`, `functions.md#limitations`. The associated values depend on `ApiFamily`; `ApiFamily` is non-generic, but its associated types are independently unsupported. [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#limitations] |
-| `ApiRequestOptions`, `ErasedApiOptionsPatch` (`crates/pi-ai/src/options.rs:450`, `crates/pi-ai/src/options.rs:294`) | Intended direct data; blocked by `HeaderMapSpec` and `RawValue` respectively. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] |
-| `LoweringError`, `EncodeError` (`crates/pi-ai/src/options.rs:654`) | Intended direct error enums; non-exhaustive target behavior is unresolved. [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors] |
-| `SimpleGenerationOptions` (`crates/pi-ai/src/options.rs:561`) | Intended data, blocked by recursive ordered JSON, `HeaderMapSpec`, raw API patch, and ID newtypes. Tuple-newtype mapping is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#structs`, `types.md#records`. Listed primitive, optional, `Vec`, and `Duration` fields themselves are documented. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#duration] |
-| `StreamTransport`, `ReasoningLevel`, `ReasoningFallback`, `CacheRetention`, `ToolChoice`, `DeferredSubmission`, `DeferredWindow` (`crates/pi-ai/src/options.rs:19`, `crates/pi-ai/src/deferred.rs:102`) | Direct data enums. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] |
-| `ReasoningLevel::resolve_extended`, `ThinkingBudgets::budget_for`, `DeferredSubmission::is_enabled` (`crates/pi-ai/src/options.rs:41`, `crates/pi-ai/src/deferred.rs:130`) | `ReasoningLevel::resolve_extended(self, ...)` consumes the existing enum and is **UNRESOLVED: not answered by the documentation**. `ThinkingBudgets::budget_for(&self, ...)` and `DeferredSubmission::is_enabled(&self)` are documented record-method shapes after their complete signatures map. Pages checked for the consuming method: `records.md#methods-and-constructors`, `classes.md#methods`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#instance-methods] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] |
-| `ThinkingBudgets` (`crates/pi-ai/src/options.rs:88`) | Direct data record with optional integer fields. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#optional-fields] |
-| `ApiRequestOptions::from` (`crates/pi-ai/src/options.rs:469`) | This method is defined by `impl From<&SimpleGenerationOptions> for ApiRequestOptions`, not an inherent static data method, and its parameter is borrowed data. The docs demonstrate annotated inherent record impls and owned data arguments, but neither trait-implementation methods nor `&Record` inputs. **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#methods-and-constructors`, `records.md#static-methods`, `functions.md#structs-and-enums`, `functions.md#classes`. An inherent owned-input forwarder is the nearest documented shape, but it changes the native API and fails R1/R2. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#static-methods] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#structs-and-enums] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] |
-
-#### Concrete API-family types
-
-The marker types are useful to Rust only as generic arguments. Every marker —
-`OpenAiCompletions`, `OpenAiResponses`, `OpenAiCodexResponses`,
-`AnthropicMessages`, `GoogleGenerativeAi`, `GoogleVertex`,
-`BedrockConverseStream`, `MistralConversations`,
-`pi_ai_openai::AzureOpenAiResponses`, and
-`pi_ai_pi_messages::PiMessages` — is blocked at the Swift call boundary because
-the call methods are generic over `A: ApiFamily` and use `A::Compat`,
-`A::ModelConfig`, `A::FullOptions`, `A::OptionsPatch`, and `A::WireRequest`. `ApiFamily`
-is non-generic, but its five associated types are a documented unsupported
-trait shape. Whether the generic inherent `Models` methods themselves can
-export is
-**UNRESOLVED: not answered by the documentation**; pages checked:
-`records.md#methods-and-constructors`, `classes.md#methods`, and
-`functions.md#limitations`.
-[https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#limitations]
-[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors]
-[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods]
-[https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations]
-
-| Inventory configuration item and Rust source | BoltFFI-to-Swift mapping and verdict |
-|---|---|
-| `OpenAiCompletionsOptions`, `OpenAiCompletionsToolChoice`, `OpenAiAllowedToolsMode`, `OpenAiReasoningPlan`, `OpenAiReasoningMode`, `OpenAiReasoningEffortProvenance`, `OpenAiReasoningTokenBudget`, `OpenAiCompletionsSimplePatch` (`crates/pi-ai/src/openai_completions.rs:41`) | Intended direct records/payload enums; blocked where ordered JSON appears. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] |
-| `OpenAiResponsesOptions`, `OpenAiResponsesReasoningSummary`, `OpenAiResponsesSimplePatch` (`crates/pi-ai/src/openai_responses.rs:102`) | Intended direct record/enum graph; full options are blocked by ordered JSON values, while the summary and simple patch are direct if all scalar fields remain supported. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] |
-| `OpenAiCodexResponsesOptions`, `OpenAiCodexReasoningSummary`, `OpenAiTextVerbosity`, `OpenAiCodexToolChoice`, `OpenAiCodexResponsesSimplePatch` (`crates/pi-ai/src/openai_responses.rs:124`) | Direct records/enums conditional on ID/newtype leaves. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] |
-| `AnthropicOptions`, `AnthropicThinking`, `AnthropicThinkingDisplay`, `AnthropicToolChoice`, `AnthropicSimplePatch` (`crates/pi-ai/src/anthropic_messages.rs:37`) | Direct records/payload enums conditional on identifier and nested-option mappings. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] |
-| `GoogleOptions`, `GoogleVertexOptions`, `GoogleThinkingOptions`, `GoogleThinkingLevel`, `GoogleToolChoice`, `GoogleSimplePatch`, `GoogleCompat` (`crates/pi-ai/src/google.rs:32`) | Direct records/enums; the empty compatibility record is also a record construct, though zero-field target representation is not shown. **UNRESOLVED: not answered by the documentation** for zero-field structs; pages checked: `records.md#structs`, `records.md#enums`, `types.md#records`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records] |
-| `BedrockOptions`, `BedrockToolChoice`, `BedrockThinkingDisplay`, `BedrockSimplePatch` (`crates/pi-ai/src/bedrock.rs:55`) | Intended records/enums, blocked by `IndexMap<String,String>`, the inventory-excluded scratch field still present in the native `BedrockOptions` struct, and `SecretString`. The `SecretString` newtype mapping is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#structs`, `records.md#enums`, `types.md#records`. Attribute-only export cannot omit a public field while preserving the same native data record. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs-with-strings-or-collections] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records] |
-| `MistralOptions`, `MistralToolChoice`, `MistralSimplePatch`, `MistralCompat` (`crates/pi-ai/src/mistral.rs:102`) | Record/enum candidates conditional on IDs. The empty-record and newtype representations are **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#structs`, `types.md#records`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records] |
-| `pi_ai_openai::AzureOpenAiResponsesModelConfig`, `pi_ai_openai::azure_model_config`, `AzureOpenAiResponsesOptions`, `AzureOpenAiResponsesSimplePatch` (`providers/pi-ai-openai/src/azure.rs:18`) | Records/patch are intended data but inherit ordered/raw JSON blockers. `azure_model_config(&CustomApiModelConfig)` is not direct even after that graph maps because its argument is a borrowed data record. **UNRESOLVED: not answered by the documentation**; pages checked: `functions.md#structs-and-enums`, `functions.md#classes`, `functions.md#result`. An owned-input forwarding function would change the native signature and fail R2. [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#structs-and-enums] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#result] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] |
-| Azure nested `OpenAiResponsesCompat`, `SessionAffinityFormat`, `ExtensionMap`, `VersionedExtension`, `OrderedJsonObject`, `OrderedJsonString`, `OrderedJsonArray`, `OrderedJsonValue` (`crates/pi-ai/src/model.rs:600`) | Enum/record constructs are intended data, but the graph is blocked by `BTreeMap`, exact raw JSON, recursive ordered JSON, and exact UTF-16 string storage. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#collections] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#representation-types] |
-| `pi_ai_pi_messages::PiMessagesCompat`, `PiMessagesOptions`, `PiMessagesSimplePatch`, `PiMessagesToolChoice` (`providers/pi-ai-pi-messages/src/wire.rs:19`) | Intended records/enums; the other three are candidates conditional on IDs/nested values. `PiMessagesCompat`'s zero-field representation is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#structs`, `types.md#records`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records] |
-| Pi Messages `WireRequest` graph: `CustomApiModelConfig`, `OrderedJsonObject`, `OrderedJsonString`, `OrderedJsonArray`, `OrderedJsonValue` (`crates/pi-ai/src/model.rs:741`) | Blocked by raw and recursive ordered JSON. [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#choosing-an-approach] |
-| Shared `ApiRequestOptions`, `StreamTransport`, `CacheRetention`, `ReasoningLevel`, `ThinkingBudgets`, `SecretString` (`crates/pi-ai/src/options.rs:19`, `crates/pi-ai/src/auth.rs:27`) | Enum and ordinary-record members are candidates; `ApiRequestOptions` is blocked by `HeaderMapSpec`. `SecretString` tuple-newtype mapping is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#structs`, `types.md#records`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records] |
-| Shared `OrderedJsonObject`, `OrderedJsonArray`, `OrderedJsonValue`, `indexmap::IndexMap<String,String>` (`crates/pi-ai/src/json_compat.rs:114`, `crates/pi-ai/src/bedrock.rs:166`) | Blocked/undocumented recursive and ordered-map types. The overview lists `HashMap` without a target mapping, while the detailed collections page documents vectors/slices only; neither page authorizes `IndexMap` or nested map graphs. [https://www.boltffi.dev/docs/overview.md | docs/boltffi-swift-bindings/docs-snapshot/overview.md#what-you-can-export] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#collections] |
-
-#### Cancellation and deferred values
-
-| Inventory item and Rust source | BoltFFI-to-Swift mapping and verdict |
-|---|---|
-| `CancellationToken`, `CancellationToken::new`, `CancellationToken::{cancel,is_cancelled,check,child}` (`crates/pi-ai/src/cancellation.rs:28`) | Intended direct thread-safe class and synchronous methods; `check` becomes throwing after `CancellationError` maps, and `child` returns another class. The class docs support class-returning methods. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes] [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#supported-error-types] |
-| `CancellationToken::cancelled`, `Cancelled<'a>` (`crates/pi-ai/src/cancellation.rs:81`) | Blocked — returns a future borrowing the token rather than being an exported `async fn`, and the future struct carries a non-static lifetime. [https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#methods] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| `CancellationError` (`crates/pi-ai/src/cancellation.rs:12`) | Error-struct candidate, but its zero-field target representation is **UNRESOLVED: not answered by the documentation**; pages checked: `errors.md#struct-errors`, `records.md#structs`, `types.md#records`. [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#struct-errors] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records] |
-| `DeferredHandle`, `DeferredHandle::{new,model_ref}` (`crates/pi-ai/src/deferred.rs:19`) | Intended direct durable record, but the provider `data: Option<serde_json::Value>` field blocks round-trip fidelity; `model_ref` returns a newly assembled owned value. `new` uses generic `impl Into` inputs, but the free-function limitation does not establish a rule for generic inherent constructors. **UNRESOLVED: not answered by the documentation** for `new`; pages checked: `records.md#constructors`, `classes.md#constructors`, `functions.md#limitations`. The nearest documented alternative for the provider data is a custom conversion, forbidden by R2. [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#choosing-an-approach] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] |
-| `DeferredCapabilities`, `DeferredWindow`, `DeferredSubmission`, `DeferredFetchOptions`, `DeferredCancelOptions` (`crates/pi-ai/src/deferred.rs:73`) | Intended direct records/enums; concrete struct/enum members map, but the cancel-options alias is only direct if its aliased type is supported. Type-alias preservation is undocumented. **UNRESOLVED: not answered by the documentation**; pages checked: `types.md#quick-reference`, `records.md#structs`, `records.md#enums`. [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] |
-| `DeferredModelRuntime` (`crates/pi-ai/src/deferred.rs:195`) | Blocked — library-implemented supertrait with boxed-future methods. The documented async trait mapping requires actual `async fn`, and library implementations exported as target protocol proxies are not documented. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] |
-
-#### Canonical message, assistant-event, identity, usage, and replay graph
-
-| Inventory item and Rust source | BoltFFI-to-Swift mapping and verdict |
-|---|---|
-| `Message`, `UserMessage`, `AssistantMessage`, `ToolResultMessage`, `ContentBlock`, `ToolCall`, `ToolResultContent`, `Conversation`, `Context` (`crates/pi-ai/src/messages.rs:32`) | Intended direct data records and payload enums. The graph is blocked by `serde_json::Value`, `serde_json::Number`, `Box<RawValue>`, `BTreeMap`, `DeferredHandle`, and dependent newtypes. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] |
-| `Message::id`, `ContentBlock::id` (`crates/pi-ai/src/messages.rs:105`, `crates/pi-ai/src/messages.rs:288`) | Blocked — their returned references carry non-static lifetimes. [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| `Conversation::new`, `Context::new` (`crates/pi-ai/src/messages.rs:455`, `crates/pi-ai/src/messages.rs:480`) | Intended direct data constructors, conditional on the complete message/tool graph. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#constructors] |
-| `AssistantFinish`, `AssistantFinishReason`, `ContentBlockKind`, `ReplayDataOperation`, `CancellationReason`, `AssistantMessageSnapshot` (`crates/pi-ai/src/messages.rs:492`, `crates/pi-ai/src/streaming.rs:347`) | Intended record/enum data. Byte branches map `Vec<u8>` to Swift `Data`; snapshots/cancellation remain blocked by their broader nested graphs. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#bytes] |
-| `CancellationReason::{new,with_request_id}` (`crates/pi-ai/src/streaming.rs:588`) | Both methods use generic conversion inputs, but the free-function limitation does not establish a rule for generic inherent methods or constructors. **UNRESOLVED: not answered by the documentation** for that genericity; pages checked: `records.md#constructors`, `records.md#methods-and-constructors`, `classes.md#constructors`, `classes.md#methods`, `functions.md#limitations`. `with_request_id(mut self, ...)` also consumes an existing record, which is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#methods-and-constructors`, `classes.md#methods`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#constructors] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] |
-| `PublicError` (`crates/pi-ai/src/messages.rs:521`) | Direct **data struct**, not `#[error]`: it is persisted operational data nested inside messages/outcomes rather than the `E` in these method `Result` signatures. Struct records map to Swift value structs. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] |
-| `DiagnosticErrorCode`, `DiagnosticErrorInfo`, `AssistantMessageDiagnostic` (`crates/pi-ai/src/messages.rs:178`) | Intended direct data, blocked by `serde_json::Number`, `BTreeMap<String, Value>`, and JSON detail fields. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] |
-| `AssistantEvent`, `AssistantEvent::{is_terminal,terminal_message}` (`crates/pi-ai/src/streaming.rs:360`) | Intended payload enum, blocked by the canonical value graph. In its existing mixed record impl, `is_terminal(&self)` has a documented receiver shape but `terminal_message(&self) -> Option<&AssistantMessage>` returns a reference with a non-static lifetime and is blocked. The docs do not authorize class-only `#[skip]` inside `#[data(impl)]`, so attribute-only integration cannot selectively expose `is_terminal`. **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#methods-and-constructors`, `classes.md#skipping-methods`. Target handling of the enum's `#[non_exhaustive]` marker is also **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#enums`, `errors.md#enum-errors`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#skipping-methods] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors] |
-| `ProviderId`, `ModelId`, `ApiId`, `MessageId`, `ContentBlockId`, `ToolCallId`, `ReplayItemId`, `ReplayKind`, `ExtensionId`, `RunId` (`crates/pi-ai/src/ids.rs:58`) | Blocked pending tuple-newtype support. Their `as_str` methods return references with non-static lifetimes and are blocked. Their generic `new` constructors are **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#constructors`, `classes.md#constructors`, `functions.md#limitations`. Their `into_inner(self)` methods consume existing record values and are **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#structs`, `records.md#methods-and-constructors`, `classes.md#methods`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] |
-| `ModelRef`, `ModelRef::new` (`crates/pi-ai/src/ids.rs:105`) | Intended direct two-field record. Its `impl Into` constructor is a generic inherent constructor, whose mapping is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#constructors`, `classes.md#constructors`, `functions.md#limitations`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] |
-| `Timestamp`, `Timestamp::{from_unix_millis,unix_millis}` (`crates/pi-ai/src/ids.rs:133`) | Tuple-newtype representation is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#structs`, `types.md#records`. The concrete scalar constructor/getter otherwise have documented record-method shapes. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] |
-| `UsageSource`, `Usage`, `Usage::{zero,request_input_tokens,total_tokens}`, `Cost` (`crates/pi-ai/src/usage.rs:13`) | `UsageSource` and `Usage` have record/enum shapes, and `zero` has a documented static-method shape. Whole owner-defined `Usage` or `Cost` could be mapped with `#[custom_ffi]` plus `CustomFfiConvertible`, but that adds conversion code and violates R2. It does not override the naked `u128` returns from `Usage::{request_input_tokens,total_tokens}`; the primitive quick reference stops at 64 bits and the custom-type page covers whole owner-defined types. **UNRESOLVED: not answered by the documentation** for naked `u128` returns. Preserving those methods requires signature/wrapper changes unless documentation adds a primitive mapping. Because the `Usage` impl mixes `zero` with undocumented-width returns and record `#[skip]` is not documented, it is not attribute-only exportable. Pages checked: `types.md#quick-reference`, `records.md#structs`, `records.md#enums`, `records.md#methods-and-constructors`, `classes.md#skipping-methods`, `custom-types.md#the-customfficonvertible-trait`, `custom-types.md#representation-types`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#skipping-methods] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#the-customfficonvertible-trait] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#representation-types] |
-| `Currency`, `Currency::{new,as_str,usd}` (`crates/pi-ai/src/usage.rs:88`) | Tuple-newtype mapping is unresolved; `as_str` returns a reference with a non-static lifetime and is blocked, while `usd` alone has a documented static-method shape. `new` is a generic inherent constructor, whose mapping is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#constructors`, `classes.md#constructors`, `functions.md#limitations`. The docs do not authorize `#[skip]` in `#[data(impl)]`, so the mixed impl cannot selectively expose `usd` under R2. **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#methods-and-constructors`, `classes.md#skipping-methods`. [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#static-methods] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#skipping-methods] |
-| `ReplayEnvelope`, `ReplayScope`, `ReplayItem`, `ReplayTarget`, `ReplayApplicability`, `ReplayCompleteness`, `OpaquePayload` (`crates/pi-ai/src/replay.rs:13`) | Intended lossless records/payload enums. `OpaquePayload` must remain three distinct `Utf8(String)`, `Bytes(Vec<u8>)`, and `JsonBytes(Vec<u8>)` cases; `Vec<u8>` maps to Swift `Data`. This preserves replay opacity rather than decoding provider payloads. The graph is blocked by helpers returning references with non-static lifetimes and ID tuple newtypes. `ReplayEnvelope::is_complete_and_applicable` and `ReplayItem::is_complete_and_applicable` additionally take borrowed replay records; the docs demonstrate owned data inputs, not `&Record`. **UNRESOLVED: not answered by the documentation** for tuple newtypes and borrowed data inputs; pages checked: `records.md#structs`, `types.md#records`, `functions.md#structs-and-enums`, `functions.md#classes`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#bytes] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#structs-and-enums] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] |
-| `OpaquePayloadEncodingError` (`crates/pi-ai/src/replay.rs:371`) | Error-struct candidate. If its native shape is zero-field, the target representation is **UNRESOLVED: not answered by the documentation**; pages checked: `errors.md#struct-errors`, `records.md#structs`, `types.md#records`. [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#struct-errors] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records] |
-| `ModelFingerprint`, `ReplayDropReason`, `HandoffChange`, `HandoffReport` (`crates/pi-ai/src/handoff.rs:17`) | Intended data graph. `ReplayDropReason` is an open tuple newtype whose mapping is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#structs`, `types.md#records`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records] |
-| Repeated option graph: `ReasoningLevel`, `ReasoningFallback`, `ThinkingBudgets`, `CacheRetention`, `ToolChoice`, `StreamTransport`, `ApiRequestOptions`, `SimpleGenerationOptions`, `OrderedJsonObject`, `OrderedJsonString`, `OrderedJsonValue`, `OrderedJsonArray`, `HeaderMapSpec`, `ErasedApiOptionsPatch`, `VersionedExtension` (`crates/pi-ai/src/options.rs:19`) | Same mapping as above: leaf enums/ordinary record direct; encompassing options blocked by ordered/raw JSON and map types. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#choosing-an-approach] |
-
-#### Assistant and agent stream semantics
-
-If the native signatures already returned `Arc<EventSubscription<AssistantEvent>>`
-and `Arc<EventSubscription<AgentEvent>>`, async mode would generate Swift
-`AsyncStream<AssistantEvent>` and `AsyncStream<AgentEvent>` respectively.
-[https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#async-mode]
-They do not, so the mapping is blocked under R2. In addition, the documented
-producer does **not** apply backpressure: it never blocks and drops each new
-event delivered to a subscriber whose ring buffer is full, with 256 items as
-the default capacity. [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#buffer-capacity]
-That documented loss policy conflicts with the lossless ordered assistant-event
-boundary and with acknowledged agent-sink barriers; choosing a larger buffer
-does not turn the policy into backpressure.
-
-Documented termination is subscription completion when the producer
-unsubscribes, and consumer cancellation occurs when the Swift task is cancelled
-or iteration breaks. [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#stopping-streams]
-The docs generate nonthrowing `AsyncStream<T>`, not a documented
-`AsyncThrowingStream<T, Error>`; this repository's terminal assistant and agent
-failures can remain value events (`AssistantEvent`/`RunOutcome`), while
-pre-stream `RequestStartError` remains a throwing start failure only if an
-exportable async start method exists. [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#async-mode]
-[https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#error-handling]
-
-### `pi_agent_session` durable storage and state
-
-| Inventory item and Rust source | BoltFFI-to-Swift mapping and verdict |
-|---|---|
-| `SessionStorage`, `SessionStorage::{metadata,load_state,append,log,repair_tail}` (`crates/pi-agent-session/src/storage.rs:18`) | Blocked — the host-implemented trait's five operations return `SendBoxFuture` rather than being actual `async fn`. Its value inputs/results are additionally blocked by the session graph. The documented nearest alternative is an exported `#[async_trait]` trait with declared async methods, which would change the existing contract. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] |
-| `SessionRepository`, `SessionRepository::{create,open,fork,list}` (`crates/pi-agent-session/src/storage.rs:70`) | Blocked — boxed-future methods, `open(&SessionId)`/`fork(&SessionId, ...)` borrowed data inputs, and methods returning `Arc<dyn SessionStorage>`. The docs do not cover borrowed record inputs or a host protocol returning another host protocol implementation for later Rust use. **UNRESOLVED: not answered by the documentation**; pages checked: `callbacks.md#ownership`, `callbacks.md#async-methods`, `functions.md#structs-and-enums`, `functions.md#classes`, `classes.md#methods-that-take-or-return-classes`. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#ownership] [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#structs-and-enums] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes] |
-| `InMemorySessionStorage::{new,state_snapshot,append_batch,metadata_snapshot,log_snapshot}` (`crates/pi-agent-session/src/storage.rs:126`) | Intended direct Rust-backed class and synchronous/throwing methods after the owned record/`Vec` input and result graphs map. The constructor/class method shapes and `Vec` arguments are documented; this row does not rely on borrowed record inputs. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#vec] [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#supported-error-types] |
-| `InMemorySessionRepository::new` (`crates/pi-agent-session/src/storage.rs:307`) | Intended direct Rust-backed class constructor; methods returning `Arc<dyn SessionStorage>` remain blocked as above. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors] |
-| `SessionErrorKind`, `SessionError`, `SessionReductionError` (`crates/pi-agent-session/src/error.rs:10`) | Intended direct error enum/struct/enum. Non-exhaustive reducer-error behavior is **UNRESOLVED: not answered by the documentation**; pages checked: `errors.md#enum-errors`, `records.md#enums`. Any unsupported payload leaf also blocks that variant graph. [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors] [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#struct-errors] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] |
-| `SessionId`, `EntryId`, `LaneName`, `OperationRecordId`, `Sequence` (`crates/pi-agent-session/src/ids.rs:58`) | Blocked pending tuple-newtype support. **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#structs`, `types.md#records`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records] |
-| `SessionMetadata`, `AppendReceipt`, `TailRepairReport`, `SessionHeader`, `SessionEnvironmentMetadata`, `CreateSessionRequest`, `ForkRequest`, `SessionQuery`, `ForkPosition` (`crates/pi-agent-session/src/types.rs:30`) | Intended direct records/enum; blocked transitively wherever ID newtypes, metadata `VersionedExtension`/JSON, message graph, maps, or other blocked session values appear. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] |
-| `SessionReducer::{apply,state}` (`crates/pi-agent-session/src/reducer.rs:13`) | The library implements this trait rather than the Swift host. Generated target proxies for library implementations are undocumented, `apply(&SessionMutation)` has an undocumented borrowed-data input, and `state` returns a reference with a non-static lifetime. **UNRESOLVED: not answered by the documentation** for the proxy/input direction; pages checked: `callbacks.md#traits`, `functions.md#structs-and-enums`, `functions.md#classes`. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#traits] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#structs-and-enums] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| `SessionState`, `SessionState::new` (`crates/pi-agent-session/src/reducer.rs:23`) | Intended direct record or Rust-backed class. Its large field graph contains maps and blocked canonical values, so the complete data record does not map attribute-only. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] |
-| `SessionState::replay` (`crates/pi-agent-session/src/reducer.rs:77`) | This associated constructor uses `impl IntoIterator`, but the free-function limitation does not establish a rule for generic inherent constructors. **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#constructors`, `classes.md#constructors`, `functions.md#limitations`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] |
-| `SessionState::{sequence,next_sequence}` (`crates/pi-agent-session/src/reducer.rs:88`) | Direct synchronous methods after `Sequence` maps. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#instance-methods] |
-| `SessionState::{entry,entries_in_sequence_order,records_in_sequence_order,lanes,lane_leaf,log,name,label,labels,stats,scan_branch_leaf_to_root,scan_branch_root_to_leaf,open_operations,recovery_decision}` (`crates/pi-agent-session/src/reducer.rs:100`) | Blocked where they return references or borrowed collections with non-static lifetimes, or values with blocked graph leaves. `entry`, `lane_leaf`, `label`, both scans, `open_operations`, and `recovery_decision` also accept borrowed ID/enum data values; that input direction is undocumented even where a method returns an owned value. **UNRESOLVED: not answered by the documentation** for those borrowed inputs; pages checked: `functions.md#structs-and-enums`, `functions.md#classes`, `types.md#collections`, `types.md#whats-not-supported`. [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#structs-and-enums] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#collections] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| `SessionState::create_fork_mutations` (`crates/pi-agent-session/src/reducer.rs:254`) | Its `Vec<SessionMutation>` and `Result` return shapes are documented, but the input is `&ForkPosition`. The docs demonstrate owned data arguments, not borrowed enum inputs. **UNRESOLVED: not answered by the documentation**; pages checked: `functions.md#structs-and-enums`, `functions.md#classes`, `functions.md#vec`, `functions.md#result`. An owned-input forwarding method would change the native signature and fail R2. [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#structs-and-enums] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#vec] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#result] |
-| `SessionMutation`, `SessionMutation::sequence` (`crates/pi-agent-session/src/types.rs:772`) | Intended direct payload enum and owned scalar/newtype getter, blocked transitively by the entry/record/fact graph and ID newtypes. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] |
-| `EntryBase`, `SessionEntry`, `SessionEntry::{base,id,sequence,parent_id,with_base}` (`crates/pi-agent-session/src/types.rs:84`) | Intended record/payload enum. The accessors return references with non-static lifetimes and are blocked. `with_base(mut self, ...)` consumes the existing record and is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#methods-and-constructors`, `classes.md#methods`. Because the existing record impl contains only unsupported or unresolved methods and record-method omission is undocumented, `#[data(impl)]` cannot expose this impl attribute-only. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#skipping-methods] |
-| `ProvisionedEntry`, `ProvisionedEntry::{id,materialize}` (`crates/pi-agent-session/src/types.rs:223`) | Intended payload enum. `id(&self)` returns a reference with a non-static lifetime and is blocked. `materialize(self, ...)` consumes the existing record and is **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#methods-and-constructors`, `classes.md#methods`. The mixed impl has no documented record `#[skip]`, so it is not attribute-only exportable. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#skipping-methods] |
-| `OperationRecordBase`, `OperationIntent`, `OperationOutcome`, `OperationStep`, `CompactionReason`, `ToolCallIdentity`, `ToolReplayPolicy`, `pi_agent_session::QueueKind` (`crates/pi-agent-session/src/types.rs:374`) | Intended direct records/enums; blocked only through their transitive canonical message, deferred, ID, and JSON leaves. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] |
-| `UsageAttribution`, `SignedUsageAdjustment`, `UsageAttribution::run_id` (`crates/pi-agent-session/src/types.rs:495`) | `UsageAttribution` is a payload-enum candidate, but `run_id(&self)` returns a reference with a non-static lifetime and is blocked. `SignedUsageAdjustment` is not direct because its five fields are `i128`, absent from the primitive quick reference. A whole owner-defined `SignedUsageAdjustment` can use `#[custom_ffi]` plus `CustomFfiConvertible`, but that adds conversion code and violates R2; this row does not infer support for naked `i128` signatures. **UNRESOLVED: not answered by the documentation** for direct `i128` record fields; pages checked: `types.md#quick-reference`, `records.md#structs`, `custom-types.md#the-customfficonvertible-trait`, `custom-types.md#representation-types`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#the-customfficonvertible-trait] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#representation-types] |
-| `OperationRecord`, `OperationRecord::{base,sequence,lane,run_id}` (`crates/pi-agent-session/src/types.rs:587`) | Intended payload enum, blocked by its nested operation/session graph. `base`, `lane`, and `run_id` return references with non-static lifetimes and are blocked; `sequence` is an owned-newtype candidate only after `Sequence` maps. Because the docs do not authorize class-only `#[skip]` inside the mixed `#[data(impl)]`, attribute-only integration cannot selectively expose `sequence`. **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#methods-and-constructors`, `classes.md#skipping-methods`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#skipping-methods] |
-| `SessionFact`, `LaneState`, `RecoveryDecision`, `SessionStats` (`crates/pi-agent-session/src/types.rs:754`) | Intended enum/records; blocked transitively by IDs, public error, maps, fixed-point currency values, and operation records. `SessionStats` is independently not direct because its cached/uncached/total token fields and map values are `i128`, absent from the primitive quick reference; the map type is also undocumented beyond the overview's bare `HashMap` listing. A whole owner-defined `SessionStats` could use `#[custom_ffi]` plus `CustomFfiConvertible`, but that adds conversion code and violates R2; it does not establish support for bare `i128` method signatures elsewhere. **UNRESOLVED: not answered by the documentation** for direct `i128` record fields and the map graph; pages checked: `types.md#quick-reference`, `records.md#enums`, `overview.md#what-you-can-export`, `types.md#collections`, `custom-types.md#the-customfficonvertible-trait`, `custom-types.md#representation-types`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#nested-structs] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference] [https://www.boltffi.dev/docs/overview.md | docs/boltffi-swift-bindings/docs-snapshot/overview.md#what-you-can-export] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#collections] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#the-customfficonvertible-trait] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#representation-types] |
-| `SESSION_HEADER_SCHEMA_VERSION`, `SESSION_STATE_SCHEMA_VERSION`, `SESSION_METADATA_SCHEMA_VERSION`, `APPEND_RECEIPT_SCHEMA_VERSION`, `TAIL_REPAIR_REPORT_SCHEMA_VERSION` (`crates/pi-agent-session/src/types.rs:14`) | Direct scalar constants. [https://www.boltffi.dev/docs/constants.md | docs/boltffi-swift-bindings/docs-snapshot/constants.md#supported-values] |
-
-### Error mapping summary
-
-Use `#[error]` on actual Rust error values that appear as `E` in
-`Result<T, E>`: `AgentError`, `ControlError`, `ToolError`, `ToolUpdateError`,
-`TokioAgentError`, `RequestStartError`, `ProviderRegistrationError`,
-`AuthInteractionError`, `AuthError`, `StoreError`, `CatalogError`,
-`OverrideError`, `AiError`, `TransportError`, `MiddlewareError`,
-`LoweringError`, `EncodeError`, `CostArithmeticError`, `CancellationError`,
-`OpaquePayloadEncodingError`, `ContextError`, `TurnPolicyError`,
-`SessionError`, and `SessionReductionError`. Struct and enum errors generate
-Swift `Error` values and make `Result` calls throw.
-[https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#supported-error-types]
-[https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors]
-
-Keep `PublicError`, `CatalogErrorReport`, `DiagnosticErrorInfo`, and any other
-persisted/report payload as `#[data]`: they are values inside messages,
-outcomes, or reports, not boundary-thrown errors. Struct records generate Swift
-value structs. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs]
-
-**UNRESOLVED: not answered by the documentation** — whether
-`#[non_exhaustive]` Rust errors/enums generate a future-compatible unknown case,
-and whether a callback protocol method returning `Result` becomes a throwing
-Swift protocol requirement. Pages checked: `errors.md#enum-errors`,
-`errors.md#async-errors`, `callbacks.md#traits`, and
-`callbacks.md#async-methods`.
-[https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors]
-[https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#async-errors]
-[https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#traits]
-[https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods]
-
-## 4. Swift consumer sketches
-
-These sketches deliberately distinguish documented target-language syntax from
-what the present Rust signatures can generate. The function page says Rust
-function names may be renamed to target conventions and gives the
-`get_user`-to-`getUser` example used as the naming convention in these sketches.
-[https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#functions]
-
-### Run an agent and iterate its event stream
-
-This is the required idiomatic consumer shape. The `for await` loop is exactly
-the documented Swift use of a generated `AsyncStream<T>`.
-[https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#async-mode]
-The `try await` calls use the documented mapping from exported async `Result`
-functions to Swift `async throws`.
-[https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#error-handling]
-The value parameters and event/outcome cases use the documented Swift
-struct/payload-enum forms, conditional on their complete graphs mapping.
-[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs]
-[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data]
-
-```swift
-func runAndObserve(
-    handle: TokioAgentHandle,
-    prompt: PromptText,
-    onEvent: (AgentEvent) -> Void
-) async throws -> RunOutcome {
-    let run = try await handle.promptText(prompt: prompt)
-    for await event in run.events() {
-        onEvent(event)
-    }
-    return try await run.outcome()
-}
-```
-
-**This sketch is not generated from the current API.** `TokioAgentRun::events`
-returns `&mut tokio::sync::mpsc::Receiver<AgentEvent>` at
-`crates/pi-agent-runtime-tokio/src/lib.rs:133`, not the required
-`Arc<EventSubscription<AgentEvent>>`; `outcome(self)` is consuming, whose class
-mapping is unresolved. The attribute-only native fallback is a pull loop over
-the existing async `next_event` method, provided the event graph maps and the
-containing impl is marked `#[export(single_threaded)]`. That mode disables the
-thread-safety and mutable-receiver checks and makes the Swift caller responsible
-for serializing access to the run object.
-[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#single-threaded-mode]
-
-```swift
-func pullRunEvents(
-    run: TokioAgentRun,
-    onEvent: (AgentEvent) -> Void
-) async {
-    // This task is the sole serialized owner of `run` while pulling events.
-    while let event = await run.nextEvent() {
-        onEvent(event)
-    }
-}
-```
-
-An exported Rust async method becomes a Swift async method and `Option<T>`
-becomes Swift optional, authorizing the language features in the pull sketch.
-[https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#methods]
-[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#option]
-The pull sketch does not satisfy R3 because it is not a generated async
-sequence; generated asynchronous streams use the documented `#[ffi_stream]`
-shape instead.
-[https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#the-ffi_stream-attribute]
-
-### Implement a `Tool` in Swift
-
-BoltFFI documents generating a Swift protocol from an exported Rust trait and
-permits the target language to implement it; an actual Rust `async fn` trait
-method becomes a Swift async protocol requirement.
-[https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#traits]
-[https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods]
-If `Tool` had the documented owned/async signature, a host implementation would
-have this shape, with the complex values injected so the sketch does not invent
-a JSON representation:
-[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs]
-[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums]
-
-```swift
-final class FixedOutputTool: Tool {
-    private let fixedSpec: ToolSpec
-    private let fixedOutput: ToolOutput
-
-    init(spec: ToolSpec, output: ToolOutput) {
-        self.fixedSpec = spec
-        self.fixedOutput = output
-    }
-
-    func spec() -> ToolSpec {
-        fixedSpec
-    }
-
-    func executionMode() -> ToolExecutionMode {
-        .sequential
-    }
-
-    func execute(
-        context: ToolCallContext,
-        updates: ToolUpdateSink,
-        cancellation: CancellationToken
-    ) async -> ToolOutput {
-        fixedOutput
-    }
-}
-```
-
-This is the nearest documented protocol sketch, **not a binding for the current
-`Tool` trait**. Current `Tool::spec` returns `&ToolSpec`, current
-`Tool::execute` returns `SendBoxFuture<Result<ToolOutput, ToolError>>`, and
-`ToolUpdateSink` must travel in the undocumented library-implementation-to-host
-direction (`crates/pi-agent-core/src/tools.rs:201`). `execute` also takes an
-owned `CancellationToken`; the docs show borrowed class parameters, not owned
-class arguments. **UNRESOLVED: not answered by the documentation**; pages
-checked: `functions.md#classes`,
-`classes.md#methods-that-take-or-return-classes`.
-[https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes]
 [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes]
-The documentation does not
-say that an async callback-protocol `Result` generates `async throws`, so the
-sketch intentionally does not claim Swift `throws` for `execute`.
-**UNRESOLVED: not answered by the documentation**; pages checked:
-`callbacks.md#async-methods`, `errors.md#async-errors`.
-[https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods]
-[https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#async-errors]
 
-### Cancel a run
+### 8.7 Production construction is specified, not delegated to a fixture
 
-The native actor cancellation API can be used after a `RunId` is observed:
+Production construction is the complete chain below, not only the final actor
+step:
 
-```swift
-func cancelRun(
-    handle: TokioAgentHandle,
-    runId: RunId
-) async throws {
-    try await handle.cancel(runId: runId)
-}
+```text
+OpenAiModelsFactory::new(api_key)
+        |
+        | owns NativeOpenAiHttpTransport + canonical credential
+        v
+OpenAiModelsFactory::build() -> Models
+        |
+        v
+TokioRuntimeOwner::new(&models, &tools)
+        |
+        v
+TokioRuntimeOwner::spawn_agent(state) -> TokioAgentHandle
 ```
 
-The syntax is authorized if the existing `async fn -> Result` and its ID/error
-types map. [https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#error-handling]
-For re-entrant host callback use, the native `handle.cancelNow(runId:)` is the
-synchronous class-method candidate at
-`crates/pi-agent-runtime-tokio/src/lib.rs:301`.
-[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods]
-
-Swift task cancellation is a separate mechanism: cancelling a task that is
-awaiting an exported async call cooperatively cancels that Rust future, and
-cancelling the task that iterates a generated stream cancels its subscription.
-[https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#cancellation]
-[https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#consumer-side-cancellation]
-Neither statement implies that cancelling an arbitrary wait task invokes the
-agent's run-ID cancellation contract.
-
-### Resume a deferred run
-
-**Gap verdict: the inventoried ordinary Rust surface has no end-to-end deferred
-agent-resumption operation, so this design cannot truthfully present a Swift
-resume sketch.** The fetch portion must include the native `ModelRef` argument.
-Expressed with the intended Swift spelling, that portion would be:
-
-```swift
-// Signature illustration only: fetching is not agent resumption.
-let fetchedAssistant = try await models.fetchDeferred(
-    model: model,
-    handle: handle,
-    options: fetchOptions,
-    cancellation: cancellation
-)
-```
-
-This `try await` spelling is only the documented target shape for an exported
-`async fn -> Result`; the existing `Models::fetch_deferred` instead returns
-`SendBoxFuture`, so even this fetch-only fragment remains blocked as recorded in
-the mapping table.
-[https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#error-handling]
-
-The native method requires `model: ModelRef` and returns the first terminal
-assistant message observed while polling; it has no `Agent` or
-`TokioAgentHandle` argument and does not mutate agent state
-(`crates/pi-ai/src/models.rs:827`, `crates/pi-ai/src/models.rs:870`).
-The returned message can itself remain pending with finish reason `Deferred`
-and the same handle (`crates/pi-ai/src/models.rs:824`).
-`TokioAgentHandle::continue_run` accepts no message
-(`crates/pi-agent-runtime-tokio/src/lib.rs:243`), and the underlying
-`Agent::continue_run` rejects an assistant transcript tail unless steering or
-follow-up records are already queued (`crates/pi-agent-core/src/run.rs:320`).
-It therefore cannot consume or commit `fetchedAssistant`.
-
-`TokioAgentHandle::prompt_records` is the closest inventoried message-taking
-operation (`crates/pi-agent-runtime-tokio/src/lib.rs:230`): its low-level path
-commits initial records before preparing a new model context
-(`crates/pi-agent-core/src/run.rs:888`, `crates/pi-agent-core/src/run.rs:923`).
-That is not the same state-machine path as receiving a terminal assistant from
-the runtime, which commits the assistant and then evaluates its tool calls
-(`crates/pi-agent-core/src/run.rs:1154`, `crates/pi-agent-core/src/run.rs:1191`).
-It also has an `impl IntoIterator` parameter. Whether that generic inherent
-method can export is **UNRESOLVED: not answered by the documentation**; pages
-checked: `records.md#methods-and-constructors`, `classes.md#methods`, and
-`functions.md#limitations`.
-[https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors]
-[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods]
-[https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations]
-Raw transcript mutation through `Agent::state_mut` is not an exposed
-alternative because it returns a mutable reference with a non-static lifetime.
+The first two operations are the concrete provider/transport/auth path from
+section 4.7. They close the current gap in which `Models::default` builds an
+empty provider list (`crates/pi-ai/src/models.rs:99`,
+`crates/pi-ai/src/models.rs:101`,
+`crates/pi-ai/src/models.rs:1460`), while existing registration requires
+`ProviderRegistration` (`crates/pi-ai/src/models.rs:399`) and its trait-object
+fields (`crates/pi-ai/src/provider.rs:2320`,
+`crates/pi-ai/src/provider.rs:2324`,
+`crates/pi-ai/src/provider.rs:2326`,
+`crates/pi-ai/src/provider.rs:2331`). Arbitrary `dyn Trait` is not a documented
+ordinary value mapping, so none is placed in the generated signature.
 [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported]
 
-The missing native operation must accept the fetched `AssistantMessage`, apply
-the agent's existing assistant commit and post-commit behavior, and return the
-continued run/events. Adding such an operation is source API work, not a
-BoltFFI attribute, so it violates R2 until the owner explicitly permits it.
-[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class]
+The last two operations construct
+`Agent::new(Arc::new(models.clone()), state, tools.clone())` inside the existing
+Tokio crate and return `TokioAgentHandle`; the current `Agent::new` contract is
+at `crates/pi-agent-core/src/run.rs:140`, and the concrete `Models` runtime impl
+is at `crates/pi-ai/src/models.rs:1399`. The chain never accepts a foreign
+`Agent`, the `ModelRuntime` trait-object seam, JSON commands, or a duplicate
+record hierarchy.
 
-## 5. Gaps and risks
+`OpenAiModelsFactory`, `TokioRuntimeOwner`, and their constructors do not yet
+exist, so they are implementation dependencies, not unresolved API choices.
+The planned generated signatures use Rust-backed class construction,
+class-valued return, and borrowed class arguments, all documented class forms.
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors]
+[https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes]
+Provider implementation traits remain unannotated. The scripted and malformed
+factories in section 9 remain test-only and cannot satisfy acceptance test 17,
+which must invoke this production chain through generated Swift.
 
-### Requirement-level gaps
+### 8.8 Coexistence with the current UniFFI binding
 
-| Gap or risk | Consequence and documented nearest alternative |
-|---|---|
-| **R1 versus R2/R3: both semantic event streams are signature-incompatible.** | `AgentEvent` arrives through a borrowed boxed stream or Tokio receiver, while `AssistantEvent` arrives through `AssistantStream`; none returns `Arc<EventSubscription<T>>`. The nearest documented alternative is a new method backed by `EventSubscription<T>`/`StreamProducer<T>`, but that is adapter code and violates R2. [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#the-ffi_stream-attribute] [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#creating-streams] |
-| **Documented stream loss conflicts with the port's lossless/replay-aware boundary.** | BoltFFI's producer never blocks and drops new events for a full subscriber buffer. The nearest documented tuning is choosing buffer capacity, but no documented setting changes the overflow policy to backpressure or lossless delivery. [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#buffer-capacity] |
-| **Async callback traits do not have the documented source shape.** | `Tool`, `AgentEventSink`, `ModelRuntime`, policy traits, auth/provider/middleware traits, `SessionStorage`, and `SessionRepository` return `SendBoxFuture`; the docs require `#[async_trait]` plus `async fn`. The nearest alternative is a new adapter trait or changing the trait signature, both forbidden by R2. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods] |
-| **Documented generic and associated-type blockers.** | The docs explicitly reject generic free functions such as `select_first_valid`, generic structs such as `TypedTool<I,F>` and `ThinkingLevelMap<T>`, generic callback traits such as `PayloadTransform<A>`, and associated types such as the five declared by the non-generic `ApiFamily` trait. The function and type pages document concrete exported functions and concrete types as their respective nearest alternatives; the callback page documents no nearest alternative for generic traits or associated types. Any concrete replacement for those trait shapes would add or alter native API and fail R2. [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#limitations] |
-| **Generic inherent methods/constructors, generic enums, and generic aliases are undocumented.** | This affects `AgentState::new`, both `prompt_records` methods, tool/error/ID/`DeferredHandle` constructors, `SessionState::replay`, `Models::{stream_api,stream_api_with_request_options}`, `ModelsBuilder::payload_transform`, `OAuthDeviceCodePollResult<T>`, `LevelSupport<T>`, `PayloadTransformResult<T>`, `ApiOptionsInput<A>`, and the box-future/stream aliases. The free-function page does not answer inherent methods, while the type-page prohibition names generic structs rather than generic enums or aliases. **UNRESOLVED: not answered by the documentation**; pages checked: `functions.md#limitations`, `records.md#constructors`, `records.md#methods-and-constructors`, `records.md#enums-with-associated-data`, `classes.md#constructors`, `classes.md#methods`, `types.md#quick-reference`, `types.md#whats-not-supported`. No attribute-only nearest alternative is documented. [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#constructors] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| **Consuming record/class methods are undocumented.** | `CommittedEventReplay::into_state`, `RequestStartError::with_model`, `ReasoningLevel::resolve_extended`, `CancellationReason::with_request_id`, ID `into_inner` methods, `SessionEntry::with_base`, `ProvisionedEntry::materialize`, `TokioAgentRun::outcome`, both builder families, and other `with_*` methods consume an existing `self`. **UNRESOLVED: not answered by the documentation**; the record/class method pages show constructors, static methods, borrowed receivers, and mutable receivers, but no consuming instance method. Pages checked: `records.md#methods-and-constructors`, `classes.md#methods`. No documented attribute-only alternative preserves these exact methods. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods] |
-| **Trait-implementation methods are undocumented.** | `Models::default` lives in `impl Default for Models`, and `ApiRequestOptions::from` lives in `impl From<&SimpleGenerationOptions> for ApiRequestOptions`. The docs demonstrate annotating inherent record/class impls, not `impl Trait for Type`. **UNRESOLVED: not answered by the documentation**; pages checked: `records.md#methods-and-constructors`, `records.md#static-methods`, `classes.md#defining-a-class`, `classes.md#static-methods`. The nearest documented shape is a new inherent forwarding constructor/static method; that is a code/signature addition, so R1 is incomplete and R2 fails. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#static-methods] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#static-methods] |
-| **Borrowed data-record/enum inputs are undocumented.** | Affected inventoried paths include `ModelRefResolver::resolves`, `CommittedEventReplay::apply`, `committed_record`, `Models::{provider,model,catalog_snapshot,catalog_layers}`, `redirect_strategy_supported`, `ApiRequestOptions::from`, `azure_model_config`, every `ModelPricing` method, `SessionRepository::{open,fork}`, `SessionReducer::apply`, several `SessionState` lookups, and `SessionState::create_fork_mutations`. The functions page demonstrates owned data, `&str`, slices, and `&Class`, but not `&Record`/`&Enum`. **UNRESOLVED: not answered by the documentation**; pages checked: `functions.md#primitives-and-strings`, `functions.md#structs-and-enums`, `functions.md#slices`, `functions.md#classes`, `records.md#instance-methods`. The nearest documented data input is owned, which requires changed or forwarding signatures and therefore fails R2. [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#primitives-and-strings] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#structs-and-enums] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#slices] [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#instance-methods] |
-| **Owned Rust-class inputs are undocumented.** | `Agent::{new,restore}` consumes `ToolRegistry`, `TokioAgentHandle::{new,spawn,with_capacities}` consumes `Agent`, and the model/tool/agent/auth execution families pass `CancellationToken` by value. The docs demonstrate borrowed class arguments (`&Logger`/`&User`) and class return values, not owned class arguments. **UNRESOLVED: not answered by the documentation**; pages checked: `functions.md#classes`, `classes.md#constructors`, `classes.md#methods-that-take-or-return-classes`. A borrowed-input or handle-forwarder signature would change the ordinary Rust surface and fail R1/R2. [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes] |
-| **Mixed record impls have no documented omission attribute.** | `AssistantEvent`, `Usage`, `Currency`, `SessionEntry`, `ProvisionedEntry`, and `OperationRecord` mix potentially supported methods with references, 128-bit returns, or consuming methods. `#[skip]` is documented for class `#[export]` impls only; `records.md` does not document omission within `#[data(impl)]`. **UNRESOLVED: not answered by the documentation**; the nearest documented class alternative does not authorize record use and therefore cannot satisfy R2 for these impls. Pages checked: `records.md#methods-and-constructors`, `classes.md#skipping-methods`. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#skipping-methods] |
-| **Mutable class methods require unchecked single-threaded mode.** | `Agent::{reset_transcript,reset_all,set_tool_execution_mode}` and `TokioAgentRun::next_event` require `#[export(single_threaded)]`; this disables both the `Send + Sync` and `&mut self` checks and transfers serialization responsibility to Swift. This is attribute-only but introduces an explicit consumer-discipline risk for the main run path. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#single-threaded-mode] |
-| **References and lifetimes.** | Native borrowed getters, mutable configuration accessors, bare-agent stream lifetimes, policy contexts, and session projections cannot cross unchanged because their reference results carry non-static lifetimes. The nearest documented alternative is to return owned data rather than a borrowed reference, which changes signatures/semantics. [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported] |
-| **Unsupported or undocumented payload leaves.** | `serde_json::Value`, `serde_json::Number`, `RawValue`, `IndexMap`, `BTreeMap`, `BTreeSet`, `Arc<[T]>`, `http::HeaderMap`, Tokio `mpsc`/`watch` receivers, arbitrary `Any`, and recursive exact ordered JSON block transitive records. The nearest documented mechanism for otherwise unsupported owned values is `custom_type!` or `CustomFfiConvertible`, which requires conversion code and violates R2; only `url::Url`, `Duration`, and `Vec<u8>` among these adjacent external shapes have explicit built-ins. [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#choosing-an-approach] [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#built-in-custom-types] |
-| **`i128`/`u128` numeric widths are undocumented.** | The quick reference stops at `i64`/`u64`, so none of these widths is direct on the available evidence. For whole owner-defined `Cost`, `MoneyRate`, `Usage`, `SignedUsageAdjustment`, or `SessionStats`, `#[custom_ffi]` plus `CustomFfiConvertible` is a documented whole-type alternative, but it adds conversion code and fails R2. That mechanism does not document overriding naked primitive signatures such as `Usage::{request_input_tokens,total_tokens} -> u128`, `MoneyRate::cost_for_tokens -> Result<i128, _>`, or the raw `i128` multiplier parameters in `ModelPricing::calculate_cost_with_multiplier`. **UNRESOLVED: not answered by the documentation** for bare `i128`/`u128` arguments and returns; pages checked: `types.md#quick-reference`, `custom-types.md#the-customfficonvertible-trait`, `custom-types.md#representation-types`. Those signatures require a wrapper/signature change unless documentation adds primitive support. [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#the-customfficonvertible-trait] [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#representation-types] |
-| **Nested and reverse-direction trait objects.** | `Models` implements `ModelRuntime` for `Agent`; Rust supplies `ToolUpdateSink` to a Swift `Tool`; repositories return `SessionStorage`; auth interactions return `RedirectReceiver`; credential stores return `CredentialLease`. The docs explain Swift implementations passed into Rust through `Box`/`Arc`, but not Rust implementations presented to Swift as protocol objects or protocols returning protocols. **UNRESOLVED: not answered by the documentation**; pages checked: `callbacks.md#traits`, `callbacks.md#ownership`, `callbacks.md#how-it-works`, `classes.md#methods-that-take-or-return-classes`. [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#traits] [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#ownership] [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#how-it-works] [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes] |
-| **DeferredHandle round trip.** | Its exact provider data is `Option<serde_json::Value>`; dropping or stringifying it would violate R1. The nearest documented custom conversion requires extra code and can panic on invalid conversion, so there is no attribute-only mapping. [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#conversion-errors] |
-| **Deferred fetch has no agent-resume operation.** | `Models::fetch_deferred` requires `ModelRef` and returns an `AssistantMessage` but does not commit it (`crates/pi-ai/src/models.rs:827`). `TokioAgentHandle::continue_run` accepts no message (`crates/pi-agent-runtime-tokio/src/lib.rs:243`); `prompt_records` starts a new prompt run through a generic input rather than applying the existing post-assistant path (`crates/pi-agent-runtime-tokio/src/lib.rs:230`, `crates/pi-agent-core/src/run.rs:888`, `crates/pi-agent-core/src/run.rs:1154`). The nearest documented BoltFFI shape would be an exported async class method over supported record/error types, but no such native method exists, and adding one violates R2. [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#async-methods] [https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#error-handling] |
-| **Cancellation has two layers.** | BoltFFI target-task cancellation cooperatively cancels the exported future, while native `CancellationToken` and actor `cancel(RunId)` are explicit library capabilities. Both must remain distinct. The docs support cooperative target-task cancellation but do not equate it with application cancellation tokens. [https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#cancellation] |
-| **Tokio runtime ownership.** | `TokioAgentHandle` requires an active Tokio runtime at `crates/pi-agent-runtime-tokio/src/lib.rs:184`. BoltFFI does not provide an executor and says Tokio-dependent work must have a running Tokio runtime. An attribute-only design has no documented mechanism that creates/enters that runtime for Swift. [https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#runtime] |
-| **Setup is not attributes only.** | BoltFFI requires dependencies, crate type, `build.rs`, and configuration/codegen steps. These are not item API changes but exceed a literal “attributes only” reading of R2. [https://www.boltffi.dev/docs/installation.md | docs/boltffi-swift-bindings/docs-snapshot/installation.md#add-to-your-project] [https://www.boltffi.dev/docs/installation.md | docs/boltffi-swift-bindings/docs-snapshot/installation.md#create-buildrs] |
-
-### Unresolved documentation questions
-
-Every unresolved point raised in the mapping is collected here:
-
-- **UNRESOLVED: not answered by the documentation** — conditional use through
-  `cfg_attr`, optional BoltFFI build dependencies, and feature-dependent
-  discovery. Pages checked: `installation.md#add-to-your-project`,
-  `installation.md#create-buildrs`, `getting-started.md#write-your-code`,
-  `configuration.md#package-identity`.
-  [https://www.boltffi.dev/docs/installation.md | docs/boltffi-swift-bindings/docs-snapshot/installation.md#add-to-your-project]
-  [https://www.boltffi.dev/docs/installation.md | docs/boltffi-swift-bindings/docs-snapshot/installation.md#create-buildrs]
-  [https://www.boltffi.dev/docs/getting-started.md | docs/boltffi-swift-bindings/docs-snapshot/getting-started.md#write-your-code]
-  [https://www.boltffi.dev/docs/configuration.md | docs/boltffi-swift-bindings/docs-snapshot/configuration.md#package-identity]
-- **UNRESOLVED: not answered by the documentation** — one generated package
-  spanning annotations and re-exports across several workspace crates. Pages
-  checked: `configuration.md#package-identity`, `packaging.md#overview`,
-  `installation.md#create-buildrs`.
-  [https://www.boltffi.dev/docs/configuration.md | docs/boltffi-swift-bindings/docs-snapshot/configuration.md#package-identity]
-  [https://www.boltffi.dev/docs/packaging.md | docs/boltffi-swift-bindings/docs-snapshot/packaging.md#overview]
-  [https://www.boltffi.dev/docs/installation.md | docs/boltffi-swift-bindings/docs-snapshot/installation.md#create-buildrs]
-- **UNRESOLVED: not answered by the documentation** — tuple/unit newtypes,
-  zero-field records/unit error structs, and type aliases. Private class fields
-  are not included in this gap: the class documentation says the struct stays
-  private and only impl methods are exposed. Pages checked:
-  `records.md#structs`, `records.md#enums`, `classes.md#defining-a-class`,
-  `types.md#records`.
-  [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs]
-  [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums]
-  [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class]
-  [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records]
-- Associated-data enum payload-field visibility is resolved by the documented
-  `LoadState` example: its Rust variant payload fields have no `pub` marker, and
-  the generated Swift enum exposes the corresponding associated values.
-  [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data]
-- **UNRESOLVED: not answered by the documentation** — whether multiple
-  inherent impl blocks for one private Rust-backed class can all be annotated
-  and merged into one generated target class. This affects `Agent`. Pages
-  checked: `classes.md#defining-a-class`, `classes.md#methods`,
-  `classes.md#single-threaded-mode`.
-  [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class]
-  [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods]
-  [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#single-threaded-mode]
-- **UNRESOLVED: not answered by the documentation** — target handling of Rust
-  `#[non_exhaustive]` records/errors. Pages checked: `records.md#enums`,
-  `errors.md#enum-errors`.
-  [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums]
-  [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors]
-- **UNRESOLVED: not answered by the documentation** — exporting methods defined
-  only by trait implementations. This blocks `Models::default` from
-  `impl Default for Models` and `ApiRequestOptions::from` from
-  `impl From<&SimpleGenerationOptions>`. Pages checked:
-  `records.md#methods-and-constructors`, `records.md#static-methods`,
-  `classes.md#defining-a-class`, `classes.md#static-methods`.
-  [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors]
-  [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#static-methods]
-  [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class]
-  [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#static-methods]
-- **UNRESOLVED: not answered by the documentation** — borrowed data-record or
-  enum inputs. The docs demonstrate owned data inputs, `&str`, slices, and
-  borrowed classes, but not `&Record`/`&Enum`. Pages checked:
-  `functions.md#primitives-and-strings`, `functions.md#structs-and-enums`,
-  `functions.md#slices`, `functions.md#classes`,
-  `records.md#instance-methods`.
-  [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#primitives-and-strings]
-  [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#structs-and-enums]
-  [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#slices]
-  [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes]
-  [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#instance-methods]
-- **UNRESOLVED: not answered by the documentation** — owned Rust-backed class
-  arguments. The class-parameter examples use `&Logger`/`&User`; no page shows
-  an owned class argument such as native `ToolRegistry`, `Agent`, or
-  `CancellationToken`. Pages checked: `functions.md#classes`,
-  `classes.md#constructors`, `classes.md#methods-that-take-or-return-classes`.
-  [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes]
-  [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#constructors]
-  [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes]
-- **UNRESOLVED: not answered by the documentation** — consuming `self` record
-  or class methods. This includes `CommittedEventReplay::into_state`,
-  `RequestStartError::with_model`, `ReasoningLevel::resolve_extended`,
-  `CancellationReason::with_request_id`, ID `into_inner`,
-  `SessionEntry::with_base`, `ProvisionedEntry::materialize`,
-  `TokioAgentRun::outcome`, the `ModelsBuilder` and
-  `ProviderRegistrationBuilder` transitions, other consuming `with_*` methods,
-  and consuming boxed protocol methods. Pages checked:
-  `records.md#methods-and-constructors`, `classes.md#methods`,
-  `classes.md#memory-management`, `callbacks.md#ownership`,
-  `async.md#methods`.
-  [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors]
-  [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods]
-  [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#memory-management]
-  [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#ownership]
-  [https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#methods]
-- **UNRESOLVED: not answered by the documentation** — selectively omitting a
-  method from `#[data(impl)]`. The docs show `#[skip]` only for class
-  `#[export]` impls, so mixed record impls cannot be selectively exported on the
-  available evidence. Pages checked: `records.md#methods-and-constructors`,
-  `classes.md#skipping-methods`.
-  [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#methods-and-constructors]
-  [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#skipping-methods]
-- **UNRESOLVED: not answered by the documentation** — whether `Result` on an
-  async callback-trait method becomes a throwing Swift protocol requirement.
-  Pages checked: `callbacks.md#async-methods`, `errors.md#async-errors`.
-  [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods]
-  [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#async-errors]
-- **UNRESOLVED: not answered by the documentation** — Rust-implemented traits
-  exported as Swift protocol proxy objects, nested protocol return values, and
-  library-to-host callback capability arguments. Pages checked:
-  `callbacks.md#traits`, `callbacks.md#ownership`,
-  `callbacks.md#how-it-works`, `classes.md#methods-that-take-or-return-classes`.
-  [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#traits]
-  [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#ownership]
-  [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#how-it-works]
-  [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes]
-- **UNRESOLVED: not answered by the documentation** — a lossless/backpressured
-  stream overflow mode, stream terminal errors, or direct adaptation of
-  `futures_core::Stream`/Tokio receivers. Pages checked:
-  `streaming.md#the-ffi_stream-attribute`, `streaming.md#buffer-capacity`,
-  `streaming.md#stopping-streams`, `experimental.md#feature-details`.
-  [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#the-ffi_stream-attribute]
-  [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#buffer-capacity]
-  [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#stopping-streams]
-  [https://www.boltffi.dev/docs/experimental.md | docs/boltffi-swift-bindings/docs-snapshot/experimental.md#feature-details]
-- **UNRESOLVED: not answered by the documentation** — mappings for
-  `serde_json::{Value,Number,value::RawValue}`, `IndexMap`, `BTreeMap`,
-  `BTreeSet`, `Arc<[T]>`, `http::HeaderMap`, Tokio receivers, arbitrary `Any`,
-  recursive/exact ordered JSON, and the Swift mapping/nesting behavior for the
-  `HashMap` merely listed in the overview. Pages checked:
-  `overview.md#what-you-can-export`, `types.md#quick-reference`,
-  `types.md#collections`, `types.md#whats-not-supported`,
-  `types.md#built-in-custom-types`, `custom-types.md#representation-types`,
-  `custom-types.md#containers`.
-  [https://www.boltffi.dev/docs/overview.md | docs/boltffi-swift-bindings/docs-snapshot/overview.md#what-you-can-export]
-  [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference]
-  [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#collections]
-  [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported]
-  [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#built-in-custom-types]
-  [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#representation-types]
-  [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#containers]
-- **UNRESOLVED: not answered by the documentation** — `i128` and `u128` as
-  direct record leaves, arguments, or return values. The primitive quick
-  reference ends at `i64`/`u64`. The custom-type page documents conversion of a
-  whole external or owner-defined type, so it can be considered for whole
-  `Cost`, `MoneyRate`, `Usage`, `SignedUsageAdjustment`, or `SessionStats` only
-  with extra conversion code; it does not answer bare primitive parameters or
-  returns in `Usage`, `MoneyRate`, and pricing methods. Those naked signatures
-  require a wrapper/signature change unless documentation adds support. Pages
-  checked: `types.md#quick-reference`,
-  `custom-types.md#the-custom_type-macro`,
-  `custom-types.md#the-customfficonvertible-trait`,
-  `custom-types.md#representation-types`.
-  [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference]
-  [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#the-custom_type-macro]
-  [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#the-customfficonvertible-trait]
-  [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#representation-types]
-
-### Existing `bindings/pi-ffi` UniFFI layer
-
-The existing binding is a separate unpublished `pi-ffi` crate, already built as
-`lib`/`cdylib`/`staticlib` and depending on UniFFI
-(`bindings/pi-ffi/Cargo.toml:1`, `bindings/pi-ffi/Cargo.toml:11`,
-`bindings/pi-ffi/Cargo.toml:22`). It installs UniFFI scaffolding at
-`bindings/pi-ffi/src/lib.rs:41`, exposes JSON/configuration envelopes beginning
-at `bindings/pi-ffi/src/lib.rs:43`, and checks in generated Swift at
-`bindings/pi-ffi/generated/swift/PiFFI.swift:1`.
-
-The safe migration position is **coexistence first**: keep `pi-ffi` and its
-module/artifact unchanged while a differently named BoltFFI Swift package proves
-leaf types and individual calls. This avoids symbol/module collisions and keeps
-the existing lossless acknowledged event queue, documented in project code at
-`bindings/pi-ffi/src/lib.rs:49`, available during evaluation. No snapshot page
-describes BoltFFI/UniFFI coexistence or migration. **UNRESOLVED: not answered by
-the documentation**; pages checked: `packaging.md#apple-packaging`,
-`configuration.md#swift-module-name`, `configuration.md#swiftpm-layouts`.
+The existing `pi-ffi` crate is a separate UniFFI static/dynamic library
+(`bindings/pi-ffi/Cargo.toml:1`) and checks in generated Swift
+(`bindings/pi-ffi/generated/swift/PiFFI.swift:1`). No snapshot page describes
+BoltFFI/UniFFI coexistence or migration.
+**UNRESOLVED: not answered by the documentation**; pages checked:
+`packaging.md#apple-packaging`,
+`configuration.md#swift-module-name`, and
+`configuration.md#swiftpm-layouts`.
 [https://www.boltffi.dev/docs/packaging.md | docs/boltffi-swift-bindings/docs-snapshot/packaging.md#apple-packaging]
 [https://www.boltffi.dev/docs/configuration.md | docs/boltffi-swift-bindings/docs-snapshot/configuration.md#swift-module-name]
 [https://www.boltffi.dev/docs/configuration.md | docs/boltffi-swift-bindings/docs-snapshot/configuration.md#swiftpm-layouts]
+Keep it unchanged until the new package passes all acceptance tests; use a
+distinct Swift module and native artifact name during evaluation.
 
-BoltFFI cannot replace UniFFI for the R1 boundary until the stream, callback,
-generic, JSON/ordered-data, reverse-trait, and runtime gaps have documented or
-owner-approved solutions. A replacement decision before those gates would
-silently exchange the native API for a smaller surface, contrary to R1.
-[https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#the-ffi_stream-attribute]
-[https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods]
-[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported]
-[https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#runtime]
+## 9. Acceptance-test plan
 
-## 6. Phased implementation plan
+Rust contract tests belong in
+`crates/pi-agent-runtime-tokio/tests/boltffi_run_contract.rs` and
+`crates/pi-agent-runtime-tokio/tests/boltffi_assistant_contract.rs`; tests that
+must reach private actor machinery live in a `#[cfg(test)]` unit module beside
+that machinery in `crates/pi-agent-runtime-tokio/src/lib.rs`. Envelope tests
+also extend `crates/pi-agent-core/tests/m2_1_state.rs`. Generated-language tests
+belong in a test-only SwiftPM package at
+`bindings/boltffi-swift-tests/Tests/AgentPrismBoltFFIAcceptanceTests/`.
+The Rust side of generated-language-only construction lives in the planned
+`crates/pi-agent-runtime-tokio/src/boltffi_test_fixtures.rs`, compiled only when
+both the binding and `boltffi-test-fixtures` test features are enabled. That
+module is excluded from production generation. The SwiftPM package contains
+XCTest code only—no production wrapper.
 
-No phase publishes a crate, and no phase deletes or mutates the existing
-UniFFI artifact. Each phase is a separate stop/go gate; a failing acceptance
-test prevents expansion to the next phase.
+| # | Required proof | Where and how |
+|---:|---|---|
+| 1 | More than `DEFAULT_EVENT_CAPACITY` events with a deliberately slow Swift consumer; no loss or reordering | Rust test `pull_more_than_capacity_is_lossless` scripts at least `DEFAULT_EVENT_CAPACITY * 3` uniquely indexed updates and delays pulls; Swift `testSlowPullHasNoLossOrReordering` repeats through generated `nextEvent()` and compares the complete index vector. |
+| 2 | `RunFinished` is always delivered | Rust `pull_delivers_run_finished_last` asserts exactly one envelope containing the terminal event and then validated EOF; Swift `testRunFinishedIsDelivered` asserts the same before `outcome()`. Reuse the existing lifecycle basis in `crates/pi-agent-core/tests/m2_2_run.rs:215`. |
+| 3 | Core EOF without `RunFinished` throws `MissingRunFinished`, never `nil` | Do **not** use `ScriptedRuntime`: when a model stream lacks its terminal event, Agent core constructs/selects a failed assistant (`crates/pi-agent-core/src/run.rs:1126`, `crates/pi-agent-core/src/run.rs:1132`), commits it to the transcript (`crates/pi-agent-core/src/run.rs:1156`), and later emits `RunFinished` (`crates/pi-agent-core/src/run.rs:1187`). Put `drive_run_eof_without_run_finished_is_error` in the `#[cfg(test)]` unit module beside private `drive_run` (`crates/pi-agent-runtime-tokio/src/lib.rs:734`); feed a crate-private `SendBoxStream<AgentEvent>` containing `RunStarted` and raw EOF, then assert with `matches!` that `DriveResult.outcome` is `Err(TokioAgentError::MissingRunFinished)`. Put a separate `next_event_eof_replays_cached_missing_run_finished` unit there to construct the reshaped private fields and verify the public envelope pull never returns `Ok(None)`. For Swift, enable a `boltffi-test-fixtures`-only exported `malformed_agent_run_fixture()` in a test-support module; it constructs a `TokioAgentRun` whose envelope channel closes after a nonterminal event and whose cached completion is `MissingRunFinished`. `testMalformedEofThrowsMissingRunFinished` calls only that generated public fixture and `nextEvent()`—it does not call private `drive_run`. The fixture symbol is absent from production generation. |
+| 4 | Cancelling a pending `nextEvent()` consumes no event | Rust `cancelled_pull_does_not_consume` uses a gated runtime and drops a pending receive future. Swift `testCancelledNextEventDoesNotConsume` starts and cancels a `Task`, releases the gate, calls `nextEvent()` again, and asserts the unique envelope is returned. |
+| 5 | `outcome()` without draining more than 128 events cannot deadlock | Rust `outcome_closes_undrained_observations` and Swift `testOutcomeWithoutDrainDoesNotDeadlock` script at least 129 events, call `outcome()` immediately, and enforce a short timeout. They cover receiver close, buffered discard, blocked-sender wakeup, and cached result. |
+| 6 | Sink-only delivery beyond 128 events has no hidden drainer | Rust `sink_only_run_has_no_observation_sender` scripts at least 129 events, never pulls, counts every sink call, and awaits `outcome`; a crate-private assertion beside `RunChannels` in `crates/pi-agent-runtime-tokio/src/lib.rs` verifies its event sender is `None`. The test-only fixture module exposes that Rust-owned counting sink's start/result controls, and Swift `testSinkOnlyBeyondCapacityNeedsNoDrainer` drives those controls without implementing the conditionally exported host sink. |
+| 7 | A held `RunFinished` sink blocks post-terminal EOF, `outcome`, and `waitForIdle`, but not delivery of `RunFinished` itself | Rust `run_finished_sink_blocks_all_settlement` extends the existing basis at `crates/pi-agent-runtime-tokio/tests/m2_2_handle.rs:394`. The test-only fixture supplies a Rust-owned gated sink that holds the envelope containing `RunFinished`, plus a `releaseRunFinishedSink()` control. Swift `testRunFinishedSinkBlocksSettlement` first proves that `nextEvent()` observes `RunFinished` while the sink is still held, because the actor sends to observation before awaiting registered and run-scoped sinks (`crates/pi-agent-runtime-tokio/src/lib.rs:838`, `crates/pi-agent-runtime-tokio/src/lib.rs:845`, `crates/pi-agent-runtime-tokio/src/lib.rs:849`). It then starts the **post-terminal EOF pull** and proves that pull, `outcome()`, and `waitForIdle()` remain pending until the gate is released; afterward EOF is returned and both settlement calls complete. This tests generated pull/settlement semantics even if the Swift-authored sink surface is still gated. |
+| 8 | Cancellation from inside a Swift sink | Conditional on the owned-`CancellationToken` async-trait generation gate in section 4.4. Rust `sink_can_cancel_with_supplied_token` and Swift `testSinkCanCancelWithSuppliedToken` call the supplied `CancellationToken.cancel()` on a selected envelope, return from the sink, and assert terminal `RunOutcome::Cancelled`; neither calls a mailbox method from the sink. If generation fails, the sink milestone is reported blocked rather than substituting a different contract. |
+| 9 | Concurrent `nextEvent()` calls are serialized or rejected | This design selects serialization. Rust `concurrent_pulls_are_serialized` stress-tests the receiver mutex. Swift `testConcurrentNextEventCallsAreSerialized` launches two tasks, merges their unique envelopes, and proves each sequence appears exactly once in source order. |
+| 10 | No authoritative Agent `EventSubscription` appears in the generated boundary | CI test `generated_surface_has_no_authoritative_subscription` runs generation and scans generated Swift/C/Rust glue for `EventSubscription<AgentEventEnvelope>`, `AsyncStream<AgentEventEnvelope>`, `EventSubscription<AgentEvent>`, `AsyncStream<AgentEvent>`, `EventSubscription<AssistantEvent>`, and `AsyncStream<AssistantEvent>`. Swift compile test `testGeneratedSurfaceUsesNextEvent` asserts the envelope pull method exists. |
+| 11 | Rust-owned Tokio runtime lives through actor shutdown | Rust `owned_runtime_outlives_actor_shutdown` and Swift `testOwnedRuntimeLivesThroughShutdown` create a handle, drop the external `TokioRuntimeOwner`, perform a Tokio-dependent timer operation, and call `shutdown()`. Instrumented supervisor/lease state proves the actor future itself holds a lease, `shutdown()` waits for actor-done, and the runtime owner thread tears down only afterward. A second Rust case drops the handle without explicit shutdown and proves mailbox closure still lets the actor release the last task lease safely. |
+| 12 | Envelope sequences are exact across runs and persistence round-trips | Rust `envelope_sequence_spans_runs_and_round_trips` extends `crates/pi-agent-core/tests/m2_1_state.rs:305`: run twice, assert one consecutive global sequence with stable `run_id` grouping, serialize/deserialize and replay every envelope, then compare exact values. Swift `testEnvelopeSequenceAcrossRuns` verifies the same received sequence. This test is mandatory because section 4.5 selects envelopes. |
+| 13 | Direct `AssistantEvent` pull is lossless under slow consumption | Rust `assistant_pull_more_than_capacity_is_lossless` and Swift `testSlowAssistantPullHasNoLossOrReordering` configure a test `ChatApi` in the concrete `Models` control plane to return at least three channel capacities of uniquely indexed deltas, delay every pull, and compare the exact complete sequence through `TokioRuntimeOwner::stream_model` and `TokioAssistantStream::next_event`. The production path, rather than a raw-stream helper, is under test. |
+| 14 | Direct assistant terminal and EOF semantics are distinct | Rust `assistant_terminal_precedes_validated_eof` configures test `ChatApi` implementations in `Models` and asserts `Finished`, `Failed`, and `Cancelled` are returned before `Ok(None)`. Rust `assistant_raw_eof_is_protocol_error` uses a test `ChatApi` returning `AssistantStream::new` over a nonterminal event and raw EOF, then asserts `MissingTerminalEvent`. The `boltffi-test-fixtures`-only generated factory builds that same concrete `Models` path for Swift; `testAssistantRawEofThrows` proves the final `nextEvent()` throws rather than returning `nil`. The three `AssistantEvent` terminal variants are defined at `crates/pi-ai/src/streaming.rs:521`, `crates/pi-ai/src/streaming.rs:528`, and `crates/pi-ai/src/streaming.rs:534`. |
+| 15 | Cancelling a pending direct assistant pull consumes no event | Rust `cancelled_assistant_pull_does_not_consume` and Swift `testCancelledAssistantNextEventDoesNotConsume` gate the producer, cancel a pending `nextEvent()` task, release one uniquely identified event, and assert the following pull returns it. |
+| 16 | Direct model cancellation covers establishment, lifecycle-preserving, and abandonment paths | One Rust/Swift case cancels the task awaiting `streamModel(request:)` before establishment and proves its guard cancels the token, closes observation, and releases the producer lease. Established-stream cases call `cancel()` and continue pulling to `AssistantEvent::Cancelled`; separate cases fill the event channel, call `cancelAndWait()` without resuming pulls, and assert sender wakeup, internal terminal validation, producer completion, and runtime-lease release without deadlock. |
+| 17 | Generated Swift can construct a production configured `Models` and actor without provider-authoring traits or a fixture | Rust `providers/pi-ai-openai/tests/native_models_factory.rs::factory_builds_openai_models_with_native_transport_and_auth` calls the added `OpenAiModelsFactory`, includes a compile-time `NativeOpenAiHttpTransport: HttpTransport` assertion, asserts the OpenAI catalog is present, and resolves the seeded API-key auth through the canonical `Models` control plane without exposing the key. Swift `testProductionOpenAIConstruction` calls the generated `OpenAiModelsFactory(apiKey:)` and `build()`, constructs canonical `AgentState` for a pinned OpenAI catalog entry, creates `ToolRegistry` and `TokioRuntimeOwner`, calls `spawnAgent`, reads the initial snapshot, and awaits `shutdown`. It performs no live network request, imports no test-fixture feature, and compile-time surface checks reject any `ProviderRegistration`, `HttpTransport`, `AuthResolver`, `ModelCatalog`, or `ChatApi` argument in that call chain. |
+| 18 | Every transitive JSON/map/tuple-newtype/tuple-payload-data-enum/replay path in section 8.2 generates and preserves its canonical value | Rust `crates/pi-agent-runtime-tokio/tests/boltffi_owned_value_graph.rs` constructs every path as a concrete root, never inferring an event or snapshot path from a request or committed transcript. The roots are: (a) a direct `ModelRequest` whose context contains assistant and tool-result messages with `ToolCall.arguments`, `DeferredHandle.data`, diagnostic number/details, `Timestamp`, `Currency` through cost, `ToolResultMessage.details -> VersionedExtension.value`, and a `ToolSpec.parameters` plus configured `ConstrainedSampling`/`GrammarVariants`; (b) standalone `AssistantEvent::DiagnosticAdded`; (c) standalone `AssistantEvent::{Finished,Failed,Cancelled}`, each with a terminal message whose `ReplayEnvelope` is independently nonempty and exercised by the matrix below; (d) nested `AgentEvent::AssistantUpdate` values for those four cases; (e) explicit assistant and tool-result `AgentEvent::MessageCommitted` roots; (f) a standalone assistant `AgentRecord`; (g) a direct `AgentState` whose transcript contains an assistant record; (h) `ToolExecutionStarted`, `ToolExecutionUpdated`, and `ToolExecutionFinished`; (i) `AgentEvent::ContextPrepared` with `OpaqueReplayDropped { reason: ReplayDropReason }`; and (j) an `AgentSnapshot` containing committed records **and** `streaming: Some(AssistantMessageSnapshot)` whose deferred data, diagnostic number/details, partial tool-call arguments, usage/cost, timestamp, and terminal message use sentinels deliberately different from `state.transcript` (`crates/pi-ai/src/streaming.rs:428`, `crates/pi-ai/src/streaming.rs:522`, `crates/pi-ai/src/streaming.rs:528`, `crates/pi-ai/src/streaming.rs:534`, `crates/pi-agent-core/src/events.rs:97`, `crates/pi-agent-core/src/events.rs:113`, `crates/pi-agent-core/src/events.rs:120`, `crates/pi-agent-core/src/state.rs:188`, `crates/pi-ai/src/streaming.rs:1689`, `crates/pi-ai/src/streaming.rs:1693`, `crates/pi-ai/src/streaming.rs:1695`, `crates/pi-ai/src/streaming.rs:1699`, `crates/pi-ai/src/streaming.rs:1701`, `crates/pi-ai/src/streaming.rs:1703`, `crates/pi-ai/src/streaming.rs:1705`). Replay envelope coverage is the thirteen-root matrix specified immediately below. Within that matrix, `AgentSnapshot.streaming.replay` and `AgentSnapshot.streaming.terminal_message.replay` each contain a different `ReplayEnvelope` with a different fully populated `ReplayScope`—distinct `provider`, `api`, `requested_model`, `produced_by_model`, and `protocol_revision` sentinels—a nonempty ordered `Vec<ReplayItem>`, and root-specific sentinels for every envelope/item field (`crates/pi-ai/src/streaming.rs:1697`, `crates/pi-ai/src/streaming.rs:1705`, `crates/pi-ai/src/messages.rs:157`, `crates/pi-ai/src/replay.rs:13`, `crates/pi-ai/src/replay.rs:88`, `crates/pi-ai/src/replay.rs:90`, `crates/pi-ai/src/replay.rs:92`, `crates/pi-ai/src/replay.rs:94`, `crates/pi-ai/src/replay.rs:96`, `crates/pi-ai/src/replay.rs:98`, `crates/pi-ai/src/replay.rs:135`). Like every root in the thirteen-root matrix, each of those two envelopes independently includes all four `ReplayTarget` forms—`Message`, `ContentBlock`, `ToolCall`, and `ProviderOutputItem`—and all three `OpaquePayload` forms—`Utf8`, `Bytes`, and `JsonBytes`—using distinct strings, IDs, indices, raw byte sequences, JSON byte sequences, ordinals, kinds, applicability values, and completeness values; Swift asserts the exact schema version, every scope field, ordered item count, and every item field/payload byte (`crates/pi-ai/src/replay.rs:179`, `crates/pi-ai/src/replay.rs:276`). Direct replay-event roots are also exhaustive: create standalone `AssistantEvent::ReplayItemStarted` values for all four target forms and standalone `AssistantEvent::ReplayData` values for all five `ReplayDataOperation::{ReplaceUtf8,AppendUtf8,ReplaceBytes,AppendBytes,ReplaceJsonBytes}` forms, then create a corresponding nested `AgentEvent::AssistantUpdate` for every direct value with distinct `message_id`, `item_id`, target-ID/index, and operation-payload sentinels; Swift asserts exact case and payload fidelity for every direct and nested root (`crates/pi-ai/src/streaming.rs:474`, `crates/pi-ai/src/streaming.rs:488`, `crates/pi-ai/src/streaming.rs:563`, `crates/pi-agent-core/src/events.rs:113`). Separate direct generation/round-trip probes cover tuple newtypes—macro IDs, `QueueSequence`, `EventSinkId`, `Timestamp`, `Currency`, `ReplayDropReason`, `OrderedJsonString`, `OrderedJsonObject`, and `OrderedJsonArray`—and the ordered-JSON case includes nested arrays, insertion-ordered objects, and exact UTF-16 code units (`crates/pi-ai/src/ids.rs:6`, `crates/pi-agent-core/src/control.rs:19`, `crates/pi-agent-runtime-tokio/src/lib.rs:35`, `crates/pi-ai/src/ids.rs:133`, `crates/pi-ai/src/usage.rs:88`, `crates/pi-ai/src/handoff.rs:44`, `crates/pi-ai/src/json_compat.rs:24`, `crates/pi-ai/src/json_compat.rs:114`, `crates/pi-ai/src/json_compat.rs:227`). A second explicit matrix generates and round-trips every variant of the tuple-payload data enums: `Message::{User,Assistant,ToolResult}`, `AgentRecord::{Llm,Custom}`, `DiagnosticErrorCode::{String,Number}`, `ConstrainedSampling::{Disabled,Config}`, `OrderedJsonValue::{Absent,Null,Bool,Number,String,Array,Object}`, all four `ReplayTarget` variants, all three `OpaquePayload` variants, and all five `ReplayDataOperation` variants (`crates/pi-ai/src/messages.rs:32`, `crates/pi-agent-core/src/state.rs:62`, `crates/pi-ai/src/messages.rs:178`, `crates/pi-ai/src/messages.rs:334`, `crates/pi-ai/src/json_compat.rs:324`, `crates/pi-ai/src/replay.rs:179`, `crates/pi-ai/src/replay.rs:276`, `crates/pi-ai/src/streaming.rs:563`). It also covers request headers, API patches, and custom records. Swift `testOwnedValueGraphIsCompleteAndLossless` sends every root through generated constructors/methods or the test-only identity fixture and asserts exact canonical variant identity and payload fidelity, `serde_json::Value` equality, exact `RawValue` text, every map entry/order, exact tuple payloads/UTF-16 units, all terminal cases, committed records, direct-request fields, standalone assistant `AgentRecord`, direct `AgentState.transcript`, `AgentSnapshot.state`, all thirteen independently sentinelized replay-envelope roots, and every direct/nested replay event. The fixture only constructs/returns canonical types. A missing mapping blocks by returning to the canonical inline type design; the test may not substitute strings, duplicate records, a binding-only enum, or a binding-only envelope. |
+| 19 | Cancelling an exported Agent run-establishment future after actor acceptance but before `TokioAgentRun` handoff cancels and settles the otherwise unobservable run | Rust `cancelled_agent_establishment_after_acceptance_settles` lives in the `#[cfg(test)]` unit module beside `request_run` and `accept_run` (`crates/pi-agent-runtime-tokio/src/lib.rs:394`, `crates/pi-agent-runtime-tokio/src/lib.rs:697`). A test-only handoff gate signals only after `accepted_rx` has yielded `Ok(())` and then holds the establishment future immediately before `RunEstablishmentGuard::handoff`; the scripted core run remains pending until its shared token is cancelled. The test drops the still-pending establishment future, releases no consumer, and proves: the guard token became cancelled; an acknowledged Rust probe observed the terminal `AgentEvent::RunFinished { outcome: RunOutcome::Cancelled { .. } }`; `wait_for_idle()` completed; and the runtime supervisor's live-task lease count returned to its actor-only pre-run baseline. It then calls orderly `shutdown()`, awaits actor-done, and proves the last actor lease was released and the owner thread could tear down the runtime. Run this table for `prompt_text`, concrete `prompt_records`, `continue_run`, and `retry_last_turn`, with the state preconditioned for continue/retry; also run the `prompt_text_with_sink` case when that conditional surface is enabled. The generated fixture exposes only the same test gate/probe controls. Swift `testCancelledAgentEstablishmentAfterAcceptanceSettles` starts each generated run-establishment call in a `Task`, waits for the post-acceptance/pre-handoff signal, cancels the task, proves that no `TokioAgentRun` was returned, and then asserts the same cancellation settlement and actor-idle observations through generated fixture methods; after orderly generated `shutdown()`, it proves the actor lease was released and runtime teardown completed. The gate makes the race deterministic; a timeout, receiver-drop-only completion, or forced shutdown in place of cancellation settlement fails the test. |
 
-1. **Resolve the architecture gate before implementation.** Obtain an owner
-   ruling that either preserves R2 and accepts that the project is blocked, or
-   permits precisely enumerated adapter methods/types for streams, callbacks,
-   concrete generic instantiations, JSON/order-preserving values, trait-object
-   direction, 128-bit numerics, consuming methods, mixed record impls, and Tokio
-   runtime ownership. The ruling must also cover a first-class native
-   deferred-fetch-to-agent-resumption operation, methods defined in trait impls,
-   borrowed record/enum inputs, and owned Rust-class inputs. Also obtain
-   documentation answers for conditional attributes, multi-crate discovery,
-   and the intended Swift serialization discipline for
-   `#[export(single_threaded)]`. Acceptance: a written
-   ruling accounts for every requirement-level gap in section 5, and there are
-   no implicit envelope substitutions.
-   [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#single-threaded-mode]
+Acceptance test 18 also has a mandatory, independent `usize` error-payload
+gate. Rust test `control_error_queue_full_usize_payload_is_exact` constructs
+`ControlError::QueueFull` with zero, the current event-capacity value, and
+`usize::MAX`, and checks the exact stored values
+(`crates/pi-agent-core/src/control.rs:68`,
+`crates/pi-agent-core/src/control.rs:74`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:33`). The test-only generated fixture
+throws those same three canonical `ControlError` values. Swift
+`testControlErrorQueueFullCapacityIsExact` catches the generated error,
+pattern-matches `QueueFull`, and asserts each exact capacity value using the
+actual declaration generation produced; any narrowing, omission, string
+flattening, or lost payload fails the gate. The numeric quick-reference table
+does not list `usize`, and the isolated `usize` function-argument example does
+not establish error-variant fields. **UNRESOLVED: not answered by the
+documentation**. Pages checked: `types.md#quick-reference`,
+`types.md#primitives`, `errors.md#enum-errors`, and
+`errors.md#enums-with-payloads`.
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference]
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#primitives]
+[https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enum-errors]
+[https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enums-with-payloads]
 
-2. **One-crate leaf smoke test.** In an isolated implementation change, add the
-   documented dependency/build-script/staticlib setup and annotate only leaf
-   values such as `PromptImage`, `PkcePair`, `OAuthAuthorizationInput`, one
-   scalar constant, one fallible free function, and one error. The documented
-   setup uses the dependency, crate type, build generation, and `boltffi check`.
+The same test's generated-surface audit asserts that
+`DEFAULT_COMMAND_CAPACITY` and `DEFAULT_EVENT_CAPACITY` are absent from the
+production Swift/C/Rust glue, because phase 2 deliberately keeps both current
+`usize` constants unannotated (`crates/pi-agent-runtime-tokio/src/lib.rs:30`,
+`crates/pi-agent-runtime-tokio/src/lib.rs:33`). Rust tests may use those
+constants internally. The constants page does not establish `usize` constants.
+**UNRESOLVED: not answered by the documentation**. Pages checked:
+`constants.md#supported-values`, `types.md#quick-reference`, and
+`types.md#primitives`.
+[https://www.boltffi.dev/docs/constants.md | docs/boltffi-swift-bindings/docs-snapshot/constants.md#supported-values]
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference]
+[https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#primitives]
+
+Acceptance test 18 has this mandatory replay-envelope matrix; every numbered
+root is constructed both in the Rust test and in the test-only canonical-value
+fixture consumed by Swift:
+
+1. Direct `ModelRequest.context.messages` assistant replay
+   (`crates/pi-ai/src/runtime.rs:17`, `crates/pi-ai/src/messages.rs:473`,
+   `crates/pi-ai/src/messages.rs:36`, `crates/pi-ai/src/messages.rs:157`).
+2. Direct `AssistantEvent::Finished.message.replay`
+   (`crates/pi-ai/src/streaming.rs:521`,
+   `crates/pi-ai/src/messages.rs:157`).
+3. Direct `AssistantEvent::Failed.message.replay`
+   (`crates/pi-ai/src/streaming.rs:528`,
+   `crates/pi-ai/src/messages.rs:157`).
+4. Direct `AssistantEvent::Cancelled.message.replay`
+   (`crates/pi-ai/src/streaming.rs:534`,
+   `crates/pi-ai/src/messages.rs:157`).
+5. `AgentEvent::AssistantUpdate` carrying `Finished`, through its terminal
+   message replay
+   (`crates/pi-agent-core/src/events.rs:113`,
+   `crates/pi-ai/src/streaming.rs:521`,
+   `crates/pi-ai/src/messages.rs:157`).
+6. `AgentEvent::AssistantUpdate` carrying `Failed`, through its terminal
+   message replay
+   (`crates/pi-agent-core/src/events.rs:113`,
+   `crates/pi-ai/src/streaming.rs:528`,
+   `crates/pi-ai/src/messages.rs:157`).
+7. `AgentEvent::AssistantUpdate` carrying `Cancelled`, through its terminal
+   message replay
+   (`crates/pi-agent-core/src/events.rs:113`,
+   `crates/pi-ai/src/streaming.rs:534`,
+   `crates/pi-ai/src/messages.rs:157`).
+8. `AgentEvent::MessageCommitted` carrying
+   `AgentRecord::Llm(Message::Assistant(_))`
+   (`crates/pi-agent-core/src/events.rs:120`,
+   `crates/pi-agent-core/src/state.rs:64`,
+   `crates/pi-ai/src/messages.rs:36`, `crates/pi-ai/src/messages.rs:157`).
+9. Standalone assistant `AgentRecord` replay
+   (`crates/pi-agent-core/src/state.rs:64`,
+   `crates/pi-ai/src/messages.rs:36`, `crates/pi-ai/src/messages.rs:157`).
+10. Direct `AgentState.transcript` assistant replay
+    (`crates/pi-agent-core/src/state.rs:33`,
+    `crates/pi-agent-core/src/state.rs:64`,
+    `crates/pi-ai/src/messages.rs:36`, `crates/pi-ai/src/messages.rs:157`).
+11. `AgentSnapshot.state.transcript` assistant replay
+    (`crates/pi-agent-core/src/state.rs:184`,
+    `crates/pi-agent-core/src/state.rs:33`,
+    `crates/pi-agent-core/src/state.rs:64`,
+    `crates/pi-ai/src/messages.rs:36`, `crates/pi-ai/src/messages.rs:157`).
+12. `AgentSnapshot.streaming.replay`
+    (`crates/pi-agent-core/src/state.rs:188`,
+    `crates/pi-ai/src/streaming.rs:1697`).
+13. `AgentSnapshot.streaming.terminal_message.replay`
+    (`crates/pi-agent-core/src/state.rs:188`,
+    `crates/pi-ai/src/streaming.rs:1705`,
+    `crates/pi-ai/src/messages.rs:157`).
+
+For each root, the Rust test and Swift assertion use a unique root prefix in
+all `ReplayScope` strings and every item ID/kind/target identifier or index,
+plus different raw and JSON byte sequences. The envelope is nonempty and its
+ordered items collectively exercise all four `ReplayTarget` variants and all
+three `OpaquePayload` variants. The assertion compares schema version, all five
+scope fields, item count and order, and every item ID, ordinal, target, kind,
+applicability, completeness, and exact payload string/bytes
+(`crates/pi-ai/src/replay.rs:13`, `crates/pi-ai/src/replay.rs:88`,
+`crates/pi-ai/src/replay.rs:135`, `crates/pi-ai/src/replay.rs:179`,
+`crates/pi-ai/src/replay.rs:276`). A zero-item envelope fails immediately. The
+separate direct/nested `ReplayItemStarted` and `ReplayData` cases still exercise
+all four targets and all five operations with their own sentinels; they do not
+count as any numbered envelope root (`crates/pi-ai/src/streaming.rs:474`,
+`crates/pi-ai/src/streaming.rs:488`,
+`crates/pi-ai/src/streaming.rs:563`,
+`crates/pi-agent-core/src/events.rs:113`).
+
+Tests 1–12 are the adopted owner-review requirements; tests 13–16 close the
+direct model-stream R3 contract required by this revision; test 17 closes the
+production construction path; test 18 closes the transitive-value generation
+gates; and test 19 closes the accepted-Agent-run establishment cancellation
+race. Every acceptance test is semantic. Generated symbol presence alone is
+insufficient.
+
+## 10. Phased implementation plan
+
+No phase publishes a crate or changes the current UniFFI artifact. Failure at a
+phase gate stops expansion.
+
+1. **Canonical Rust changes.** Reshape `TokioAgentRun` with interior
+   synchronization, cached watch-style completion, `&self` pull/outcome,
+   `cancel`, `cancel_and_outcome`, EOF validation, and Rust-only raw receiver
+   access. Move run-token creation into `request_run` and add the armed
+   `RunEstablishmentGuard` from section 4.1: it owns unhanded observation and
+   completion receivers plus a shared-token clone, cancels and closes them on
+   every pre-handoff drop, and disarms only in the final non-awaiting
+   `TokioAgentRun` return step. Make sink-only observation optional. Rewrite
+   `AgentEventSink` to async-trait form without changing barrier ordering. Add
+   `TokioRuntimeOwner::new(&Models, &ToolRegistry)` and
+   `spawn_agent(AgentState)`; make the actor future capture a runtime lease and
+   make `shutdown()` await actor-done. Add `TokioAssistantStream`, the
+   runtime-owned `stream_model(ModelRequest)` producer, validated direct EOF,
+   cancellation, and `cancel_and_wait`. Add the concrete `Vec<AgentRecord>`
+   prompt path and the inherent canonical `Models::new()` constructor. Add
+   `NativeOpenAiHttpTransport`, `OpenAiModelsFactory`, its sanitized concrete
+   error, and `InMemoryCredentialStore::with_credential` so ordinary Rust and
+   Swift have one real provider/transport/auth construction path returning
+   canonical `Models`. Promote
+   `AgentEventEnvelope` into the canonical Tokio observation channel and sink
+   contract, allocating one envelope before fan-out. Put the malformed Agent
+   event stream test beside private `drive_run`; do not attempt to manufacture
+   that failure through `ScriptedRuntime`. Add the deterministic test-19 hook
+   that pauses the establishment future after actor acceptance and immediately
+   before guard handoff; its ordinary Rust test must drop that future and prove
+   terminal cancellation settlement, actor idleness, return of the live-task
+   lease count to the actor-only baseline, and release of the final actor lease
+   after orderly shutdown for prompt/continue/retry. Acceptance: ordinary Rust
+   tests for items 1–19, except generated-language halves, pass with no BoltFFI
+   dependency enabled. Phase 1 fails if an accepted run can outlive its dropped
+   establishment future unobserved. Keep `DEFAULT_COMMAND_CAPACITY` and
+   `DEFAULT_EVENT_CAPACITY` as their current canonical Rust-only `usize`
+   constants; this design does not select a fixed-width API change merely to
+   export them (`crates/pi-agent-runtime-tokio/src/lib.rs:30`,
+   `crates/pi-agent-runtime-tokio/src/lib.rs:33`).
+
+2. **Inline annotations and generation smoke tests.** Apply the documented
+   integration pieces to the canonical crates only: the normal and build
+   dependencies, `staticlib` crate type, `build.rs` generation call, and
+   `boltffi check` are the documented installation flow.
    [https://www.boltffi.dev/docs/installation.md | docs/boltffi-swift-bindings/docs-snapshot/installation.md#add-to-your-project]
    [https://www.boltffi.dev/docs/installation.md | docs/boltffi-swift-bindings/docs-snapshot/installation.md#create-buildrs]
-   Acceptance: `boltffi check`, `boltffi generate swift`, Rust tests, and a
-   Swift XCTest compile/run all pass with the feature both enabled and disabled;
-   the generated calls use typed records and Swift errors rather than JSON.
-
-3. **Identity and lossless value graph.** Resolve tuple-newtype behavior and the
-   undocumented `i128`/`u128` boundary before attempting `MoneyRate`, `Cost`,
-   usage totals, pricing, or session statistics; then map IDs, `ModelRef`,
-   timestamp, usage/cost, `PublicError`, replay, handoff, content, messages,
-   assistant events, and agent events from the leaves upward. The documented
-   custom-conversion mechanism applies to a whole owner-defined type only if the
-   owner permits the new conversion code that R2 currently forbids. It does not
-   resolve naked `i128`/`u128` arguments or returns; those methods remain gated
-   on a documented primitive mapping or an approved signature/wrapper change.
-   [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference]
-   [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#the-customfficonvertible-trait]
-   [https://www.boltffi.dev/docs/custom-types.md | docs/boltffi-swift-bindings/docs-snapshot/custom-types.md#representation-types]
-   Use payload-enum records and Swift `Data` for byte vectors, which are
-   documented mappings. [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data]
-   [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#bytes]
-   Acceptance: Swift-to-Rust-to-Swift round trips preserve every enum variant,
-   every ID, `OpaquePayload::Utf8`, `OpaquePayload::Bytes`,
-   `OpaquePayload::JsonBytes`, complete `ReplayEnvelope` ordering/applicability,
-   `DeferredHandle` provider data byte-for-byte or structurally exactly as its
-   native type requires, and the minimum/maximum supported signed and unsigned
-   128-bit fixture values without truncation.
-
-4. **Rust-owned classes and ordinary async calls.** Map `CancellationToken`,
-   `AgentControl`, `TokioAgentHandle`, `Models`, reducers, and in-memory session
-   classes only where signatures are already supported. Do not map a call that
-   accepts `ToolRegistry`, `Agent`, `CancellationToken`, or another Rust class by
-   value until the owned-class-input gap is resolved; likewise do not claim
-   `Models::default` until trait-implementation methods are resolved. Do not map
-   consuming builder transitions until the documentation gap has an approved resolution.
-   Map `Agent` mutable methods and `TokioAgentRun::next_event` only under the
-   documented `#[export(single_threaded)]` mode and an explicit Swift
-   serialization wrapper/test. Exported async methods become Swift async and
-   async `Result` becomes `async throws`.
-   [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#classes]
-   [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#methods-that-take-or-return-classes]
-   [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#static-methods]
-   [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#async-methods]
-   [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#single-threaded-mode]
-   [https://www.boltffi.dev/docs/async.md | docs/boltffi-swift-bindings/docs-snapshot/async.md#error-handling]
-   Acceptance: Swift constructs each mapped class, calls synchronous and async
-   methods, observes exact typed errors, cancels a run by `RunId`, and proves the
-   Tokio runtime is active for every Tokio-dependent call. A concurrency stress
-   test also proves that Swift serializes every call to each single-threaded
-   `Agent`/`TokioAgentRun` wrapper; no test treats `next_event` as an ordinary
-   thread-safe class method.
-
-5. **Host callback protocols.** Do not start until there is an approved solution
-   for explicit boxed futures and reverse/nested traits. Map `Tool` plus
-   `ToolUpdateSink` first; then `AgentEventSink`; then `SessionStorage` and
-   `SessionRepository`; only then auth, policy, catalog, provider, and middleware
-   callbacks. The documented target is an exported trait and actual async trait
-   methods implemented as Swift protocols.
+   [https://www.boltffi.dev/docs/installation.md | docs/boltffi-swift-bindings/docs-snapshot/installation.md#verify-installation]
+   Add the documented root `boltffi.toml` package/source-crate configuration.
+   [https://www.boltffi.dev/docs/configuration.md | docs/boltffi-swift-bindings/docs-snapshot/configuration.md#package-identity]
+   Apply `#[data]` to supported canonical named-field records and documented
+   unit/struct-style enum shapes, `#[error]` to supported canonical errors,
+   `#[export]` to canonical class impls, and `#[export]` plus
+   `#[async_trait]` to the conditional acknowledged sink. Do not apply
+   `#[data]` to a tuple-payload data enum until its separate generation probe
+   succeeds: the records documentation does not show tuple-variant syntax.
+   **UNRESOLVED: not answered by the documentation**. Pages checked:
+   `records.md#enums`, `records.md#enums-with-associated-data`, and
+   `types.md#records`.
+   [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#structs]
+   [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums]
+   [https://www.boltffi.dev/docs/records.md | docs/boltffi-swift-bindings/docs-snapshot/records.md#enums-with-associated-data]
+   [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#records]
+   [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#supported-error-types]
+   [https://www.boltffi.dev/docs/classes.md | docs/boltffi-swift-bindings/docs-snapshot/classes.md#defining-a-class]
    [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#traits]
    [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#async-methods]
-   Acceptance: a Swift tool receives the typed call context, sends a typed update,
-   returns a typed output or exact `ToolError`, respects cancellation, and its
-   completion acknowledgement orders later agent events; a Swift session backend
-   passes the backend-generic storage/recovery conformance suite.
 
-6. **Lossless `AgentEvent` and `AssistantEvent` streams.** Do not accept the
-   documented drop-on-full producer for these contracts. BoltFFI's documented
-   generated async stream consumes an `Arc<EventSubscription<T>>` and drops new
-   events for a full subscriber buffer.
-   [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#the-ffi_stream-attribute]
-   [https://www.boltffi.dev/docs/streaming.md | docs/boltffi-swift-bindings/docs-snapshot/streaming.md#buffer-capacity]
-   Acceptance: Swift `for await` integration preserves exact event order under a
-   deliberately slow consumer, delivers more events than configured capacity
-   with zero loss, preserves terminal values, propagates consumer cancellation,
-   and passes the repository's replay, agent-event ordering, and sink-barrier
-   conformance tests. If any event drops, this phase fails.
+   Feature gating is a separate generation experiment, not a documented
+   capability. Whether `cfg_attr`, optional BoltFFI/build dependencies, and
+   discovery of annotations across `pi-ai`, `pi-ai-openai`,
+   `pi-agent-core`, and `pi-agent-runtime-tokio` work is
+   **UNRESOLVED: not answered by the documentation**; the pages checked are
+   `installation.md#add-to-your-project`, `installation.md#create-buildrs`,
+   `getting-started.md#write-your-code`, and
+   `configuration.md#package-identity`.
+   [https://www.boltffi.dev/docs/installation.md | docs/boltffi-swift-bindings/docs-snapshot/installation.md#add-to-your-project]
+   [https://www.boltffi.dev/docs/installation.md | docs/boltffi-swift-bindings/docs-snapshot/installation.md#create-buildrs]
+   [https://www.boltffi.dev/docs/getting-started.md | docs/boltffi-swift-bindings/docs-snapshot/getting-started.md#write-your-code]
+   [https://www.boltffi.dev/docs/configuration.md | docs/boltffi-swift-bindings/docs-snapshot/configuration.md#package-identity]
+   This experiment must resolve or report those three questions before broad
+   annotation; no generated-package layout may be assumed from the snapshot.
+   Start with `Models`, `OpenAiModelsFactory`, `OpenAiModelsError`,
+   `ToolRegistry`, `AgentState`, one documented-shape error,
+   `TokioRuntimeOwner`, `PromptText`, reshaped `TokioAgentRun`, and
+   `TokioAssistantStream`. Generate and execute the production construction
+   chain from acceptance test 17 before any test-only factory. Add the
+   `boltffi-test-fixtures`-only malformed Agent and Assistant constructors and
+   the post-acceptance/pre-handoff Agent establishment gate/probe controls to
+   the test generation target, never the production target. Separately
+   generate `TokioAgentError` and compile a Swift
+   throwing/catching fixture that exercises both its tuple-payload `Agent`
+   variant and the nested `AgentError`; section 8.3 permits neither shape to be
+   assumed. Separately generate `AgentEvent`, `AssistantEvent`,
+   `RequestStartErrorKind` inside `RequestStartError`, `TokioAgentError`,
+   `AgentError`, and `ControlError`; compile Swift switches/catches for all six
+   `#[non_exhaustive]` occurrences because section 8.4 permits none to be
+   inferred from another. Independently generate
+   `ControlError::QueueFull { capacity: usize }` and run acceptance test 18's
+   generated Swift catch and exact-payload-fidelity cases before enabling any
+   method that can throw `ControlError`
+   (`crates/pi-agent-core/src/control.rs:68`,
+   `crates/pi-agent-core/src/control.rs:74`). The numeric quick-reference table
+   omits `usize`; the isolated `usize` function-argument example does not answer
+   error-payload support. **UNRESOLVED: not answered by the documentation**.
+   Pages checked: `types.md#quick-reference`, `types.md#primitives`, and
+   `errors.md#enums-with-payloads`.
+   [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference]
+   [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#primitives]
+   [https://www.boltffi.dev/docs/errors.md | docs/boltffi-swift-bindings/docs-snapshot/errors.md#enums-with-payloads]
+   Keep `DEFAULT_COMMAND_CAPACITY` and `DEFAULT_EVENT_CAPACITY` unannotated,
+   and make the generated-surface half of acceptance test 18 fail if either
+   name appears in production glue. Both are currently `usize`
+   (`crates/pi-agent-runtime-tokio/src/lib.rs:30`,
+   `crates/pi-agent-runtime-tokio/src/lib.rs:33`), and the documentation does
+   not establish `usize` constants. **UNRESOLVED: not answered by the
+   documentation**. Pages checked: `constants.md#supported-values`,
+   `types.md#quick-reference`, and `types.md#primitives`.
+   [https://www.boltffi.dev/docs/constants.md | docs/boltffi-swift-bindings/docs-snapshot/constants.md#supported-values]
+   [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#quick-reference]
+   [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#primitives]
+   Generate a minimal async sink separately: the sink
+   surface advances only if the owned-`CancellationToken` async-trait method is
+   proven. Separately generate and compile exhaustive Swift construction,
+   switching, and exact-payload round trips for `Message`, `AgentRecord`,
+   `DiagnosticErrorCode`, `ConstrainedSampling`, `OrderedJsonValue`,
+   `ReplayTarget`, `OpaquePayload`, and `ReplayDataOperation`; every variant of
+   every enum must pass before its enclosing request/event/snapshot surface
+   advances (`crates/pi-ai/src/messages.rs:32`,
+   `crates/pi-agent-core/src/state.rs:62`,
+   `crates/pi-ai/src/messages.rs:178`,
+   `crates/pi-ai/src/messages.rs:334`,
+   `crates/pi-ai/src/json_compat.rs:324`,
+   `crates/pi-ai/src/replay.rs:179`,
+   `crates/pi-ai/src/replay.rs:276`,
+   `crates/pi-ai/src/streaming.rs:563`). No binding-only replacement enum or
+   envelope is permitted.
 
-7. **Native assembly and core R1 flow.** Map `Models` construction through its
-   production provider registration, its `ModelRuntime` implementation into
-   `Agent::new`, `ToolRegistry`, the Tokio handle, run start/control/outcome,
-   snapshots, retry/continue, deferred fetch/cancel, the separately approved
-   deferred-to-agent resumption operation, and reset/shutdown. Acceptance:
-   a Swift integration test uses only the same typed items a Rust application
-   uses, makes one scripted or captured provider-independent two-turn run,
-   observes all assistant and agent events, persists/restores a snapshot, resumes
-   one deferred handle, and contains no binding-only command/event envelope.
+   The transitive-value gate is path-specific. Generate and compile Swift
+   access for these canonical roots before annotating any enclosing production
+   root as complete:
 
-8. **Extended control plane and session surface.** Map provider/model catalog,
-   auth/login, OAuth helpers, concrete API-family option graphs, middleware,
-   policy, replay reducers, and durable session values/traits. Documented
-   generic free-function/struct/trait blockers need an owner-approved concrete
-   strategy; generic inherent methods/constructors, generic enums, and generic
-   aliases remain documentation gaps. [https://www.boltffi.dev/docs/functions.md | docs/boltffi-swift-bindings/docs-snapshot/functions.md#limitations]
-   [https://www.boltffi.dev/docs/types.md | docs/boltffi-swift-bindings/docs-snapshot/types.md#whats-not-supported]
-   [https://www.boltffi.dev/docs/callbacks.md | docs/boltffi-swift-bindings/docs-snapshot/callbacks.md#limitations]
-   Acceptance: every `core` and `extended` inventory row has a generated symbol
-   test or a named, owner-approved deliberate gap; auth challenge/redirect,
-   catalog refresh, model options, session append/recovery, and callback ordering
-   have Swift integration tests.
+   - For `serde_json::Value`, cover `ToolCall.arguments` in a terminal
+     `AssistantEvent`, `AgentEvent::ToolExecutionStarted`, a committed
+     `AgentRecord`/`AgentSnapshot.state`, the independent
+     `AgentSnapshot.streaming.content` and `.terminal_message` paths, and
+     direct `ModelRequest.context`; cover `ToolSpec.parameters` through
+     `Context.tools`; cover
+     `DeferredHandle.data` through all three assistant terminal variants,
+     committed records/`AgentSnapshot.state`, the independent
+     `AgentSnapshot.streaming.deferred` and `.terminal_message` paths, and
+     later direct `ModelRequest.context`; and cover diagnostic details through
+     explicit `DiagnosticAdded`, all terminal messages, committed records/
+     `AgentSnapshot.state`, the independent
+     `AgentSnapshot.streaming.diagnostics` and `.terminal_message` paths, and
+     later direct requests.
+   - For `RawValue`, cover `AgentRecord::Custom`,
+     `ErasedApiOptionsPatch::value`, `ToolUpdate.details` in
+     `ToolExecutionUpdated`, `ToolOutput.details` in `ToolExecutionFinished`,
+     and `ToolResultMessage.details -> VersionedExtension.value` in
+     explicit `AgentEvent::MessageCommitted`, `AgentState`,
+     `AgentSnapshot.state`, and later direct `ModelRequest.context` values.
+   - For `BTreeMap`, cover `HeaderMapSpec`, diagnostic details, and
+     `GrammarVariants` inside a `ToolSpec` carried by direct
+     `ModelRequest.context`; cover diagnostic details in direct requests as
+     well as direct/nested events, records, `AgentSnapshot.state`, and the
+     independent `AgentSnapshot.streaming.diagnostics` and
+     `.terminal_message` paths.
+   - Generate the actual enum roots separately: standalone
+     `AssistantEvent::DiagnosticAdded`; standalone `Finished`, `Failed`, and
+     `Cancelled`; nested `AgentEvent::AssistantUpdate` values carrying each of
+     those four assistant cases; explicit assistant and tool-result
+     `AgentEvent::MessageCommitted` values; and `AgentEvent::ContextPrepared`
+     with an `OpaqueReplayDropped` change. Do not infer any of these paths from
+     a direct request or a transcript record.
+   - Generate and compile the complete replay-envelope matrix as thirteen
+     separately constructed canonical roots:
 
-9. **Apple packaging and migration decision.** Generate source during iteration,
-   then use Apple packaging to create the XCFramework/SwiftPM artifact; BoltFFI
-   documents source-only generation and Apple packaging as separate operations.
+     1. Direct `ModelRequest.context.messages` assistant replay
+        (`crates/pi-ai/src/runtime.rs:17`,
+        `crates/pi-ai/src/messages.rs:473`,
+        `crates/pi-ai/src/messages.rs:36`,
+        `crates/pi-ai/src/messages.rs:157`).
+     2. Direct `AssistantEvent::Finished.message.replay`
+        (`crates/pi-ai/src/streaming.rs:521`,
+        `crates/pi-ai/src/messages.rs:157`).
+     3. Direct `AssistantEvent::Failed.message.replay`
+        (`crates/pi-ai/src/streaming.rs:528`,
+        `crates/pi-ai/src/messages.rs:157`).
+     4. Direct `AssistantEvent::Cancelled.message.replay`
+        (`crates/pi-ai/src/streaming.rs:534`,
+        `crates/pi-ai/src/messages.rs:157`).
+     5. `AgentEvent::AssistantUpdate` carrying `Finished`, through its terminal
+        message replay
+        (`crates/pi-agent-core/src/events.rs:113`,
+        `crates/pi-ai/src/streaming.rs:521`,
+        `crates/pi-ai/src/messages.rs:157`).
+     6. `AgentEvent::AssistantUpdate` carrying `Failed`, through its terminal
+        message replay
+        (`crates/pi-agent-core/src/events.rs:113`,
+        `crates/pi-ai/src/streaming.rs:528`,
+        `crates/pi-ai/src/messages.rs:157`).
+     7. `AgentEvent::AssistantUpdate` carrying `Cancelled`, through its terminal
+        message replay
+        (`crates/pi-agent-core/src/events.rs:113`,
+        `crates/pi-ai/src/streaming.rs:534`,
+        `crates/pi-ai/src/messages.rs:157`).
+     8. `AgentEvent::MessageCommitted` carrying
+        `AgentRecord::Llm(Message::Assistant(_))`, through that assistant's
+        replay
+        (`crates/pi-agent-core/src/events.rs:120`,
+        `crates/pi-agent-core/src/state.rs:64`,
+        `crates/pi-ai/src/messages.rs:36`,
+        `crates/pi-ai/src/messages.rs:157`).
+     9. Standalone assistant `AgentRecord` replay
+        (`crates/pi-agent-core/src/state.rs:64`,
+        `crates/pi-ai/src/messages.rs:36`,
+        `crates/pi-ai/src/messages.rs:157`).
+     10. Direct `AgentState.transcript` assistant replay
+         (`crates/pi-agent-core/src/state.rs:33`,
+         `crates/pi-agent-core/src/state.rs:64`,
+         `crates/pi-ai/src/messages.rs:36`,
+         `crates/pi-ai/src/messages.rs:157`).
+     11. `AgentSnapshot.state.transcript` assistant replay
+         (`crates/pi-agent-core/src/state.rs:184`,
+         `crates/pi-agent-core/src/state.rs:33`,
+         `crates/pi-agent-core/src/state.rs:64`,
+         `crates/pi-ai/src/messages.rs:36`,
+         `crates/pi-ai/src/messages.rs:157`).
+     12. `AgentSnapshot.streaming.replay`
+         (`crates/pi-agent-core/src/state.rs:188`,
+         `crates/pi-ai/src/streaming.rs:1697`).
+     13. `AgentSnapshot.streaming.terminal_message.replay`
+         (`crates/pi-agent-core/src/state.rs:188`,
+         `crates/pi-ai/src/streaming.rs:1705`,
+         `crates/pi-ai/src/messages.rs:157`).
+
+     Give every root a distinct, nonempty `ReplayEnvelope` with the exact
+     canonical schema version, root-specific sentinels in all five
+     `ReplayScope` fields, ordered items, every item field, all four
+     `ReplayTarget` variants, and all three
+     `OpaquePayload` variants. Compile Swift construction/switching and compare
+     exact strings, IDs, indexes, raw bytes, JSON bytes, ordinals, kinds,
+     applicability, and completeness for each root independently
+     (`crates/pi-ai/src/replay.rs:13`,
+     `crates/pi-ai/src/replay.rs:88`,
+     `crates/pi-ai/src/replay.rs:135`,
+     `crates/pi-ai/src/replay.rs:179`,
+     `crates/pi-ai/src/replay.rs:276`). A root with zero items, shared sentinel
+     data, or coverage inferred from another root fails phase 2.
+   - Generate replay events as a separate direct/nested matrix: standalone
+     `AssistantEvent::ReplayItemStarted` for each of the four `ReplayTarget`
+     forms and standalone `AssistantEvent::ReplayData` for each of the five
+     `ReplayDataOperation` forms, plus a corresponding
+     `AgentEvent::AssistantUpdate` for every case. Use different sentinels for
+     direct and nested roots and assert exact Swift case/payload fidelity
+     (`crates/pi-ai/src/streaming.rs:474`,
+     `crates/pi-ai/src/streaming.rs:488`,
+     `crates/pi-ai/src/streaming.rs:563`,
+     `crates/pi-agent-core/src/events.rs:113`).
+   - Construct `AgentSnapshot.streaming` as
+     `Some(AssistantMessageSnapshot)` with deferred data, diagnostic number and
+     details, partial tool-call arguments, usage/cost, timestamp, and a
+     terminal message whose sentinel values differ from
+     `AgentSnapshot.state.transcript`. Populate `streaming.replay` and
+     `streaming.terminal_message.replay` as two distinct, nonempty
+     `ReplayEnvelope` values. Each envelope must use a separately identifiable
+     `ReplayScope`, preserve item order and every item field, and independently
+     contain all four `ReplayTarget` forms and all three
+     `OpaquePayload::{Utf8,Bytes,JsonBytes}` forms with distinct string, ID,
+     index, byte, and JSON-byte sentinels. Validate every active and nested
+     replay field after the generated Swift round trip
+     (`crates/pi-agent-core/src/state.rs:188`,
+     `crates/pi-ai/src/streaming.rs:1689`,
+     `crates/pi-ai/src/streaming.rs:1693`,
+     `crates/pi-ai/src/streaming.rs:1695`,
+     `crates/pi-ai/src/streaming.rs:1697`,
+     `crates/pi-ai/src/streaming.rs:1699`,
+     `crates/pi-ai/src/streaming.rs:1701`,
+     `crates/pi-ai/src/streaming.rs:1703`,
+     `crates/pi-ai/src/streaming.rs:1705`,
+     `crates/pi-ai/src/messages.rs:157`,
+     `crates/pi-ai/src/replay.rs:13`,
+     `crates/pi-ai/src/replay.rs:88`,
+     `crates/pi-ai/src/replay.rs:135`,
+     `crates/pi-ai/src/replay.rs:179`,
+     `crates/pi-ai/src/replay.rs:276`). An empty replay envelope is not a
+     fidelity test.
+   - Retain separate probes for `serde_json::Number`, `BTreeSet`,
+     `Arc<[T]>`, `IndexMap`, and `i128`. Replace the former tuple-ID-only probe
+     with independent generation and exact-fidelity probes for macro IDs,
+     `QueueSequence`, `EventSinkId`, `Timestamp`, `Currency`,
+     `ReplayDropReason`, `OrderedJsonString`, `OrderedJsonObject`, and
+     `OrderedJsonArray`. Exercise ordered JSON recursively with exact UTF-16
+     units, nested arrays, and insertion-ordered objects; success for an ID or
+     the outer sampling object cannot stand in for those inner tuple wrappers
+     (`crates/pi-ai/src/ids.rs:6`,
+     `crates/pi-agent-core/src/control.rs:19`,
+     `crates/pi-agent-runtime-tokio/src/lib.rs:35`,
+     `crates/pi-ai/src/ids.rs:133`, `crates/pi-ai/src/usage.rs:88`,
+     `crates/pi-ai/src/handoff.rs:44`,
+     `crates/pi-ai/src/json_compat.rs:24`,
+     `crates/pi-ai/src/json_compat.rs:114`,
+     `crates/pi-ai/src/json_compat.rs:227`).
+
+   Acceptance test 18 is the generated Swift and value-fidelity gate for this
+   matrix. No successful probe may be generalized to an untested root merely
+   because it contains the same leaf type. Acceptance: resolve or report the
+   `cfg_attr`, multi-crate discovery,
+   tuple-newtype, tuple-payload data-enum, tuple-payload error, nested
+   error-valued payload, `ControlError::QueueFull.capacity` `usize` fidelity,
+   the complete active/direct/nested replay graph, all six non-exhaustive enum
+   occurrences, owned callback argument, and transitive value gaps;
+   `boltffi check` and Swift generation pass with no facade or duplicate values.
+
+3. **Swift acceptance suite.** Create the test-only SwiftPM package and
+   implement all nineteen tests in section 9 against the generated module.
+   Acceptance: every test passes on a deliberately slow consumer and under
+   Swift task cancellation; generated-surface test 10 proves no authoritative
+   `EventSubscription` exists. Test 18 separately proves the exact generated
+   `ControlError::QueueFull.capacity` payload and confirms that the two
+   unannotated `usize` capacity constants are absent from production glue
+   (`crates/pi-agent-core/src/control.rs:74`,
+   `crates/pi-agent-runtime-tokio/src/lib.rs:30`,
+   `crates/pi-agent-runtime-tokio/src/lib.rs:33`). Test 19 is a separate
+   blocking phase-3 gate: the
+   Swift task is cancelled only after the actor-accepted signal and while the
+   establishment future is held before result handoff, and the generated test
+   must then prove cancellation settlement and actor idleness, followed by
+   actor/runtime-lease release on orderly shutdown. Receiver closure alone, a
+   timeout, or forced actor shutdown in place of cancellation settlement does
+   not satisfy that gate.
+
+4. **Separate callback-authoring milestones.** Add Swift-authored tools,
+   policies, storage backends, provider extensions, and other generic
+   capabilities only as their canonical Rust APIs acquire concrete,
+   exportable contracts. These do not block the initial Agent consumer path.
+
+5. **Apple packaging and migration decision.** Generate Swift source during
+   iteration, then use the documented Apple packaging flow for the XCFramework
+   and Swift package.
    [https://www.boltffi.dev/docs/packaging.md | docs/boltffi-swift-bindings/docs-snapshot/packaging.md#step-by-step-workflow]
-   Acceptance: a clean sample Swift package consumes the produced artifact on
-   every configured Apple slice, the BoltFFI and UniFFI module names coexist in
-   one application, ABI symbols do not collide, and replacement of `pi-ffi` is
-   considered only after all earlier acceptance tests and the four repository
-   commitment gates pass.
+   Acceptance: the new module works on every configured Apple slice, coexists
+   with `pi-ffi`, and is considered for replacement only after all semantic
+   tests and repository commitment gates pass.
