@@ -1,22 +1,33 @@
 use agentprism_ai::{
-    AssistantFinishReason, CancellationToken, ModelRef, RunId, SendBoxFuture, Timestamp, Usage,
-    UsageSource,
+    AssistantFinishReason, CancellationToken, ModelRef, RunId, SendBoxFuture, SendBoxStream,
+    Timestamp, ToolResultContent, Usage, UsageSource,
 };
 use agentprism_env::{
-    AgentFileSystem, AgentPath, ArtifactError, ArtifactRef, CanonicalPath, EditResult,
-    FileReadResult, FileSystemError, FileWriteResult, ProcessExitStatus, ReadLimits,
-    TemporaryArtifactRequest, TemporaryArtifactStore,
+    AgentFileSystem, AgentPath, ArtifactError, ArtifactRef, CanonicalPath, Clock, ClockError,
+    EditResult, FileReadResult, FileSystemError, FileWriteResult, ProcessCommand, ProcessError,
+    ProcessEvent, ProcessExitStatus, ProcessOutcome, ProcessSpawner, ProcessTermination,
+    ReadLimits, RunningProcess, TemporaryArtifactRequest, TemporaryArtifactStore,
+    TerminationPolicy,
 };
 use agentprism_harness::*;
 use agentprism_session::{AppendReceipt, CompactionReason, LaneName, Sequence, SessionId};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use bytes::Bytes;
 use futures_channel::oneshot;
 use futures_executor::block_on;
-use futures_util::future::{join, join3};
+use futures_util::{
+    StreamExt,
+    future::{join, join3},
+    stream,
+};
+use serde_json::json;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fs,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -110,6 +121,7 @@ fn mutation_queue_different_paths_concurrent() {
 #[derive(Default)]
 struct MemoryFileSystem {
     files: Mutex<BTreeMap<String, Vec<u8>>>,
+    aliases: Mutex<BTreeMap<String, String>>,
 }
 
 impl MemoryFileSystem {
@@ -119,7 +131,19 @@ impl MemoryFileSystem {
                 path.to_owned(),
                 content.as_bytes().to_vec(),
             )])),
+            aliases: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    fn with_bytes(path: &str, content: impl Into<Vec<u8>>) -> Self {
+        Self {
+            files: Mutex::new(BTreeMap::from([(path.to_owned(), content.into())])),
+            aliases: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn alias(&self, alias: &str, target: &str) {
+        lock(&self.aliases).insert(alias.to_owned(), target.to_owned());
     }
 }
 
@@ -128,8 +152,24 @@ impl AgentFileSystem for MemoryFileSystem {
         &self,
         path: &AgentPath,
     ) -> SendBoxFuture<'_, Result<CanonicalPath, FileSystemError>> {
-        let path = path.to_string();
-        Box::pin(async move { Ok(CanonicalPath::new(path)) })
+        let path = path.clone();
+        Box::pin(async move {
+            let source = path.to_string();
+            let canonical = lock(&self.aliases)
+                .get(&source)
+                .cloned()
+                .unwrap_or_else(|| source.clone());
+            if lock(&self.files).contains_key(&canonical)
+                || lock(&self.aliases).contains_key(&source)
+            {
+                Ok(CanonicalPath::new(canonical))
+            } else {
+                Err(FileSystemError::NotFound {
+                    path,
+                    message: "not found".into(),
+                })
+            }
+        })
     }
 
     fn read(
@@ -217,6 +257,421 @@ impl AgentFileSystem for MemoryFileSystem {
             })
         })
     }
+}
+
+fn tool_text(output: &agentprism_core::ToolOutput) -> String {
+    output
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            ToolResultContent::Text { text, .. } => Some(text.as_str()),
+            ToolResultContent::Image { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[derive(Default)]
+struct RecordingImageProcessor {
+    received: Mutex<Vec<(Vec<u8>, String, bool)>>,
+}
+
+impl ReadImageProcessor for RecordingImageProcessor {
+    fn process(
+        &self,
+        bytes: Bytes,
+        mime_type: &str,
+        auto_resize_images: bool,
+    ) -> SendBoxFuture<'_, Result<ProcessedReadImage, String>> {
+        let mime_type = mime_type.to_owned();
+        Box::pin(async move {
+            lock(&self.received).push((bytes.to_vec(), mime_type, auto_resize_images));
+            Ok(ProcessedReadImage {
+                data: "converted".into(),
+                mime_type: "image/png".into(),
+                hints: vec!["[Image converted from image/bmp to image/png.]".into()],
+            })
+        })
+    }
+}
+
+// Pi basis: packages/agent/test/harness/tools.test.ts (`read` describe block)
+// and packages/agent/src/harness/tools/read.ts.
+#[test]
+fn read_tool_offsets_limits_truncation_and_images_pi_exact() {
+    let lines = (1..=2_500)
+        .map(|line| format!("Line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let filesystem = MemoryFileSystem::with_file("/large.txt", &lines);
+    let ranged = block_on(read_tool(
+        &filesystem,
+        &AgentPath::new("/large.txt"),
+        ReadToolRequest {
+            offset: Some(41),
+            limit: Some(20),
+        },
+        ReadToolOptions::default(),
+        None,
+        CancellationToken::new(),
+    ))
+    .expect("ranged text read succeeds");
+    let ranged_text = tool_text(&ranged);
+    assert!(!ranged_text.contains("Line 40\n"));
+    assert!(ranged_text.contains("Line 41"));
+    assert!(ranged_text.contains("Line 60"));
+    assert!(!ranged_text.contains("Line 61"));
+    assert!(ranged_text.contains("[2440 more lines in file. Use offset=61 to continue.]"));
+
+    let truncated = block_on(read_tool(
+        &filesystem,
+        &AgentPath::new("/large.txt"),
+        ReadToolRequest::default(),
+        ReadToolOptions::default(),
+        None,
+        CancellationToken::new(),
+    ))
+    .expect("large text read succeeds");
+    assert!(
+        tool_text(&truncated)
+            .contains("[Showing lines 1-2000 of 2500. Use offset=2001 to continue.]")
+    );
+    let details: ReadToolDetails = serde_json::from_str(
+        truncated
+            .details
+            .as_deref()
+            .expect("truncated read carries details")
+            .get(),
+    )
+    .expect("read details decode");
+    assert_eq!(details.schema_version, READ_TOOL_DETAILS_SCHEMA_VERSION);
+    assert_eq!(details.truncation.truncated_by, Some(TruncatedBy::Lines));
+    assert_eq!(details.truncation.total_lines, 2_500);
+    assert_eq!(details.truncation.output_lines, 2_000);
+
+    let exact =
+        MemoryFileSystem::with_file("/exact.txt", &format!("{}\n", vec!["x"; 2_000].join("\n")));
+    let exact_result = block_on(read_tool(
+        &exact,
+        &AgentPath::new("/exact.txt"),
+        ReadToolRequest::default(),
+        ReadToolOptions::default(),
+        None,
+        CancellationToken::new(),
+    ))
+    .expect("trailing newline at the exact line limit is accepted");
+    assert!(exact_result.details.is_none());
+    assert!(!tool_text(&exact_result).contains("Use offset="));
+
+    let offset_error = block_on(read_tool(
+        &MemoryFileSystem::with_file("/short.txt", "one\ntwo\nthree"),
+        &AgentPath::new("/short.txt"),
+        ReadToolRequest {
+            offset: Some(100),
+            limit: None,
+        },
+        ReadToolOptions::default(),
+        None,
+        CancellationToken::new(),
+    ))
+    .expect_err("offset beyond the file is rejected");
+    assert!(
+        offset_error
+            .to_string()
+            .contains("Offset 100 is beyond end of file (3 lines total)")
+    );
+
+    let png = BASE64_STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAX+XDSwAAAABJRU5ErkJggg==")
+        .expect("PNG fixture decodes");
+    let image_filesystem = MemoryFileSystem::with_bytes("/image.txt", png.clone());
+    let image = block_on(read_tool(
+        &image_filesystem,
+        &AgentPath::new("/image.txt"),
+        ReadToolRequest::default(),
+        ReadToolOptions::default(),
+        None,
+        CancellationToken::new(),
+    ))
+    .expect("magic-detected PNG read succeeds");
+    assert!(tool_text(&image).contains("Read image file [image/png]"));
+    assert!(image.content.iter().any(|content| matches!(
+        content,
+        ToolResultContent::Image { data, mime_type, .. }
+            if data == &BASE64_STANDARD.encode(&png) && mime_type == "image/png"
+    )));
+
+    let mut bmp = vec![0_u8; 58];
+    bmp[0..2].copy_from_slice(b"BM");
+    let processor = RecordingImageProcessor::default();
+    let converted = block_on(read_tool(
+        &MemoryFileSystem::with_bytes("/image.bmp", bmp.clone()),
+        &AgentPath::new("/image.bmp"),
+        ReadToolRequest::default(),
+        ReadToolOptions {
+            auto_resize_images: false,
+            ..ReadToolOptions::default()
+        },
+        Some(&processor),
+        CancellationToken::new(),
+    ))
+    .expect("injected BMP conversion succeeds");
+    assert_eq!(
+        &*lock(&processor.received),
+        &[(bmp, "image/bmp".into(), false)]
+    );
+    assert!(tool_text(&converted).contains("[Image converted from image/bmp to image/png.]"));
+}
+
+struct BlockingWriteFileSystem {
+    inner: MemoryFileSystem,
+    first_started: Mutex<Option<oneshot::Sender<()>>>,
+    first_release: Mutex<Option<oneshot::Receiver<()>>>,
+    second_started: AtomicBool,
+}
+
+impl BlockingWriteFileSystem {
+    fn new() -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (started_sender, started_receiver) = oneshot::channel();
+        let (release_sender, release_receiver) = oneshot::channel();
+        (
+            Self {
+                inner: MemoryFileSystem::default(),
+                first_started: Mutex::new(Some(started_sender)),
+                first_release: Mutex::new(Some(release_receiver)),
+                second_started: AtomicBool::new(false),
+            },
+            started_receiver,
+            release_sender,
+        )
+    }
+}
+
+impl AgentFileSystem for BlockingWriteFileSystem {
+    fn canonicalize(
+        &self,
+        path: &AgentPath,
+    ) -> SendBoxFuture<'_, Result<CanonicalPath, FileSystemError>> {
+        self.inner.canonicalize(path)
+    }
+
+    fn read(
+        &self,
+        path: &AgentPath,
+        limits: ReadLimits,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<FileReadResult, FileSystemError>> {
+        self.inner.read(path, limits, cancellation)
+    }
+
+    fn write(
+        &self,
+        path: &AgentPath,
+        data: Bytes,
+        _cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<FileWriteResult, FileSystemError>> {
+        let path = path.clone();
+        Box::pin(async move {
+            if data == Bytes::from_static(b"first\n") {
+                if let Some(sender) = lock(&self.first_started).take() {
+                    let _ = sender.send(());
+                }
+                let receiver = lock(&self.first_release).take();
+                if let Some(receiver) = receiver {
+                    let _ = receiver.await;
+                }
+            } else if data == Bytes::from_static(b"second\n") {
+                self.second_started.store(true, Ordering::Release);
+            }
+            self.inner
+                .write(&path, data, CancellationToken::new())
+                .await
+        })
+    }
+
+    fn replace_exact(
+        &self,
+        path: &AgentPath,
+        expected: &str,
+        replacement: &str,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<EditResult, FileSystemError>> {
+        self.inner
+            .replace_exact(path, expected, replacement, cancellation)
+    }
+}
+
+// Pi basis: packages/agent/test/harness/tools.test.ts (`write` describe block)
+// and packages/agent/src/harness/tools/write.ts.
+#[test]
+fn write_tool_creates_content_and_holds_lock_until_settled_pi_exact() {
+    block_on(async {
+        let (filesystem, first_started, first_release) = BlockingWriteFileSystem::new();
+        let mutations = FileMutationQueue::new();
+        let cancellation = CancellationToken::new();
+        let path = AgentPath::new("/nested/dir/file.txt");
+        let first = write_tool(
+            &filesystem,
+            &mutations,
+            &path,
+            "first\n",
+            cancellation.clone(),
+        );
+        let second = write_tool(
+            &filesystem,
+            &mutations,
+            &path,
+            "second\n",
+            CancellationToken::new(),
+        );
+        let coordinator = async {
+            first_started.await.expect("first write begins");
+            cancellation.cancel();
+            assert!(!filesystem.second_started.load(Ordering::Acquire));
+            let _ = first_release.send(());
+        };
+        let (first_result, second_result, ()) = join3(first, second, coordinator).await;
+        assert!(matches!(
+            first_result,
+            Err(FileSystemError::Cancelled { .. })
+        ));
+        let second_result = second_result.expect("second write succeeds after first settles");
+        assert_eq!(
+            tool_text(&second_result),
+            "Successfully wrote 7 bytes to /nested/dir/file.txt"
+        );
+        assert_eq!(
+            lock(&filesystem.inner.files)["/nested/dir/file.txt"],
+            b"second\n"
+        );
+    });
+}
+
+struct BlockingEditFileSystem {
+    inner: MemoryFileSystem,
+    first_started: Mutex<Option<oneshot::Sender<()>>>,
+    first_release: Mutex<Option<oneshot::Receiver<()>>>,
+    second_started: AtomicBool,
+}
+
+impl BlockingEditFileSystem {
+    fn new() -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let inner = MemoryFileSystem::with_file("/target.txt", "alpha\nbeta\n");
+        inner.alias("/link.txt", "/target.txt");
+        let (started_sender, started_receiver) = oneshot::channel();
+        let (release_sender, release_receiver) = oneshot::channel();
+        (
+            Self {
+                inner,
+                first_started: Mutex::new(Some(started_sender)),
+                first_release: Mutex::new(Some(release_receiver)),
+                second_started: AtomicBool::new(false),
+            },
+            started_receiver,
+            release_sender,
+        )
+    }
+}
+
+impl AgentFileSystem for BlockingEditFileSystem {
+    fn canonicalize(
+        &self,
+        path: &AgentPath,
+    ) -> SendBoxFuture<'_, Result<CanonicalPath, FileSystemError>> {
+        self.inner.canonicalize(path)
+    }
+
+    fn read(
+        &self,
+        path: &AgentPath,
+        limits: ReadLimits,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<FileReadResult, FileSystemError>> {
+        self.inner.read(path, limits, cancellation)
+    }
+
+    fn write(
+        &self,
+        path: &AgentPath,
+        data: Bytes,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<FileWriteResult, FileSystemError>> {
+        self.inner.write(path, data, cancellation)
+    }
+
+    fn replace_exact(
+        &self,
+        path: &AgentPath,
+        expected: &str,
+        replacement: &str,
+        _cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<EditResult, FileSystemError>> {
+        let path = path.clone();
+        let expected = expected.to_owned();
+        let replacement = replacement.to_owned();
+        Box::pin(async move {
+            if replacement.contains("ALPHA") {
+                if let Some(sender) = lock(&self.first_started).take() {
+                    let _ = sender.send(());
+                }
+                let receiver = lock(&self.first_release).take();
+                if let Some(receiver) = receiver {
+                    let _ = receiver.await;
+                }
+            } else if replacement.contains("BETA") {
+                self.second_started.store(true, Ordering::Release);
+            }
+            self.inner
+                .replace_exact(&path, &expected, &replacement, CancellationToken::new())
+                .await
+        })
+    }
+}
+
+// Architecture v2 part 2 §7.11/§10.10; Pi basis:
+// packages/agent/test/harness/tools.test.ts (`keeps the mutation queue locked
+// until an aborted edit write settles` and canonical/symlink serialization).
+#[test]
+fn edit_tool_holds_canonical_lock_until_aborted_write_settles_pi_exact() {
+    block_on(async {
+        let (filesystem, first_started, first_release) = BlockingEditFileSystem::new();
+        let mutations = FileMutationQueue::new();
+        let cancellation = CancellationToken::new();
+        let link_path = AgentPath::new("/link.txt");
+        let target_path = AgentPath::new("/target.txt");
+        let first = edit_file_exact(
+            &filesystem,
+            &mutations,
+            &link_path,
+            "alpha",
+            "ALPHA",
+            cancellation.clone(),
+        );
+        let second = edit_file_exact(
+            &filesystem,
+            &mutations,
+            &target_path,
+            "beta",
+            "BETA",
+            CancellationToken::new(),
+        );
+        let coordinator = async {
+            first_started.await.expect("first edit write begins");
+            cancellation.cancel();
+            assert!(!filesystem.second_started.load(Ordering::Acquire));
+            let _ = first_release.send(());
+        };
+        let (first_result, second_result, ()) = join3(first, second, coordinator).await;
+        assert!(matches!(
+            first_result,
+            Err(FileSystemError::Cancelled { .. })
+        ));
+        second_result.expect("second edit starts only after the first write settles");
+        assert_eq!(
+            String::from_utf8(lock(&filesystem.inner.files)["/target.txt"].clone()).expect("UTF-8"),
+            "ALPHA\nBETA\n"
+        );
+    });
 }
 
 // Pi basis: packages/agent/src/harness/tools/edit-diff.ts (`getNotFoundError`).
@@ -325,6 +780,52 @@ fn edit_rejects_noop() {
     assert!(matches!(error, FileSystemError::NoOpReplacement { .. }));
 }
 
+// Pi basis: packages/agent/test/harness/tools.test.ts (`edit` describe block)
+// and packages/agent/src/harness/tools/edit.ts.
+#[test]
+fn edit_tool_disjoint_original_symlink_bom_crlf_and_overlap_pi_exact() {
+    let filesystem =
+        MemoryFileSystem::with_file("/target.txt", "\u{feff}alpha\r\nbeta\r\ngamma\r\ndelta\r\n");
+    filesystem.alias("/link.txt", "/target.txt");
+    let result = block_on(edit_file(
+        &filesystem,
+        &FileMutationQueue::new(),
+        &AgentPath::new("/link.txt"),
+        &[
+            EditReplacement::new("alpha\n", "ALPHA\n"),
+            EditReplacement::new("gamma\n", "GAMMA\n"),
+        ],
+        CancellationToken::new(),
+    ))
+    .expect("disjoint edits through a canonicalized alias succeed");
+    assert_eq!(result.diff.path, "/target.txt");
+    assert!(!result.diff.hunks.is_empty());
+    assert_eq!(
+        String::from_utf8(lock(&filesystem.files)["/target.txt"].clone()).expect("UTF-8"),
+        "\u{feff}ALPHA\r\nbeta\r\nGAMMA\r\ndelta\r\n"
+    );
+
+    let overlap = block_on(edit_file(
+        &filesystem,
+        &FileMutationQueue::new(),
+        &AgentPath::new("/target.txt"),
+        &[
+            EditReplacement::new("ALPHA\nbeta", "one"),
+            EditReplacement::new("beta\nGAMMA", "two"),
+        ],
+        CancellationToken::new(),
+    ))
+    .expect_err("overlapping regions matched against the original are rejected");
+    assert!(matches!(
+        overlap,
+        FileSystemError::Invalid { message, .. } if message.contains("overlap")
+    ));
+    assert_eq!(
+        String::from_utf8(lock(&filesystem.files)["/target.txt"].clone()).expect("UTF-8"),
+        "\u{feff}ALPHA\r\nbeta\r\nGAMMA\r\ndelta\r\n"
+    );
+}
+
 // Pi basis: packages/agent/src/harness/utils/truncate.ts and truncate.test.ts.
 #[test]
 fn truncate_never_splits_utf8() {
@@ -373,9 +874,259 @@ fn truncate_respects_line_limit() {
     assert_eq!(result.truncated_by, Some(TruncatedBy::Lines));
 }
 
+// Architecture v2 part 2 §7.10/§10.10; Pi basis:
+// packages/agent/test/harness/truncate.test.ts.
+#[test]
+fn truncate_head_tail_metadata_edge_cases_pi_exact() {
+    let limits = |max_bytes, strategy| TruncationLimits {
+        max_bytes,
+        max_lines: 10,
+        strategy,
+    };
+    let complete = truncate("line\nline\nline\n", limits(100, TruncationStrategy::Head));
+    assert_eq!(complete.total_lines, 3);
+    assert_eq!(complete.output_lines, 3);
+    assert!(!complete.truncated);
+
+    let oversized_head = truncate("éé\nabc", limits(3, TruncationStrategy::Head));
+    assert!(oversized_head.content.is_empty());
+    assert!(oversized_head.first_line_exceeds_limit);
+
+    let partial_tail = truncate("aé🙂b", limits(5, TruncationStrategy::Tail));
+    assert_eq!(partial_tail.content, "🙂b");
+    assert!(partial_tail.last_line_partial);
+
+    let dropped_tail = truncate("abc🙂", limits(3, TruncationStrategy::Tail));
+    assert!(dropped_tail.content.is_empty());
+    assert!(dropped_tail.last_line_partial);
+
+    let huge = format!("{}\n", "X".repeat(300_000));
+    let huge_tail = truncate(
+        &huge,
+        TruncationLimits {
+            max_bytes: 1_024,
+            max_lines: 100,
+            strategy: TruncationStrategy::Tail,
+        },
+    );
+    assert_eq!(huge_tail.content, "X".repeat(1_024));
+    assert_eq!(huge_tail.total_bytes, 300_001);
+    assert_eq!(huge_tail.output_bytes, 1_024);
+}
+
+// Architecture v2 part 2 §7.10/§10.10; Pi basis:
+// packages/agent/test/harness/truncate.test.ts deterministic fuzz corpus.
+#[test]
+fn truncate_tail_matches_utf8_suffix_across_deterministic_cases_pi_exact() {
+    let alphabet = [
+        'a', '\u{7f}', '\u{80}', 'é', '\u{7ff}', '\u{800}', '中', '🙂', '\u{e000}',
+    ];
+    let mut cases = vec![String::new()];
+    for _ in 0..3 {
+        let previous = cases.clone();
+        cases.extend(previous.iter().flat_map(|prefix| {
+            alphabet.iter().map(move |character| {
+                let mut value = prefix.clone();
+                value.push(*character);
+                value
+            })
+        }));
+    }
+
+    for input in cases {
+        for max_bytes in 0..=input.len().saturating_add(2) {
+            let result = truncate(
+                &input,
+                TruncationLimits {
+                    max_bytes,
+                    max_lines: 10,
+                    strategy: TruncationStrategy::Tail,
+                },
+            );
+            let minimum = input.len().saturating_sub(max_bytes);
+            let start = input
+                .char_indices()
+                .map(|(index, _)| index)
+                .find(|index| *index >= minimum)
+                .unwrap_or(input.len());
+            assert_eq!(result.content, input[start..]);
+            assert!(result.content.len() <= max_bytes);
+        }
+    }
+}
+
 #[derive(Default)]
 struct MemoryArtifacts {
     created: Mutex<Vec<(TemporaryArtifactRequest, Bytes)>>,
+}
+
+#[derive(Clone)]
+struct ProcessScript {
+    events: Vec<Result<ProcessEvent, ProcessError>>,
+    pending_after_events: bool,
+    termination: ProcessOutcome,
+}
+
+struct ScriptedProcess {
+    script: ProcessScript,
+}
+
+impl RunningProcess for ScriptedProcess {
+    fn events(&mut self) -> SendBoxStream<'_, Result<ProcessEvent, ProcessError>> {
+        let events = std::mem::take(&mut self.script.events);
+        if self.script.pending_after_events {
+            Box::pin(stream::iter(events).chain(stream::pending()))
+        } else {
+            Box::pin(stream::iter(events))
+        }
+    }
+
+    fn terminate(
+        &mut self,
+        _policy: TerminationPolicy,
+    ) -> SendBoxFuture<'_, Result<ProcessOutcome, ProcessError>> {
+        let outcome = self.script.termination.clone();
+        Box::pin(async move { Ok(outcome) })
+    }
+}
+
+#[derive(Default)]
+struct ScriptedProcessSpawner {
+    commands: Mutex<Vec<ProcessCommand>>,
+    scripts: Mutex<VecDeque<ProcessScript>>,
+}
+
+impl ScriptedProcessSpawner {
+    fn new(scripts: impl IntoIterator<Item = ProcessScript>) -> Self {
+        Self {
+            commands: Mutex::new(Vec::new()),
+            scripts: Mutex::new(scripts.into_iter().collect()),
+        }
+    }
+}
+
+impl ProcessSpawner for ScriptedProcessSpawner {
+    fn spawn(
+        &self,
+        command: ProcessCommand,
+        _cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<Box<dyn RunningProcess>, ProcessError>> {
+        Box::pin(async move {
+            lock(&self.commands).push(command);
+            let script = lock(&self.scripts)
+                .pop_front()
+                .expect("a process script is available");
+            Ok(Box::new(ScriptedProcess { script }) as Box<dyn RunningProcess>)
+        })
+    }
+}
+
+struct YieldOnceClock;
+
+impl Clock for YieldOnceClock {
+    fn now(&self) -> Timestamp {
+        Timestamp::from_unix_millis(0)
+    }
+
+    fn sleep(
+        &self,
+        _duration: Duration,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<(), ClockError>> {
+        let mut yielded = false;
+        Box::pin(futures_util::future::poll_fn(move |context| {
+            if cancellation.is_cancelled() {
+                return std::task::Poll::Ready(Err(ClockError::Cancelled));
+            }
+            if yielded {
+                std::task::Poll::Ready(Ok(()))
+            } else {
+                yielded = true;
+                context.waker().wake_by_ref();
+                std::task::Poll::Pending
+            }
+        }))
+    }
+}
+
+fn process_outcome(code: i32, success: bool, termination: ProcessTermination) -> ProcessOutcome {
+    ProcessOutcome {
+        status: ProcessExitStatus {
+            code: Some(code),
+            signal: None,
+            success,
+        },
+        termination,
+    }
+}
+
+#[derive(Debug)]
+struct BashTurnContext {
+    workspace: AgentPath,
+}
+
+struct AsyncBashPrepare {
+    expected_context: Arc<BashTurnContext>,
+    saw_signal: AtomicBool,
+}
+
+impl BashPrepare<BashTurnContext> for AsyncBashPrepare {
+    fn prepare<'a>(
+        &'a self,
+        execution: &'a mut BashExecutionRequest,
+        context: &'a BashTurnContext,
+        cancellation: &'a CancellationToken,
+    ) -> SendBoxFuture<'a, Result<(), BashPrepareError>> {
+        Box::pin(async move {
+            let mut yielded = false;
+            futures_util::future::poll_fn(move |task| {
+                if yielded {
+                    std::task::Poll::Ready(())
+                } else {
+                    yielded = true;
+                    task.waker().wake_by_ref();
+                    std::task::Poll::Pending
+                }
+            })
+            .await;
+
+            assert!(std::ptr::eq(context, self.expected_context.as_ref()));
+            assert!(!cancellation.is_cancelled());
+            self.saw_signal.store(true, Ordering::SeqCst);
+            assert_eq!(
+                execution.command, "prefix=ready\nprintf original",
+                "command prefix is applied before prepare"
+            );
+            execution
+                .command
+                .push_str("\nprintf \"$prefix:$INHERITED:$EXPLICIT:$PWD\"");
+            execution.current_dir = Some(context.workspace.clone());
+            execution.environment = BTreeMap::from([("EXPLICIT".into(), "explicit".into())]);
+            execution.inherit_environment = false;
+            Ok(())
+        })
+    }
+}
+
+struct CancellingBashPrepare {
+    signal: CancellationToken,
+    saw_shared_signal: AtomicBool,
+}
+
+impl BashPrepare<BashTurnContext> for CancellingBashPrepare {
+    fn prepare<'a>(
+        &'a self,
+        _execution: &'a mut BashExecutionRequest,
+        _context: &'a BashTurnContext,
+        cancellation: &'a CancellationToken,
+    ) -> SendBoxFuture<'a, Result<(), BashPrepareError>> {
+        Box::pin(async move {
+            self.signal.cancel();
+            self.saw_shared_signal
+                .store(cancellation.is_cancelled(), Ordering::SeqCst);
+            Ok(())
+        })
+    }
 }
 
 impl TemporaryArtifactStore for MemoryArtifacts {
@@ -440,6 +1191,273 @@ fn bash_truncated_output_has_full_artifact() {
         lock(&artifacts.created)[0].1,
         Bytes::from_static(output.as_bytes())
     );
+}
+
+/// Architecture v2 part 2 §7.11, §9.5, and §10.10; pinned Pi basis:
+/// `packages/agent/test/harness/tools.test.ts` (`supports command prefixes and
+/// prepare hook`) and `packages/agent/src/harness/tools/bash.ts`.
+#[test]
+fn bash_prepare_hook_receives_turn_context_signal_and_orders_mutations_pi_exact() {
+    let success = process_outcome(0, true, ProcessTermination::Exited);
+    let processes = ScriptedProcessSpawner::new([ProcessScript {
+        events: vec![
+            Ok(ProcessEvent::Stdout(Bytes::from_static(
+                b"ready::explicit:/workspace",
+            ))),
+            Ok(ProcessEvent::Exited(success.clone())),
+        ],
+        pending_after_events: false,
+        termination: success,
+    }]);
+    let context = Arc::new(BashTurnContext {
+        workspace: AgentPath::new("/workspace"),
+    });
+    let prepare = AsyncBashPrepare {
+        expected_context: Arc::clone(&context),
+        saw_signal: AtomicBool::new(false),
+    };
+    let mut request = BashExecutionRequest::new("printf original");
+    request.command_prefix = Some("prefix=ready".into());
+
+    let result = block_on(execute_bash_tool_with_prepare(
+        &processes,
+        &YieldOnceClock,
+        &MemoryArtifacts::default(),
+        &request,
+        context.as_ref(),
+        &prepare,
+        CancellationToken::new(),
+    ))
+    .expect("prepared command succeeds");
+
+    assert_eq!(result.result.output, "ready::explicit:/workspace");
+    assert!(prepare.saw_signal.load(Ordering::SeqCst));
+    let command = &lock(&processes.commands)[0];
+    assert_eq!(
+        command.arguments,
+        [
+            "-lc",
+            "prefix=ready\nprintf original\nprintf \"$prefix:$INHERITED:$EXPLICIT:$PWD\""
+        ]
+    );
+    assert_eq!(command.current_dir, Some(AgentPath::new("/workspace")));
+    assert_eq!(
+        command.environment,
+        BTreeMap::from([("EXPLICIT".into(), "explicit".into())])
+    );
+    assert!(!command.inherit_environment);
+}
+
+/// Architecture v2 part 2 §7.11, §9.5, and §10.10; pinned Pi basis:
+/// `packages/agent/test/harness/tools.test.ts` and the AbortSignal passed by
+/// `packages/agent/src/harness/tools/bash.ts`.
+#[test]
+fn bash_prepare_hook_observes_logical_cancellation_before_spawn_pi_exact() {
+    let processes = ScriptedProcessSpawner::default();
+    let context = BashTurnContext {
+        workspace: AgentPath::new("/workspace"),
+    };
+    let cancellation = CancellationToken::new();
+    let prepare = CancellingBashPrepare {
+        signal: cancellation.clone(),
+        saw_shared_signal: AtomicBool::new(false),
+    };
+    let error = block_on(execute_bash_tool_with_prepare(
+        &processes,
+        &YieldOnceClock,
+        &MemoryArtifacts::default(),
+        &BashExecutionRequest::new("must not spawn"),
+        &context,
+        &prepare,
+        cancellation,
+    ))
+    .expect_err("prepare-triggered cancellation prevents spawn");
+
+    assert!(prepare.saw_shared_signal.load(Ordering::SeqCst));
+    assert!(matches!(
+        error,
+        BashExecutionError::Process(ProcessError::Cancelled)
+    ));
+    assert!(lock(&processes.commands).is_empty());
+}
+
+// Pi basis: packages/agent/test/harness/tools.test.ts (`bash` describe block)
+// and packages/agent/src/harness/tools/bash.ts.
+#[test]
+fn bash_tool_combines_streams_and_reports_failures_pi_exact() {
+    let success = process_outcome(0, true, ProcessTermination::Exited);
+    let failure = process_outcome(7, false, ProcessTermination::Exited);
+    let processes = ScriptedProcessSpawner::new([
+        ProcessScript {
+            events: vec![
+                Ok(ProcessEvent::Stdout(Bytes::from_static(b"out"))),
+                Ok(ProcessEvent::Stderr(Bytes::from_static(b"err"))),
+                Ok(ProcessEvent::Exited(success.clone())),
+            ],
+            pending_after_events: false,
+            termination: success,
+        },
+        ProcessScript {
+            events: vec![
+                Ok(ProcessEvent::Stdout(Bytes::from_static(b"failed"))),
+                Ok(ProcessEvent::Exited(failure.clone())),
+            ],
+            pending_after_events: false,
+            termination: failure,
+        },
+    ]);
+    let artifacts = MemoryArtifacts::default();
+    let mut request = BashExecutionRequest::new("printf command");
+    request.command_prefix = Some("printf prefix".into());
+    request.current_dir = Some(AgentPath::new("/workspace"));
+    request.environment = BTreeMap::from([("EXPLICIT".into(), "yes".into())]);
+    request.inherit_environment = false;
+
+    let result = block_on(execute_bash_tool(
+        &processes,
+        &YieldOnceClock,
+        &artifacts,
+        &request,
+        CancellationToken::new(),
+    ))
+    .expect("successful scripted command completes");
+    assert_eq!(result.result.output, "outerr");
+    assert_eq!(
+        result.result.details.schema_version,
+        BASH_TOOL_DETAILS_SCHEMA_VERSION
+    );
+    let recorded = lock(&processes.commands)[0].clone();
+    assert_eq!(recorded.program, "bash");
+    assert_eq!(recorded.arguments, ["-lc", "printf prefix\nprintf command"]);
+    assert_eq!(recorded.current_dir, Some(AgentPath::new("/workspace")));
+    assert_eq!(recorded.environment, request.environment);
+    assert!(!recorded.inherit_environment);
+
+    let error = block_on(execute_bash_tool(
+        &processes,
+        &YieldOnceClock,
+        &artifacts,
+        &BashExecutionRequest::new("exit 7"),
+        CancellationToken::new(),
+    ))
+    .expect_err("nonzero status is a tool failure");
+    assert_eq!(error.to_string(), "failed\n\nCommand exited with code 7");
+}
+
+// Pi basis: packages/agent/test/harness/tools.test.ts (`reports nonzero exits
+// and timeouts`, `preserves truncated output when a command times out`, and
+// `reports the total size of an oversized final line`).
+#[test]
+fn bash_tool_timeout_preserves_truncated_output_and_long_line_size_pi_exact() {
+    let forced = process_outcome(143, false, ProcessTermination::Forced);
+    let many_lines = format!(
+        "{}\n",
+        (1..=DEFAULT_TOOL_MAX_LINES + 1)
+            .map(|line| format!("line-{line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let processes = ScriptedProcessSpawner::new([
+        ProcessScript {
+            events: vec![Ok(ProcessEvent::Stdout(Bytes::from(many_lines.clone())))],
+            pending_after_events: true,
+            termination: forced.clone(),
+        },
+        ProcessScript {
+            events: vec![Ok(ProcessEvent::Stdout(Bytes::from(vec![b'0'; 60_000])))],
+            pending_after_events: true,
+            termination: forced,
+        },
+    ]);
+    let artifacts = MemoryArtifacts::default();
+    let mut request = BashExecutionRequest::new("chatty");
+    request.timeout = Some(Duration::from_millis(50));
+    let error = block_on(execute_bash_tool(
+        &processes,
+        &YieldOnceClock,
+        &artifacts,
+        &request,
+        CancellationToken::new(),
+    ))
+    .expect_err("deadline is reported after output recovery");
+    let message = error.to_string();
+    assert!(message.contains("line-2001"));
+    assert!(message.contains("Full output: /artifacts/bash-1.log"));
+    assert!(message.contains("Command timed out after 0.05 seconds"));
+    assert_eq!(lock(&artifacts.created)[0].1, Bytes::from(many_lines));
+
+    let mut long_line_request = BashExecutionRequest::new("long-line");
+    long_line_request.timeout = Some(Duration::from_millis(50));
+    let long_line_error = block_on(execute_bash_tool(
+        &processes,
+        &YieldOnceClock,
+        &artifacts,
+        &long_line_request,
+        CancellationToken::new(),
+    ))
+    .expect_err("long line command times out after retaining its output");
+    assert!(
+        long_line_error
+            .to_string()
+            .contains("Showing last 50.0KB of line 1 (line is 58.6KB). Full output:")
+    );
+}
+
+#[derive(Default)]
+struct RecordingBashUpdates {
+    updates: Mutex<Vec<BashToolResult>>,
+}
+
+impl BashUpdateSink for RecordingBashUpdates {
+    fn update(&self, update: BashToolResult) {
+        lock(&self.updates).push(update);
+    }
+}
+
+// Architecture v2 part 2 §7.11/§10.10; Pi basis:
+// packages/agent/test/harness/tools.test.ts (`ignores output callbacks after
+// execution settles` and `coalesces updates and persists truncated full output`).
+#[test]
+fn bash_tool_updates_coalesce_and_stop_after_settlement_pi_exact() {
+    let success = process_outcome(0, true, ProcessTermination::Exited);
+    let mut events = (1..=3_000)
+        .map(|line| Ok(ProcessEvent::Stdout(Bytes::from(format!("line-{line}\n")))))
+        .collect::<Vec<_>>();
+    events.push(Ok(ProcessEvent::Exited(success.clone())));
+    events.push(Ok(ProcessEvent::Stdout(Bytes::from_static(b"late\n"))));
+    let processes = ScriptedProcessSpawner::new([ProcessScript {
+        events,
+        pending_after_events: false,
+        termination: success,
+    }]);
+    let artifacts = MemoryArtifacts::default();
+    let updates = RecordingBashUpdates::default();
+    let execution = block_on(execute_bash_tool_with_updates(
+        &processes,
+        &YieldOnceClock,
+        &artifacts,
+        &BashExecutionRequest::new("many-lines"),
+        Some(&updates),
+        CancellationToken::new(),
+    ))
+    .expect("scripted command succeeds");
+    let updates = lock(&updates.updates);
+    assert!(!updates.is_empty());
+    assert!(updates.len() < 25);
+    assert!(updates.iter().all(|update| !update.output.contains("late")));
+    let final_update = updates.last().expect("final update");
+    assert_eq!(final_update, &execution.result);
+    assert_eq!(final_update.truncation.total_lines, 3_000);
+    assert_eq!(final_update.truncation.output_lines, 2_000);
+    assert_eq!(
+        final_update.details.full_output_artifact,
+        Some(ArtifactRef {
+            path: CanonicalPath::new("/artifacts/bash-1.log")
+        })
+    );
+    let complete = &lock(&artifacts.created)[0].1;
+    assert!(complete.starts_with(b"line-1\nline-2\n"));
+    assert!(complete.ends_with(b"line-2999\nline-3000\n"));
 }
 
 // Pi basis: packages/agent/src/harness/skills.ts and skills.test.ts.
@@ -579,6 +1597,50 @@ fn skill_catalog_preserves_multi_root_order() {
     assert_eq!(names, ["beta", "zeta", "alpha", "gamma"]);
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TestSkillSource {
+    User,
+}
+
+// Pi basis: packages/agent/test/harness/skills.test.ts (`preserves source info
+// for sourced skills` and `attaches source info to diagnostics`).
+#[test]
+fn skill_catalog_preserves_opaque_source_on_skills_and_diagnostics_pi_exact() {
+    let temporary = tempfile::tempdir().expect("temporary sourced-skill fixture root");
+    let root = temporary.path().join("user");
+    fs::create_dir_all(root.join("example")).expect("valid skill directory");
+    fs::create_dir_all(root.join("broken")).expect("broken skill directory");
+    fs::write(
+        root.join("example/SKILL.md"),
+        "---\nname: example\ndescription: Example skill\n---\nUse this skill.",
+    )
+    .expect("valid sourced skill");
+    fs::write(
+        root.join("broken/SKILL.md"),
+        "---\nname: broken\n---\nMissing description.",
+    )
+    .expect("invalid sourced skill");
+
+    let discovered = discover_sourced_skills([SourcedSkillRoot {
+        path: root,
+        source: TestSkillSource::User,
+    }])
+    .expect("sourced discovery completes");
+    assert_eq!(discovered.skills.len(), 1);
+    assert_eq!(discovered.skills[0].skill.descriptor.name, "example");
+    assert_eq!(discovered.skills[0].source, TestSkillSource::User);
+    assert_eq!(discovered.diagnostics.len(), 1);
+    assert_eq!(
+        discovered.diagnostics[0].diagnostic.code,
+        SkillDiagnosticCode::InvalidMetadata
+    );
+    assert_eq!(
+        discovered.diagnostics[0].diagnostic.message,
+        "description is required"
+    );
+    assert_eq!(discovered.diagnostics[0].source, TestSkillSource::User);
+}
+
 // Pi basis: packages/agent/src/harness/skills.ts (`validateName`, `validateDescription`).
 #[test]
 fn skill_invalid_metadata_is_reported() {
@@ -695,6 +1757,197 @@ fn skill_resume_uses_recorded_digest() {
     ))
     .expect("explicit policy accepts changed content");
     assert_eq!(explicitly_changed.digest, changed.digest);
+}
+
+// Architecture v2 part 2 §7.9/§10.10; Pi basis:
+// packages/agent/test/harness/system-prompt.test.ts.
+#[test]
+fn system_prompt_formats_visible_skills_in_order_pi_exact() {
+    let skills = vec![
+        SkillDescriptor {
+            id: SkillId::new("visible"),
+            name: "visible".into(),
+            description: "Use <this> & that".into(),
+            location: "/skills/visible/SKILL.md".into(),
+            disable_model_invocation: false,
+        },
+        SkillDescriptor {
+            id: SkillId::new("hidden"),
+            name: "hidden".into(),
+            description: "Hidden".into(),
+            location: "/skills/hidden/SKILL.md".into(),
+            disable_model_invocation: true,
+        },
+        SkillDescriptor {
+            id: SkillId::new("second"),
+            name: "second".into(),
+            description: "Second skill".into(),
+            location: "/skills/second/SKILL.md".into(),
+            disable_model_invocation: false,
+        },
+    ];
+
+    assert_eq!(
+        format_skills_for_system_prompt(&skills),
+        concat!(
+            "The following skills provide specialized instructions for specific tasks.\n",
+            "Read the full skill file when the task matches its description.\n",
+            "When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\n",
+            "<available_skills>\n",
+            "  <skill>\n",
+            "    <name>visible</name>\n",
+            "    <description>Use &lt;this&gt; &amp; that</description>\n",
+            "    <location>/skills/visible/SKILL.md</location>\n",
+            "  </skill>\n",
+            "  <skill>\n",
+            "    <name>second</name>\n",
+            "    <description>Second skill</description>\n",
+            "    <location>/skills/second/SKILL.md</location>\n",
+            "  </skill>\n",
+            "</available_skills>"
+        )
+    );
+}
+
+// Architecture v2 part 2 §7.9/§10.10; Pi basis:
+// packages/agent/test/harness/system-prompt.test.ts.
+#[test]
+fn system_prompt_empty_when_no_skills_are_model_visible_pi_exact() {
+    let hidden = SkillDescriptor {
+        id: SkillId::new("hidden"),
+        name: "hidden".into(),
+        description: "Hidden".into(),
+        location: "/skills/hidden/SKILL.md".into(),
+        disable_model_invocation: true,
+    };
+    assert!(format_skills_for_system_prompt(&[hidden]).is_empty());
+}
+
+// Architecture v2 part 2 §7.9/§10.10; Pi basis:
+// packages/agent/test/harness/system-prompt.test.ts.
+#[test]
+fn system_prompt_escapes_every_model_visible_field_pi_exact() {
+    let skill = SkillDescriptor {
+        id: SkillId::new("escaped"),
+        name: "a&b".into(),
+        description: "Quote \"double\" and 'single'".into(),
+        location: "/skills/<bad>&\"quote\"/SKILL.md".into(),
+        disable_model_invocation: false,
+    };
+    assert!(format_skills_for_system_prompt(&[skill]).contains(
+        "<name>a&amp;b</name>\n    <description>Quote &quot;double&quot; and &apos;single&apos;</description>\n    <location>/skills/&lt;bad&gt;&amp;&quot;quote&quot;/SKILL.md</location>"
+    ));
+}
+
+// Architecture v2 part 2 §7.9/§10.10; Pi basis:
+// packages/agent/test/harness/prompt-templates.test.ts.
+#[test]
+fn prompt_template_discovers_markdown_nonrecursively_pi_exact() {
+    let temporary = tempfile::tempdir().expect("temporary prompt root");
+    let first = temporary.path().join("a");
+    let second = temporary.path().join("b");
+    fs::create_dir_all(first.join("nested")).expect("nested prompt directory");
+    fs::create_dir_all(&second).expect("second prompt directory");
+    fs::write(
+        first.join("one.md"),
+        "---\ndescription: One template\n---\nHello $1",
+    )
+    .expect("first prompt");
+    fs::write(first.join("nested/ignored.md"), "Ignored").expect("nested prompt");
+    fs::write(first.join("ignored.MD"), "Ignored uppercase extension")
+        .expect("uppercase prompt extension");
+    fs::write(first.join("ignored.txt"), "Ignored non-markdown file").expect("non-markdown prompt");
+    fs::write(second.join("two.md"), "First line description\nBody").expect("second prompt");
+    let missing = temporary.path().join("missing.md");
+
+    let registry = NativePromptTemplateRegistry::discover([&first, &second, &missing])
+        .expect("discover templates");
+    assert!(registry.diagnostics().is_empty());
+    let templates = registry.templates();
+    assert_eq!(
+        templates
+            .iter()
+            .map(|template| template.name.as_str())
+            .collect::<Vec<_>>(),
+        ["one", "two"]
+    );
+    assert_eq!(templates[0].description.as_deref(), Some("One template"));
+    assert_eq!(templates[0].content, "Hello $1");
+    assert_eq!(
+        templates[1].description.as_deref(),
+        Some("First line description")
+    );
+    assert_eq!(templates[1].content, "First line description\nBody");
+}
+
+// Architecture v2 part 2 §7.9/§10.10; Pi basis:
+// packages/agent/test/harness/prompt-templates.test.ts.
+#[test]
+fn prompt_template_preserves_source_and_diagnostic_provenance_pi_exact() {
+    let temporary = tempfile::tempdir().expect("temporary prompt root");
+    let valid = temporary.path().join("example.md");
+    let broken = temporary.path().join("broken.md");
+    fs::write(&valid, "---\ndescription: Example\n---\nExample body").expect("valid prompt");
+    fs::write(&broken, "---\ndescription: [unterminated\n---\nBody").expect("broken prompt");
+
+    let registry = NativePromptTemplateRegistry::discover_sourced([
+        PromptTemplateSource::new(&valid).with_source(json!({ "type": "project", "ordinal": 1 })),
+        PromptTemplateSource::new(&broken)
+            .with_source(json!({ "type": "user", "nested": { "trusted": false } })),
+    ])
+    .expect("discover sourced templates");
+    assert_eq!(registry.sourced_templates().len(), 1);
+    assert_eq!(
+        registry.sourced_templates()[0].prompt_template.name,
+        "example"
+    );
+    assert_eq!(
+        registry.sourced_templates()[0].source,
+        Some(json!({ "type": "project", "ordinal": 1 }))
+    );
+    assert_eq!(registry.diagnostics().len(), 1);
+    assert_eq!(registry.diagnostics()[0].path, broken);
+    assert_eq!(
+        registry.diagnostics()[0].source,
+        Some(json!({ "type": "user", "nested": { "trusted": false } }))
+    );
+    assert_eq!(
+        registry.diagnostics()[0].severity,
+        PromptTemplateDiagnosticSeverity::Warning
+    );
+    assert_eq!(
+        registry.diagnostics()[0].code,
+        PromptTemplateDiagnosticCode::ParseFailed
+    );
+    assert_eq!(
+        serde_json::to_value(&registry.diagnostics()[0]).expect("diagnostic serializes")["type"],
+        "warning"
+    );
+}
+
+// Architecture v2 part 2 §7.9/§10.10; Pi basis:
+// packages/agent/test/harness/prompt-templates.test.ts.
+#[test]
+fn prompt_template_loads_explicit_and_symlinked_files_pi_exact() {
+    let temporary = tempfile::tempdir().expect("temporary prompt root");
+    let target = temporary.path().join("target.md");
+    let link = temporary.path().join("link.md");
+    fs::write(&target, "---\ndescription: Target\n---\nTarget body").expect("target prompt");
+    #[cfg(unix)]
+    symlink(&target, &link).expect("prompt symlink");
+    #[cfg(not(unix))]
+    fs::copy(&target, &link).expect("prompt symlink fixture copy");
+
+    let registry = NativePromptTemplateRegistry::discover([&target, &link])
+        .expect("discover explicit templates");
+    assert_eq!(
+        registry
+            .templates()
+            .iter()
+            .map(|template| (template.name.as_str(), template.content.as_str()))
+            .collect::<Vec<_>>(),
+        [("target", "Target body"), ("link", "Target body")]
+    );
 }
 
 fn template_registry(content: &str) -> StaticPromptTemplateRegistry {

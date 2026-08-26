@@ -13,7 +13,7 @@ import tomllib
 from typing import Any
 
 
-VALID_STATUSES = {"semantic-parity", "deliberate-divergence", "planned"}
+VALID_STATUSES = {"semantic-parity", "deliberate-divergence"}
 UPSTREAM_TEST_RE = re.compile(r"^packages/(?:ai|agent)/test/.+\.test\.ts$")
 LISTED_RUST_TEST_RE = re.compile(r"^(.+): test$")
 SNAPSHOT_HEADER_RE = re.compile(
@@ -30,6 +30,9 @@ REQUIRED_ALLOWLIST_ROWS = {
     "implicit-async-executor-environment",
     "pi-v4-only-session-format",
     "top-level-harness-scaffold",
+}
+PERMITTED_OWNER_RULINGS = {
+    "provider-api-implementations.mdx#not-ported",
 }
 
 
@@ -165,15 +168,21 @@ def validate_mappings(
             if not nonempty_string(mapping.get("replacement")):
                 errors.append(f"{label} ({source}) deliberate-divergence lacks a replacement")
             allowlist_row = mapping.get("allowlist_row")
-            if allowlist_row not in REQUIRED_ALLOWLIST_ROWS:
+            owner_ruling = mapping.get("owner_ruling")
+            if allowlist_row in REQUIRED_ALLOWLIST_ROWS and owner_ruling is None:
+                allowlist_occurrences[allowlist_row].append(index)
+            elif allowlist_row is None and owner_ruling in PERMITTED_OWNER_RULINGS:
+                pass
+            elif allowlist_row is not None and owner_ruling is not None:
                 errors.append(
-                    f"{label} ({source}) is not tied to a §10.11 allowlist row: "
-                    f"{allowlist_row!r}"
+                    f"{label} ({source}) must cite either a §10.11 allowlist row "
+                    "or an owner ruling, not both"
                 )
             else:
-                allowlist_occurrences[allowlist_row].append(index)
-        elif status == "planned" and not nonempty_string(mapping.get("milestone")):
-            errors.append(f"{label} ({source}) planned mapping lacks a milestone")
+                errors.append(
+                    f"{label} ({source}) is tied to neither a §10.11 allowlist row "
+                    f"nor a permitted owner ruling: {allowlist_row!r}, {owner_ruling!r}"
+                )
 
         if isinstance(source, str) and UPSTREAM_TEST_RE.fullmatch(source):
             if source in upstream_by_source:
@@ -186,18 +195,8 @@ def validate_mappings(
         if not occurrences:
             errors.append(f"§10.11 allowlist row has no mapping: {row}")
 
-    raw_planned_tests = manifest.get("planned_test", [])
-    if not isinstance(raw_planned_tests, list):
-        errors.append("[[planned_test]] entries must be TOML tables")
-    else:
-        for index, planned in enumerate(raw_planned_tests, start=1):
-            label = f"planned_test #{index}"
-            if not isinstance(planned, dict):
-                errors.append(f"{label} is not a TOML table")
-                continue
-            for field in ("rust", "source", "milestone"):
-                if not nonempty_string(planned.get(field)):
-                    errors.append(f"{label} lacks a non-empty {field}")
+    if manifest.get("planned_test"):
+        errors.append("[[planned_test]] entries are forbidden after M9.2")
 
     return mappings, upstream_by_source
 

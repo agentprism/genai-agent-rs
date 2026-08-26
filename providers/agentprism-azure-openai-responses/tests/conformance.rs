@@ -382,10 +382,11 @@ fn azure_openai_base_url_ecmascript_trim_send_and_local() {
 struct CaptureAzureBodies {
     bodies: Arc<Mutex<Vec<Vec<u8>>>>,
     urls: Arc<Mutex<Vec<url::Url>>>,
+    headers: Arc<Mutex<Vec<http::HeaderMap>>>,
 }
 
 impl CaptureAzureBodies {
-    fn push(&self, url: url::Url, body: Vec<u8>) {
+    fn push(&self, url: url::Url, headers: http::HeaderMap, body: Vec<u8>) {
         self.bodies
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -394,6 +395,10 @@ impl CaptureAzureBodies {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(url);
+        self.headers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(headers);
     }
 
     fn last_model(&self) -> String {
@@ -418,6 +423,17 @@ impl CaptureAzureBodies {
             .find_map(|(name, value)| (name == "api-version").then(|| value.into_owned()))
             .expect("Azure api-version query parameter")
     }
+
+    fn last_user_agent(&self) -> String {
+        self.headers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .last()
+            .expect("Azure request headers")[http::header::USER_AGENT]
+            .to_str()
+            .expect("Azure User-Agent UTF-8")
+            .to_owned()
+    }
 }
 
 impl HttpTransport for CaptureAzureBodies {
@@ -426,7 +442,7 @@ impl HttpTransport for CaptureAzureBodies {
         request: HttpRequest,
         _cancellation: CancellationToken,
     ) -> SendBoxFuture<'_, Result<HttpResponse, TransportError>> {
-        self.push(request.url, request.body);
+        self.push(request.url, request.headers, request.body);
         Box::pin(async {
             Ok(HttpResponse::from_bytes(
                 400,
@@ -443,7 +459,7 @@ impl LocalHttpTransport for CaptureAzureBodies {
         request: HttpRequest,
         _cancellation: CancellationToken,
     ) -> LocalBoxFuture<'_, Result<LocalHttpResponse, TransportError>> {
-        self.push(request.url, request.body);
+        self.push(request.url, request.headers, request.body);
         Box::pin(async {
             Ok(LocalHttpResponse::from_bytes(
                 400,
@@ -630,4 +646,35 @@ fn azure_api_version_whitespace_truthiness_send_and_local() {
     let result = futures_executor::block_on(api.stream(local_request, CancellationToken::new()));
     assert!(result.is_err(), "capture response intentionally rejects");
     assert_eq!(local.last_api_version(), "   ");
+}
+
+#[test]
+fn azure_openai_user_agent_default_and_override_pi_exact() {
+    // Architecture v2 part 2 §3.2, §9.2, and §10.8; Pi basis:
+    // packages/ai/test/azure-openai-base-url.test.ts, "uses pi's
+    // User-Agent by default" and "lets explicit headers override".
+    let model = models().unwrap().remove(0);
+
+    let send = CaptureAzureBodies::default();
+    let api = agentprism_openai::azure_openai_responses_api(Arc::new(send.clone()));
+    let result = futures_executor::block_on(api.stream(
+        azure_request(model.clone(), "deployment"),
+        CancellationToken::new(),
+    ));
+    assert!(result.is_err(), "capture response intentionally rejects");
+    assert_eq!(
+        send.last_user_agent(),
+        agentprism_openai::openai_user_agent()
+    );
+
+    let mut request = local_azure_request(model, "deployment");
+    request.headers.insert(
+        http::header::USER_AGENT,
+        http::HeaderValue::from_static("custom-agent"),
+    );
+    let local = CaptureAzureBodies::default();
+    let api = agentprism_openai::local_azure_openai_responses_api(Rc::new(local.clone()));
+    let result = futures_executor::block_on(api.stream(request, CancellationToken::new()));
+    assert!(result.is_err(), "capture response intentionally rejects");
+    assert_eq!(local.last_user_agent(), "custom-agent");
 }

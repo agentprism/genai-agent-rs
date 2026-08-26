@@ -649,6 +649,7 @@ fn fetch_options() -> DeferredFetchOptions {
             max_retries: Some(4),
             timeout_ms: Some(100),
             session_id: Some("session-1".into()),
+            telemetry_context: Some(TelemetryContextHandle::new(String::from("fetch-trace"))),
             headers: header_spec(&[
                 ("x-request", Some("request")),
                 ("x-shared", Some("request")),
@@ -661,6 +662,7 @@ fn fetch_options() -> DeferredFetchOptions {
 fn cancel_options() -> DeferredCancelOptions {
     ApiRequestOptions {
         timeout_ms: Some(200),
+        telemetry_context: Some(TelemetryContextHandle::new(String::from("cancel-trace"))),
         headers: header_spec(&[("x-cancel", Some("yes"))]),
         ..ApiRequestOptions::default()
     }
@@ -733,6 +735,15 @@ fn assert_captured(captured: &[CapturedDeferredRequest]) {
         fetched.request_options.session_id.as_deref(),
         Some("session-1")
     );
+    assert_eq!(
+        fetched
+            .request_options
+            .telemetry_context
+            .as_ref()
+            .and_then(|context| context.downcast_ref::<String>())
+            .map(String::as_str),
+        Some("fetch-trace")
+    );
 
     let cancelled = &captured[1];
     assert_eq!(cancelled.operation, "cancel");
@@ -744,6 +755,15 @@ fn assert_captured(captured: &[CapturedDeferredRequest]) {
     assert_eq!(cancelled.headers["x-transformed"], "yes");
     assert_eq!(cancelled.api_key.as_deref(), Some("request-cancel-key"));
     assert_eq!(cancelled.timeout, Some(Duration::from_millis(200)));
+    assert_eq!(
+        cancelled
+            .request_options
+            .telemetry_context
+            .as_ref()
+            .and_then(|context| context.downcast_ref::<String>())
+            .map(String::as_str),
+        Some("cancel-trace")
+    );
 }
 
 #[test]

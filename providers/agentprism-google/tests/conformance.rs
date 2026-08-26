@@ -3049,6 +3049,61 @@ fn local_resolved_google_request(
     }
 }
 
+/// Architecture v2 part 2 §10.8 Google wire conformance; pinned Pi basis:
+/// `packages/ai/test/empty.test.ts` Google Generative AI matrix.
+#[test]
+fn google_empty_message_matrix_pi_exact() {
+    let (_, model, _, _) = parse_fixture("google-generative-ai", "text-only");
+    let cases = [
+        serde_json::json!({
+            "messages": [{"role": "user", "content": []}]
+        }),
+        serde_json::json!({
+            "messages": [{"role": "user", "content": ""}]
+        }),
+        serde_json::json!({
+            "messages": [{"role": "user", "content": "   "}]
+        }),
+        serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "First message"},
+                {
+                    "role": "assistant",
+                    "content": [],
+                    "provider": "google",
+                    "api": "google-generative-ai",
+                    "model": "gemini-test",
+                    "stopReason": "stop",
+                    "usage": {
+                        "input": 0,
+                        "output": 0,
+                        "cacheRead": 0,
+                        "cacheWrite": 0
+                    }
+                },
+                {"role": "user", "content": "Second message"}
+            ]
+        }),
+    ];
+    let capture = std::sync::Arc::new(CapturingTransport::default());
+    let registration = google_provider(capture.clone()).expect("capturing Google provider");
+    let api = &registration.apis[&agentprism_ai::ApiId::new(GoogleGenerativeAi::API_ID)];
+    for case in cases {
+        let context = parse_context(&case, &model);
+        futures_executor::block_on(api.stream(
+            resolved_google_request(
+                model.clone(),
+                context,
+                "https://generativelanguage.googleapis.com/v1beta",
+                GoogleGenerativeAi::API_ID,
+            ),
+            agentprism_ai::CancellationToken::new(),
+        ))
+        .expect("empty-message request is accepted");
+    }
+    assert_eq!(capture.requests.lock().expect("request lock").len(), 4);
+}
+
 /// Architecture v2 part 2 §9.2 and §10.7; pinned Pi basis:
 /// `google-generative-ai.ts:83-85`, which requires `options.apiKey` before
 /// constructing the SDK client regardless of custom request headers.

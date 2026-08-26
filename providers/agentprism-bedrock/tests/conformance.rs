@@ -823,6 +823,71 @@ fn bedrock_message_conversion_edge_cases_match_pi() {
     assert!(body.contains(r#""content":[{"text":"<empty>"}],"status":"success""#));
 }
 
+/// Architecture v2 part 2 §10.8 Bedrock wire conformance; pinned Pi basis:
+/// `packages/ai/test/empty.test.ts` Bedrock Converse matrix.
+#[test]
+fn bedrock_empty_message_matrix_pi_exact() {
+    let model = model("us.anthropic.claude-opus-4-8");
+    let options = BedrockOptions {
+        cache_retention: Some(CacheRetention::None),
+        ..Default::default()
+    };
+    for (id, content) in [
+        ("empty-array", Vec::new()),
+        (
+            "empty-string",
+            vec![ContentBlock::Text {
+                id: ContentBlockId::new("empty-string-text"),
+                text: String::new(),
+            }],
+        ),
+        (
+            "whitespace",
+            vec![ContentBlock::Text {
+                id: ContentBlockId::new("whitespace-text"),
+                text: "   ".into(),
+            }],
+        ),
+    ] {
+        let mut context = Context::new(None);
+        context.messages.push(Message::User(UserMessage {
+            id: MessageId::new(id),
+            content,
+            timestamp: Timestamp::default(),
+        }));
+        assert!(
+            encode_command(&model, &context, &options).contains(r#""text":"<empty>""#),
+            "{id}"
+        );
+    }
+
+    let mut context = Context::new(None);
+    context.messages.push(Message::User(UserMessage {
+        id: MessageId::new("first-user"),
+        content: vec![ContentBlock::Text {
+            id: ContentBlockId::new("first-user-text"),
+            text: "First message".into(),
+        }],
+        timestamp: Timestamp::default(),
+    }));
+    context.messages.push(Message::Assistant(decoded_text_turn(
+        &model,
+        "empty-assistant",
+        "",
+    )));
+    context.messages.push(Message::User(UserMessage {
+        id: MessageId::new("second-user"),
+        content: vec![ContentBlock::Text {
+            id: ContentBlockId::new("second-user-text"),
+            text: "Second message".into(),
+        }],
+        timestamp: Timestamp::default(),
+    }));
+    let body = encode_command(&model, &context, &options);
+    assert_eq!(body.matches(r#""role":"user""#).count(), 2);
+    assert!(!body.contains(r#""role":"assistant""#));
+}
+
 /// Architecture v2 part 2 §3 and §10.8; pinned Pi basis:
 /// `bedrock-converse-stream.ts:891-913,979-990`. Pi's blank checks use
 /// ECMAScript `String.prototype.trim()`: U+FEFF is whitespace and U+0085 is

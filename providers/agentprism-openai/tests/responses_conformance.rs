@@ -82,6 +82,166 @@ fn wire_openai_responses_pi_exact() {
     );
 }
 
+/// Architecture v2 part 2 §3.2 and §10.8; pinned Pi basis:
+/// `packages/ai/test/cache-retention.test.ts`, OpenAI Responses scenarios.
+#[test]
+fn openai_responses_cache_retention_policy_matrix_pi_exact() {
+    let mut model = responses_model("openai", "openai-responses", "gpt-5.4-mini");
+    model.common.base_url = Url::parse("https://my-proxy.example.com/v1").expect("proxy base URL");
+    let context = user_context(Some("system"));
+
+    let encode = |model: &ModelDescriptor, options: OpenAiResponsesOptions| {
+        let typed = typed_responses(model);
+        let compat = OpenAiResponses::resolve_compat(&typed.common.base_url, &typed.config.compat)
+            .expect("Responses compatibility");
+        serde_json::from_slice::<Value>(&encode_responses(&typed, &compat, &context, &options))
+            .expect("Responses cache wire JSON")
+    };
+
+    let short = encode(
+        &model,
+        OpenAiResponsesOptions {
+            cache_retention: CacheRetention::Short,
+            session_id: Some("session-short".into()),
+            ..default_responses_options()
+        },
+    );
+    assert_eq!(short["prompt_cache_key"], "session-short");
+    assert!(short.get("prompt_cache_retention").is_none());
+
+    let long = encode(
+        &model,
+        OpenAiResponsesOptions {
+            cache_retention: CacheRetention::Long,
+            session_id: Some("session-long".into()),
+            ..default_responses_options()
+        },
+    );
+    assert_eq!(long["prompt_cache_key"], "session-long");
+    assert_eq!(long["prompt_cache_retention"], "24h");
+
+    let ApiModelConfig::OpenAiResponses(config) = &mut model.api else {
+        unreachable!()
+    };
+    config.compat.supports_long_cache_retention = Some(false);
+    let unsupported = encode(
+        &model,
+        OpenAiResponsesOptions {
+            cache_retention: CacheRetention::Long,
+            session_id: Some("session-unsupported".into()),
+            ..default_responses_options()
+        },
+    );
+    assert!(unsupported.get("prompt_cache_retention").is_none());
+
+    let ApiModelConfig::OpenAiResponses(config) = &mut model.api else {
+        unreachable!()
+    };
+    config.compat.supports_explicit_prompt_cache_mode = Some(true);
+    let none_explicit = encode(
+        &model,
+        OpenAiResponsesOptions {
+            cache_retention: CacheRetention::None,
+            session_id: Some("session-none".into()),
+            ..default_responses_options()
+        },
+    );
+    assert!(none_explicit.get("prompt_cache_key").is_none());
+    assert!(none_explicit.get("prompt_cache_retention").is_none());
+    assert_eq!(
+        none_explicit["prompt_cache_options"],
+        serde_json::json!({"mode":"explicit"})
+    );
+
+    let ApiModelConfig::OpenAiResponses(config) = &mut model.api else {
+        unreachable!()
+    };
+    config.compat.supports_explicit_prompt_cache_mode = Some(false);
+    let none_rejected = encode(
+        &model,
+        OpenAiResponsesOptions {
+            cache_retention: CacheRetention::None,
+            session_id: Some("session-none".into()),
+            ..default_responses_options()
+        },
+    );
+    assert!(none_rejected.get("prompt_cache_options").is_none());
+}
+
+/// Architecture v2 part 2 §3.2 and §10.8; pinned Pi basis:
+/// `packages/ai/test/empty.test.ts`, OpenAI Responses scenarios.
+#[test]
+fn openai_responses_empty_message_matrix_pi_exact() {
+    let model = responses_model("openai", "openai-responses", "gpt-5.4-mini");
+    let typed = typed_responses(&model);
+    let compat = OpenAiResponses::resolve_compat(&typed.common.base_url, &typed.config.compat)
+        .expect("Responses compatibility");
+    for content in [
+        Vec::new(),
+        vec![ContentBlock::Text {
+            id: ContentBlockId::new("empty-text"),
+            text: String::new(),
+        }],
+        vec![ContentBlock::Text {
+            id: ContentBlockId::new("whitespace-text"),
+            text: "   \n\t  ".into(),
+        }],
+    ] {
+        let mut context = user_context(None);
+        let Message::User(user) = &mut context.messages[0] else {
+            unreachable!()
+        };
+        user.content = content;
+        let wire: Value = serde_json::from_slice(&encode_responses(
+            &typed,
+            &compat,
+            &context,
+            &default_responses_options(),
+        ))
+        .expect("empty-message Responses wire");
+        assert_eq!(wire["model"], "gpt-5.4-mini");
+        assert!(wire["input"].is_array());
+    }
+
+    let mut context = user_context(None);
+    let mut empty_assistant =
+        assistant_tool_message("openai", "openai-responses", "gpt-5.4-mini", "call-empty");
+    empty_assistant.content.clear();
+    empty_assistant.finish.reason = AssistantFinishReason::Stop;
+    context.messages.push(Message::Assistant(empty_assistant));
+    context.messages.push(Message::User(UserMessage {
+        id: MessageId::new("user-2"),
+        content: vec![ContentBlock::Text {
+            id: ContentBlockId::new("user-text-2"),
+            text: "Please respond this time.".into(),
+        }],
+        timestamp: Timestamp::from_unix_millis(2),
+    }));
+    let wire: Value = serde_json::from_slice(&encode_responses(
+        &typed,
+        &compat,
+        &context,
+        &default_responses_options(),
+    ))
+    .expect("empty-assistant Responses wire");
+    assert_eq!(
+        wire["input"]
+            .as_array()
+            .expect("Responses input")
+            .iter()
+            .filter(|item| item["role"] == "user")
+            .count(),
+        2
+    );
+    assert!(
+        wire["input"]
+            .as_array()
+            .expect("Responses input")
+            .iter()
+            .all(|item| item["role"] != "assistant")
+    );
+}
+
 /// Architecture v2 part 2 §10.8; pinned Pi basis:
 /// `packages/ai/src/api/azure-openai-responses.ts:buildParams`.
 #[test]
@@ -136,21 +296,118 @@ fn wire_azure_openai_responses_pi_exact() {
     );
 }
 
+/// Architecture v2 part 2 §3.6 and §10.8; pinned Pi basis:
+/// `packages/ai/test/azure-openai-base-url.test.ts`, prompt-cache clamp,
+/// disabled response storage, and `supportsStrictMode: false` scenarios.
+#[test]
+fn azure_openai_payload_storage_strict_and_cache_key_pi_exact() {
+    let shared_model = responses_model("azure-openai-responses", "openai-responses", "gpt-4o-mini");
+    let mut shared = typed_responses(&shared_model);
+    shared.config.compat.supports_strict_mode = Some(false);
+    let custom = AzureOpenAiResponsesModelConfig {
+        responses: shared.config.clone(),
+    };
+    let typed = TypedModelDescriptor::<AzureOpenAiResponses> {
+        common: shared.common,
+        config: CustomApiModelConfig {
+            api: ApiId::new("azure-openai-responses"),
+            schema_version: 1,
+            value: RawValue::from_string(serde_json::to_string(&custom).unwrap()).unwrap(),
+        },
+        extensions: shared.extensions,
+    };
+    let compat =
+        AzureOpenAiResponses::resolve_compat(&typed.common.base_url, &custom.responses.compat)
+            .unwrap();
+    let mut context = user_context(None);
+    context.tools.push(ToolSpec {
+        schema_version: 1,
+        name: "preferred".into(),
+        description: "Preferred constrained tool".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {"value": {"type": "string"}}
+        }),
+        constrained_sampling: Some(ConstrainedSampling::Config(
+            ConstrainedSamplingConfig::JsonSchema {
+                strict: JsonSchemaStrictMode::Prefer,
+            },
+        )),
+    });
+    let wire = AzureOpenAiResponses::encode(
+        EncodeContext {
+            model: &typed,
+            context: &context,
+            compat: &compat,
+            effective_base_url: &typed.common.base_url,
+        },
+        &AzureOpenAiResponsesOptions {
+            responses: OpenAiResponsesOptions {
+                max_output_tokens: None,
+                temperature: None,
+                sampling: OrderedJsonObject::new(),
+                reasoning_effort: None,
+                reasoning_summary: None,
+                service_tier: None,
+                tool_choice: None,
+                cache_retention: CacheRetention::Short,
+                session_id: Some("x".repeat(67)),
+            },
+            azure_base_url: None,
+            azure_resource_name: None,
+            deployment_name: "gpt-4o-mini".into(),
+            api_version: "v1".into(),
+        },
+    )
+    .unwrap();
+    let body: Value = serde_json::from_slice(
+        &OrderedJsonWriter::to_vec(&wire.into()).expect("Azure ordered wire"),
+    )
+    .expect("Azure request JSON");
+    assert_eq!(body["prompt_cache_key"], "x".repeat(64));
+    assert_eq!(body["store"], false);
+    assert!(body["tools"][0].get("strict").is_none());
+}
+
 #[test]
 fn azure_openai_base_url_normalization_pi_exact() {
     // Pi basis: packages/ai/test/azure-openai-base-url.test.ts.
     for (source, expected) in [
         (
-            "https://a.cognitiveservices.azure.com",
-            "https://a.cognitiveservices.azure.com/openai/v1",
+            "https://marc-quicktests-resource.cognitiveservices.azure.com",
+            "https://marc-quicktests-resource.cognitiveservices.azure.com/openai/v1",
         ),
         (
-            "https://a.ai.azure.com/openai/v1/responses",
-            "https://a.ai.azure.com/openai/v1",
+            "https://marc-quicktests-resource.ai.azure.com",
+            "https://marc-quicktests-resource.ai.azure.com/openai/v1",
         ),
         (
-            "https://proxy.example/v1?custom=true",
-            "https://proxy.example/v1?custom=true",
+            "https://my-resource.openai.azure.com",
+            "https://my-resource.openai.azure.com/openai/v1",
+        ),
+        (
+            "https://my-resource.cognitiveservices.azure.com/openai",
+            "https://my-resource.cognitiveservices.azure.com/openai/v1",
+        ),
+        (
+            "https://my-resource.cognitiveservices.azure.com/openai/v1",
+            "https://my-resource.cognitiveservices.azure.com/openai/v1",
+        ),
+        (
+            "https://my-resource.services.ai.azure.com/openai/v1/responses",
+            "https://my-resource.services.ai.azure.com/openai/v1",
+        ),
+        (
+            "https://my-proxy.example.com/v1",
+            "https://my-proxy.example.com/v1",
+        ),
+        (
+            "https://my-resource.openai.azure.com/openai?api-version=2024-12-01",
+            "https://my-resource.openai.azure.com/openai/v1",
+        ),
+        (
+            "https://my-proxy.example.com/v1?custom=true",
+            "https://my-proxy.example.com/v1?custom=true",
         ),
     ] {
         assert_eq!(
@@ -2057,6 +2314,86 @@ fn responses_deferred_tools_fall_back_to_tool_search() {
     assert_eq!(result["call_id"], search["call_id"]);
     assert_eq!(result["tools"][0]["name"], "late_tool");
     assert_eq!(result["tools"][0]["defer_loading"], true);
+}
+
+/// Architecture v2 part 2 §3.5/§10.8; pinned Pi basis:
+/// `packages/ai/test/deferred-tools.test.ts` normal-list, missing-definition,
+/// and prior-use scenarios.
+#[test]
+fn responses_deferred_tools_disabled_and_history_rules_match_pi() {
+    let mut model = responses_model("openai-proxy", "openai-responses", "gpt-5.4");
+    let ApiModelConfig::OpenAiResponses(config) = &mut model.api else {
+        unreachable!()
+    };
+    config.compat.supports_additional_tools = Some(false);
+    config.compat.supports_tool_search = Some(false);
+    let typed = typed_responses(&model);
+    let compat = OpenAiResponses::resolve_compat(&model.common.base_url, &typed.config.compat)
+        .expect("compat");
+    let context = deferred_tools_context();
+    let ordinary: Value = serde_json::from_slice(&encode_responses(
+        &typed,
+        &compat,
+        &context,
+        &default_responses_options(),
+    ))
+    .expect("ordinary tools wire");
+    assert_eq!(ordinary["tools"].as_array().unwrap().len(), 2);
+    assert!(ordinary["input"].as_array().unwrap().iter().all(|item| {
+        item["type"] != "additional_tools"
+            && item["type"] != "tool_search_call"
+            && item["type"] != "tool_search_output"
+    }));
+
+    let ApiModelConfig::OpenAiResponses(config) = &mut model.api else {
+        unreachable!()
+    };
+    config.compat.supports_additional_tools = Some(true);
+    let typed = typed_responses(&model);
+    let compat = OpenAiResponses::resolve_compat(&model.common.base_url, &typed.config.compat)
+        .expect("additional-tools compat");
+
+    let mut missing = context.clone();
+    missing.tools.retain(|tool| tool.name != "late_tool");
+    let missing_wire: Value = serde_json::from_slice(&encode_responses(
+        &typed,
+        &compat,
+        &missing,
+        &default_responses_options(),
+    ))
+    .expect("missing definition wire");
+    assert_eq!(missing_wire["tools"].as_array().unwrap().len(), 1);
+    assert!(
+        missing_wire["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["type"] != "additional_tools")
+    );
+
+    let mut previously_used = context;
+    let Message::Assistant(assistant) = &mut previously_used.messages[1] else {
+        panic!("fixture assistant")
+    };
+    let ContentBlock::ToolCall { call, .. } = &mut assistant.content[0] else {
+        panic!("fixture tool call")
+    };
+    call.name = "late_tool".into();
+    let used_wire: Value = serde_json::from_slice(&encode_responses(
+        &typed,
+        &compat,
+        &previously_used,
+        &default_responses_options(),
+    ))
+    .expect("previously used tool wire");
+    assert_eq!(used_wire["tools"].as_array().unwrap().len(), 2);
+    assert!(
+        used_wire["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["type"] != "additional_tools")
+    );
 }
 
 fn decoded_message() -> AssistantMessage {

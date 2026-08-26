@@ -2934,9 +2934,14 @@ fn codex_responses_url(base: &Url) -> Url {
 
 fn ensure_responses_headers(headers: &mut HeaderMap, codex: bool) {
     if !headers.contains_key(header::USER_AGENT) {
+        let value = if codex {
+            PI_AI_RUST_USER_AGENT.to_owned()
+        } else {
+            openai_user_agent()
+        };
         headers.insert(
             header::USER_AGENT,
-            HeaderValue::from_static(PI_AI_RUST_USER_AGENT),
+            HeaderValue::from_str(&value).expect("Pi User-Agent is a valid header value"),
         );
     }
     headers.insert(
@@ -2956,6 +2961,58 @@ fn ensure_responses_headers(headers: &mut HeaderMap, codex: bool) {
             "openai-beta",
             HeaderValue::from_static("responses=experimental"),
         );
+    }
+}
+
+/// Returns the default Pi-compatible user agent for public and Azure OpenAI
+/// Responses requests.
+pub fn openai_user_agent() -> String {
+    #[cfg(target_arch = "wasm32")]
+    {
+        "pi (browser)".to_owned()
+    }
+    #[cfg(all(not(target_arch = "wasm32"), unix))]
+    {
+        let system = rustix::system::uname();
+        let platform = match system.sysname().to_string_lossy().as_ref() {
+            "Darwin" => "darwin".to_owned(),
+            value => value.to_ascii_lowercase(),
+        };
+        let release = system.release().to_string_lossy();
+        let architecture = match system.machine().to_string_lossy().as_ref() {
+            "x86_64" => "x64".to_owned(),
+            "aarch64" | "arm64" => "arm64".to_owned(),
+            value => value.to_owned(),
+        };
+        format!("pi ({platform} {release}; {architecture})")
+    }
+    #[cfg(all(not(target_arch = "wasm32"), windows))]
+    {
+        use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
+        use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
+
+        let mut version = OSVERSIONINFOW {
+            dwOSVersionInfoSize: u32::try_from(std::mem::size_of::<OSVERSIONINFOW>())
+                .expect("OSVERSIONINFOW size fits u32"),
+            ..OSVERSIONINFOW::default()
+        };
+        // SAFETY: `version` is initialized with the required structure size
+        // and remains valid and exclusively borrowed for this call.
+        let status = unsafe { RtlGetVersion(&mut version) };
+        let release = if status >= 0 {
+            format!(
+                "{}.{}.{}",
+                version.dwMajorVersion, version.dwMinorVersion, version.dwBuildNumber
+            )
+        } else {
+            "unknown".to_owned()
+        };
+        let architecture = match std::env::consts::ARCH {
+            "x86_64" => "x64",
+            "aarch64" => "arm64",
+            value => value,
+        };
+        format!("pi (win32 {release}; {architecture})")
     }
 }
 

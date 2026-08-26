@@ -1407,6 +1407,8 @@ Pi's retry helper reproduces the pinned OpenAI/Anthropic SDK policy while making
 
 See `packages/ai/src/utils/provider-retry.ts:1–260`.
 
+> Correction: The newer pinned Pi also exposes `isRetryableAssistantError` and `retryAssistantCall`, which classify a completed terminal assistant error by provider/transport message and perform a separate bounded, cancellable post-terminal retry with scheduled/start/finished callbacks. The compaction harness uses this helper around its auxiliary summary call. Rust ports this as an assistant-call orchestration utility distinct from the transparent pre-semantic transport retry described below; it does not reinterpret this behavior as the `continue()`/`retry_last_turn()` surface divergence (`packages/ai/src/utils/retry.ts`; `packages/ai/test/retry.test.ts`; `packages/agent/src/harness/compaction/compaction.ts:104–136`).
+
 > Correction: Pinned Pi's implementation retries every numeric status `>= 500`, not only statuses in the HTTP 5xx range. The Rust classifier preserves that exact predicate (`packages/ai/src/utils/provider-retry.ts:22–36`).
 
 > Correction: Pinned Codex Responses does not use the generic OpenAI retry classifier. It defaults to zero retries. When retries are enabled, status 429/500/502/503/504 and the transient raw-response-text allowlist are handled first with `retry-after-ms`/`Retry-After` support and the configured maximum server delay; named account/quota/billing 429 responses are terminal. Every other HTTP body is then parsed through `parseErrorResponse`, and the surrounding catch applies its case-sensitive `"usage limit"` exclusion to that parsed friendly/error message, not to the raw JSON; those catch-path retries ignore response delay headers. Network failures use the same case-sensitive exclusion. Backoff is an unjittered one-second exponential base. The Codex provider registrations therefore install a family-specific Send/Local classifier and policy, retain raw response text for initial classification, and normalize the terminal public failure through the classifier's object-safe Send/Local terminal hook (`packages/ai/src/api/openai-codex-responses.ts:44–48,113–167,377–451,1549–1574`).
@@ -1888,6 +1890,8 @@ LoweringError::ConflictingApiOptions {
 ```
 
 There is no "typed wins" or "extension wins" rule.
+
+> Correction: Pinned Pi also carries an optional `telemetryContext` unchanged through common request options, simple-option lowering, provider and `Models` dispatch, and deferred fetch/cancel surfaces. Rust represents it as an opaque, cloneable `TelemetryContextHandle` on `SimpleGenerationOptions` and `ApiRequestOptions`; it is request-scoped scratch state, is redacted from diagnostics, and is skipped by serialization so replay invariant R8 remains intact (`packages/ai/src/types.ts`; `packages/ai/src/api/simple-options.ts`; `packages/ai/test/telemetry-options.test.ts`). The separately owner-excluded image-generation surface is unaffected.
 
 ### Precedence
 

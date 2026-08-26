@@ -2,8 +2,13 @@
 
 use crate::ContentDigest;
 use serde::{Deserialize, Serialize};
-use serde_yaml::{Mapping, Value};
-use std::{collections::BTreeMap, fmt};
+use serde_json::Value as JsonValue;
+use serde_yaml::{Mapping, Value as YamlValue};
+use std::{
+    collections::BTreeMap,
+    fmt, fs,
+    path::{Path, PathBuf},
+};
 
 /// Persisted recorded-template schema version.
 pub const RECORDED_PROMPT_TEMPLATE_SCHEMA_VERSION: u32 = 1;
@@ -215,6 +220,261 @@ pub trait LocalPromptTemplateRegistry: 'static {
 pub struct StaticPromptTemplateRegistry {
     templates: BTreeMap<String, PromptTemplate>,
     missing_argument_policy: MissingTemplateArgumentPolicy,
+}
+
+/// One filesystem input and optional caller-defined provenance label.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PromptTemplateSource {
+    /// Markdown file or non-recursively scanned directory.
+    pub path: PathBuf,
+    /// Opaque provenance retained on diagnostics.
+    pub source: Option<JsonValue>,
+}
+
+impl PromptTemplateSource {
+    /// Creates an unsourced filesystem input.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            source: None,
+        }
+    }
+
+    /// Attaches an opaque provenance label.
+    pub fn with_source(mut self, source: impl Into<JsonValue>) -> Self {
+        self.source = Some(source.into());
+        self
+    }
+}
+
+/// Stable severity emitted by prompt-template discovery.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptTemplateDiagnosticSeverity {
+    /// Pi reports discovery failures as non-fatal warnings.
+    Warning,
+}
+
+/// Stable prompt-template discovery diagnostic code.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptTemplateDiagnosticCode {
+    /// Reading metadata or resolving a link target failed.
+    FileInfoFailed,
+    /// Listing a directory failed.
+    ListFailed,
+    /// Reading a template file failed.
+    ReadFailed,
+    /// Parsing template frontmatter failed.
+    ParseFailed,
+}
+
+/// Non-fatal prompt-template discovery diagnostic.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PromptTemplateDiagnostic {
+    /// Diagnostic severity. Pinned Pi currently emits warnings only.
+    #[serde(rename = "type")]
+    pub severity: PromptTemplateDiagnosticSeverity,
+    /// Stable machine-readable diagnostic code.
+    pub code: PromptTemplateDiagnosticCode,
+    /// Addressed file or directory that failed.
+    pub path: PathBuf,
+    /// Opaque provenance supplied for the input.
+    pub source: Option<JsonValue>,
+    /// Sanitized diagnostic message.
+    pub message: String,
+}
+
+/// One discovered template paired with caller-defined provenance.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SourcedPromptTemplate {
+    /// Parsed prompt template.
+    pub prompt_template: PromptTemplate,
+    /// Opaque provenance supplied for the input.
+    pub source: Option<JsonValue>,
+}
+
+/// Immutable registry discovered from native markdown files.
+#[derive(Clone, Debug)]
+pub struct NativePromptTemplateRegistry {
+    registry: StaticPromptTemplateRegistry,
+    sourced_templates: Vec<SourcedPromptTemplate>,
+    diagnostics: Vec<PromptTemplateDiagnostic>,
+}
+
+impl NativePromptTemplateRegistry {
+    /// Loads explicit markdown files and direct markdown children of each
+    /// directory, preserving caller source order and sorting within a directory.
+    pub fn discover(
+        paths: impl IntoIterator<Item = impl AsRef<Path>>,
+    ) -> Result<Self, TemplateError> {
+        Self::discover_sourced(
+            paths
+                .into_iter()
+                .map(|path| PromptTemplateSource::new(path.as_ref())),
+        )
+    }
+
+    /// Loads prompt templates while retaining caller provenance on warnings.
+    pub fn discover_sourced(
+        sources: impl IntoIterator<Item = PromptTemplateSource>,
+    ) -> Result<Self, TemplateError> {
+        let mut templates = Vec::new();
+        let mut sourced_templates = Vec::new();
+        let mut diagnostics = Vec::new();
+        for source in sources {
+            let metadata = match fs::metadata(&source.path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    diagnostics.push(template_diagnostic(
+                        &source,
+                        PromptTemplateDiagnosticCode::FileInfoFailed,
+                        source.path.clone(),
+                        error,
+                    ));
+                    continue;
+                }
+            };
+            let files = if metadata.is_dir() {
+                match direct_markdown_files(&source.path) {
+                    Ok(files) => files,
+                    Err(error) => {
+                        diagnostics.push(template_diagnostic(
+                            &source,
+                            PromptTemplateDiagnosticCode::ListFailed,
+                            source.path.clone(),
+                            error,
+                        ));
+                        continue;
+                    }
+                }
+            } else if metadata.is_file() && has_markdown_extension(&source.path) {
+                vec![source.path.clone()]
+            } else {
+                continue;
+            };
+
+            for path in files {
+                let contents = match fs::read_to_string(&path) {
+                    Ok(contents) => contents,
+                    Err(error) => {
+                        diagnostics.push(template_diagnostic(
+                            &source,
+                            PromptTemplateDiagnosticCode::ReadFailed,
+                            path,
+                            error,
+                        ));
+                        continue;
+                    }
+                };
+                let file_name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                match PromptTemplate::from_markdown(&file_name, &contents) {
+                    Ok(template) => {
+                        sourced_templates.push(SourcedPromptTemplate {
+                            prompt_template: template.clone(),
+                            source: source.source.clone(),
+                        });
+                        templates.push(template);
+                    }
+                    Err(error) => diagnostics.push(template_diagnostic(
+                        &source,
+                        PromptTemplateDiagnosticCode::ParseFailed,
+                        path,
+                        error,
+                    )),
+                }
+            }
+        }
+
+        Ok(Self {
+            registry: StaticPromptTemplateRegistry::new(templates)?,
+            sourced_templates,
+            diagnostics,
+        })
+    }
+
+    /// Lists discovered templates in caller traversal order.
+    pub fn templates(&self) -> Vec<PromptTemplate> {
+        self.sourced_templates
+            .iter()
+            .map(|sourced| sourced.prompt_template.clone())
+            .collect()
+    }
+
+    /// Returns every non-fatal discovery warning.
+    pub fn diagnostics(&self) -> &[PromptTemplateDiagnostic] {
+        &self.diagnostics
+    }
+
+    /// Returns discovered templates in traversal order with their provenance.
+    pub fn sourced_templates(&self) -> &[SourcedPromptTemplate] {
+        &self.sourced_templates
+    }
+
+    /// Resolves a discovered template.
+    pub fn resolve(
+        &self,
+        name: &str,
+        arguments: &TemplateArguments,
+    ) -> Result<RenderedPrompt, TemplateError> {
+        self.registry.resolve(name, arguments)
+    }
+}
+
+impl PromptTemplateRegistry for NativePromptTemplateRegistry {
+    fn resolve(
+        &self,
+        name: &str,
+        arguments: &TemplateArguments,
+    ) -> Result<RenderedPrompt, TemplateError> {
+        Self::resolve(self, name, arguments)
+    }
+}
+
+impl LocalPromptTemplateRegistry for NativePromptTemplateRegistry {
+    fn resolve(
+        &self,
+        name: &str,
+        arguments: &TemplateArguments,
+    ) -> Result<RenderedPrompt, TemplateError> {
+        Self::resolve(self, name, arguments)
+    }
+}
+
+fn direct_markdown_files(directory: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
+    let entries = fs::read_dir(directory)?.collect::<Result<Vec<_>, _>>()?;
+    let mut files = Vec::new();
+    for entry in entries {
+        let path = entry.path();
+        if has_markdown_extension(&path) && path.is_file() {
+            files.push(path);
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn has_markdown_extension(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| extension == "md")
+}
+
+fn template_diagnostic(
+    source: &PromptTemplateSource,
+    code: PromptTemplateDiagnosticCode,
+    path: PathBuf,
+    error: impl fmt::Display,
+) -> PromptTemplateDiagnostic {
+    PromptTemplateDiagnostic {
+        severity: PromptTemplateDiagnosticSeverity::Warning,
+        code,
+        path,
+        source: source.source.clone(),
+        message: error.to_string(),
+    }
 }
 
 impl StaticPromptTemplateRegistry {
@@ -438,7 +698,7 @@ fn parse_open_template_metadata(yaml: &str) -> Result<PromptTemplateFrontmatter,
     if yaml.trim().is_empty() {
         return Ok(PromptTemplateFrontmatter::default());
     }
-    let value: Value = serde_yaml::from_str(yaml).map_err(|error| error.to_string())?;
+    let value: YamlValue = serde_yaml::from_str(yaml).map_err(|error| error.to_string())?;
     let Some(mapping) = value.as_mapping() else {
         return Ok(PromptTemplateFrontmatter::default());
     };
@@ -450,8 +710,8 @@ fn parse_open_template_metadata(yaml: &str) -> Result<PromptTemplateFrontmatter,
 
 fn mapping_string(mapping: &Mapping, key: &str) -> Option<String> {
     mapping
-        .get(Value::String(key.to_owned()))
-        .and_then(Value::as_str)
+        .get(YamlValue::String(key.to_owned()))
+        .and_then(YamlValue::as_str)
         .map(str::to_owned)
 }
 

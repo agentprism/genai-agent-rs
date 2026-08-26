@@ -1,10 +1,10 @@
 use agentprism_ai::{
     ApiId, AssistantAssembler, AssistantEvent, AssistantFinish, AssistantFinishReason,
-    CancellationToken, ContentBlock, ContentBlockId, ContentBlockKind, Cost, Currency,
-    LocalBoxFuture, Message, MessageId, ModelId, ModelRef, ProviderId, PublicError, ReasoningLevel,
-    RunId, ScriptedResponse, ScriptedRuntime, SendBoxFuture, Timestamp, ToolCallId,
-    ToolResultContent, ToolSpec, Usage, UsageSource, UserMessage, VersionedExtension,
-    text_response, tool_call_response,
+    AssistantMessage, CancellationToken, ContentBlock, ContentBlockId, ContentBlockKind, Cost,
+    Currency, LocalBoxFuture, Message, MessageId, ModelId, ModelRef, ProviderId, PublicError,
+    ReasoningLevel, ReplayEnvelope, ReplayScope, RunId, ScriptedResponse, ScriptedRuntime,
+    SendBoxFuture, Timestamp, ToolCallId, ToolResultContent, ToolSpec, Usage, UsageSource,
+    UserMessage, VersionedExtension, text_response, tool_call_response,
 };
 use agentprism_core::{
     AfterToolCall, Agent, AgentEvent, AgentRecord, AgentState, BeforeToolCall, CompletedTurn,
@@ -17,12 +17,13 @@ use agentprism_core::{
 use agentprism_env::{Clock, ClockError, LocalClock};
 use agentprism_harness::*;
 use agentprism_session::{
-    AppendReceipt, EntryBase, EntryId, InMemorySessionStorage, LaneName, LocalSessionStorage,
-    OperationIntent, OperationOutcome, OperationRecord, OperationRecordBase, OperationRecordId,
-    OperationStep, ProvisionedEntry, QueueKind, RecoveryDecision, SESSION_METADATA_SCHEMA_VERSION,
-    Sequence, SessionEntry, SessionEnvironmentMetadata, SessionError, SessionErrorKind,
-    SessionHeader, SessionId, SessionMetadata, SessionMutation, SessionState, SessionStorage,
-    TAIL_REPAIR_REPORT_SCHEMA_VERSION, TailRepairReport, ToolReplayPolicy,
+    AppendReceipt, CompactionReason, EntryBase, EntryId, InMemorySessionStorage, LaneName,
+    LocalSessionStorage, OperationIntent, OperationOutcome, OperationRecord, OperationRecordBase,
+    OperationRecordId, OperationStep, ProvisionedEntry, QueueKind, RecoveryDecision,
+    SESSION_METADATA_SCHEMA_VERSION, Sequence, SessionEntry, SessionEnvironmentMetadata,
+    SessionError, SessionErrorKind, SessionHeader, SessionId, SessionMetadata, SessionMutation,
+    SessionState, SessionStorage, TAIL_REPAIR_REPORT_SCHEMA_VERSION, TailRepairReport,
+    ToolReplayPolicy,
 };
 use futures_channel::oneshot;
 use futures_executor::block_on;
@@ -2817,6 +2818,38 @@ fn harness_open_rejects_pinned_reducer_record_corruption() {
             ],
         ),
         (
+            RecoveryCorruptionReason::InvalidCompactionReason,
+            vec![
+                operation_started(Sequence::new(1), "run", empty_intent()),
+                SessionMutation::Record {
+                    record: OperationRecord::StepAttempt {
+                        base: test_record_base(2, "assistant-with-compaction-reason"),
+                        run_id: RunId::new("run"),
+                        step: OperationStep::Assistant,
+                        attempt: 1,
+                        result_entry_id: EntryId::new("assistant"),
+                        compaction_reason: Some(CompactionReason::Manual),
+                    },
+                },
+            ],
+        ),
+        (
+            RecoveryCorruptionReason::InvalidCompactionReason,
+            vec![
+                operation_started(Sequence::new(1), "run", empty_intent()),
+                SessionMutation::Record {
+                    record: OperationRecord::StepAttempt {
+                        base: test_record_base(2, "compaction-without-reason"),
+                        run_id: RunId::new("run"),
+                        step: OperationStep::Compaction,
+                        attempt: 1,
+                        result_entry_id: EntryId::new("compaction"),
+                        compaction_reason: None,
+                    },
+                },
+            ],
+        ),
+        (
             RecoveryCorruptionReason::QueueAfterAbort,
             vec![
                 operation_started(Sequence::new(1), "run", empty_intent()),
@@ -2835,6 +2868,62 @@ fn harness_open_rejects_pinned_reducer_record_corruption() {
                     },
                 },
             ],
+        ),
+        (
+            RecoveryCorruptionReason::InconsistentStep,
+            vec![
+                operation_started(Sequence::new(1), "run", empty_intent()),
+                SessionMutation::Record {
+                    record: OperationRecord::StepAttempt {
+                        base: test_record_base(2, "compaction-one"),
+                        run_id: RunId::new("run"),
+                        step: OperationStep::Compaction,
+                        attempt: 1,
+                        result_entry_id: EntryId::new("compaction-one-result"),
+                        compaction_reason: Some(CompactionReason::Threshold),
+                    },
+                },
+                SessionMutation::Record {
+                    record: OperationRecord::StepAttempt {
+                        base: test_record_base(3, "compaction-two-result-changed"),
+                        run_id: RunId::new("run"),
+                        step: OperationStep::Compaction,
+                        attempt: 2,
+                        result_entry_id: EntryId::new("compaction-two-result"),
+                        compaction_reason: Some(CompactionReason::Threshold),
+                    },
+                },
+            ],
+        ),
+        (
+            RecoveryCorruptionReason::InconsistentStep,
+            vec![
+                operation_started(Sequence::new(1), "run", empty_intent()),
+                SessionMutation::Record {
+                    record: OperationRecord::StepAttempt {
+                        base: test_record_base(2, "compaction-threshold"),
+                        run_id: RunId::new("run"),
+                        step: OperationStep::Compaction,
+                        attempt: 1,
+                        result_entry_id: EntryId::new("compaction-result"),
+                        compaction_reason: Some(CompactionReason::Threshold),
+                    },
+                },
+                SessionMutation::Record {
+                    record: OperationRecord::StepAttempt {
+                        base: test_record_base(3, "compaction-overflow"),
+                        run_id: RunId::new("run"),
+                        step: OperationStep::Compaction,
+                        attempt: 2,
+                        result_entry_id: EntryId::new("compaction-result"),
+                        compaction_reason: Some(CompactionReason::Overflow),
+                    },
+                },
+            ],
+        ),
+        (
+            RecoveryCorruptionReason::InvalidDeferredHandle,
+            vec![malformed_deferred_assistant_entry(1, "assistant-deferred")],
         ),
     ];
 
@@ -3361,6 +3450,42 @@ fn test_entry_base(sequence: u64, id: &str) -> EntryBase {
         sequence: Sequence::new(sequence),
         parent_id: None,
         timestamp: Timestamp::from_unix_millis(i64::try_from(sequence).expect("small sequence")),
+    }
+}
+
+fn malformed_deferred_assistant_entry(sequence: u64, id: &str) -> SessionMutation {
+    let provider = ProviderId::new("scripted");
+    let api = ApiId::new("scripted");
+    let model = ModelId::new("test-model");
+    SessionMutation::Entry {
+        lane: Some(LaneName::new("main")),
+        entry: SessionEntry::Message {
+            base: test_entry_base(sequence, id),
+            message: AgentRecord::Llm(Message::Assistant(AssistantMessage {
+                id: MessageId::new(format!("message-{id}")),
+                provider: provider.clone(),
+                api: api.clone(),
+                requested_model: model.clone(),
+                response_model: None,
+                response_id: None,
+                deferred: None,
+                end_turn: None,
+                diagnostics: Vec::new(),
+                content: Vec::new(),
+                replay: ReplayEnvelope::new(ReplayScope::new(provider, api, model.clone(), model)),
+                usage: Usage::zero(UsageSource::Unknown),
+                cost: None,
+                finish: AssistantFinish {
+                    reason: AssistantFinishReason::Deferred,
+                    raw_provider_reason: None,
+                    error: None,
+                },
+                timestamp: Timestamp::from_unix_millis(
+                    i64::try_from(sequence).expect("small sequence"),
+                ),
+            })),
+            terminate: false,
+        },
     }
 }
 

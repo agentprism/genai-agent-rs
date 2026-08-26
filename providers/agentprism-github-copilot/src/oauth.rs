@@ -1281,6 +1281,57 @@ mod tests {
     }
 
     #[test]
+    fn github_copilot_entitlement_policy_matrix_pi_exact() {
+        // Architecture v2 part 2 §5.2, §6.6, and §10.7; Pi basis:
+        // packages/ai/test/github-copilot-oauth.test.ts picker fallback,
+        // non-Individual exclusion, known-model policy, and tool capability
+        // scenarios.
+        let known = ["gpt-4.1", "claude-sonnet-4.5", "gpt-5.4"]
+            .into_iter()
+            .map(ModelId::new)
+            .collect::<BTreeSet<_>>();
+        let parse = |data: Value, fallback| {
+            parse_entitlements(&serde_json::json!({"data": data}), fallback, &known)
+                .expect("Copilot entitlement fixture")
+        };
+
+        let picker = parse(
+            serde_json::json!([
+                {"id":"gpt-4.1","model_picker_enabled":true,"capabilities":{"supports":{"tool_calls":true}}},
+                {"id":"claude-sonnet-4.5","model_picker_enabled":true,"policy":{"state":"disabled"},"capabilities":{"supports":{"tool_calls":true}}},
+                {"id":"gpt-5.4","model_picker_enabled":false,"policy":{"state":"enabled"},"capabilities":{"supports":{"tool_calls":true}}}
+            ]),
+            true,
+        );
+        assert_eq!(picker.available_model_ids, [ModelId::new("gpt-4.1")]);
+
+        let fallback_data = serde_json::json!([
+            {"id":"gpt-4.1","model_picker_enabled":false,"policy":{"state":"enabled"},"capabilities":{"supports":{"tool_calls":true}}},
+            {"id":"claude-sonnet-4.5","model_picker_enabled":false,"policy":{"state":"disabled"},"capabilities":{"supports":{"tool_calls":true}}},
+            {"id":"gpt-5.4","model_picker_enabled":false,"policy":{"state":"enabled"},"capabilities":{"supports":{"tool_calls":false}}}
+        ]);
+        assert_eq!(
+            parse(fallback_data.clone(), true).available_model_ids,
+            [ModelId::new("gpt-4.1")]
+        );
+        assert!(parse(fallback_data, false).available_model_ids.is_empty());
+
+        let policies = parse(
+            serde_json::json!([
+                {"id":"gpt-4.1","model_picker_enabled":true,"policy":{"state":"enabled"},"capabilities":{"supports":{"tool_calls":true}}},
+                {"id":"claude-sonnet-4.5","model_picker_enabled":true,"policy":{"state":"unconfigured"},"capabilities":{"supports":{"tool_calls":true}}},
+                {"id":"remote-only-model","model_picker_enabled":true,"policy":{"state":"unconfigured"},"capabilities":{"supports":{"tool_calls":true}}},
+                {"id":"gpt-5.4","model_picker_enabled":true,"policy":{"state":"unconfigured"},"capabilities":{"supports":{"tool_calls":false}}}
+            ]),
+            true,
+        );
+        assert_eq!(
+            policies.policy_model_ids,
+            [ModelId::new("claude-sonnet-4.5")]
+        );
+    }
+
+    #[test]
     fn github_copilot_request_deadline_covers_stalled_transport_and_body_send_and_local() {
         // Architecture v2 part 2 §6 and §9.2; Pi basis:
         // packages/ai/src/auth/oauth/github-copilot.ts:135-165 applies a

@@ -295,6 +295,21 @@ impl ContentBlock {
     }
 }
 
+/// Joins visible assistant/user text blocks and ignores images, reasoning, and
+/// tool calls, matching Pi's `contentText` helper for structured content.
+pub fn content_text(content: &[ContentBlock], separator: &str) -> String {
+    content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            ContentBlock::Image { .. }
+            | ContentBlock::Thinking { .. }
+            | ContentBlock::ToolCall { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
 /// Finalized provider-neutral tool call (Architecture v2 part 1 §3.1).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
@@ -437,6 +452,19 @@ pub enum ToolResultContent {
         /// Image media type.
         mime_type: String,
     },
+}
+
+/// Joins text tool-result blocks and ignores images, matching Pi's
+/// `contentText` helper for tool output.
+pub fn tool_result_content_text(content: &[ToolResultContent], separator: &str) -> String {
+    content
+        .iter()
+        .filter_map(|block| match block {
+            ToolResultContent::Text { text, .. } => Some(text.as_str()),
+            ToolResultContent::Image { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join(separator)
 }
 
 /// Versioned durable conversation (Architecture v2 part 1 §3.1).

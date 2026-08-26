@@ -3,9 +3,9 @@
 
 use crate::{
     AiError, ApiFamily, ApiRequestOptions, AssistantMessage, AttemptMiddleware, AuthContext,
-    AuthInteraction, AuthResolutionOverrides, AuthResolutionPurpose, CancellationToken,
-    CatalogError, CatalogFetchContext, CatalogSnapshot, Context, Credential, CredentialInfo,
-    CredentialStore, DeferredCancelOptions, DeferredFetchOptions, DeferredHandle,
+    AuthInteraction, AuthResolutionOverrides, AuthResolutionPurpose, CacheRetention,
+    CancellationToken, CatalogError, CatalogFetchContext, CatalogSnapshot, Context, Credential,
+    CredentialInfo, CredentialStore, DeferredCancelOptions, DeferredFetchOptions, DeferredHandle,
     DeferredModelRuntime, EmptyAuthContext, ErasedApiFullOptions, ErasedPayloadTransform,
     HeaderTransform, HeaderTransformContext, InMemoryCredentialStore, InMemoryModelOverrideStore,
     InMemoryModelsStore, LocalAssistantStream, LocalAttemptMiddleware, LocalAuthContext,
@@ -772,12 +772,40 @@ impl Models {
     /// [`crate::SimpleGenerationOptions`] schema.
     pub fn stream_simple_with_auth(
         &self,
-        request: ModelRequest,
+        mut request: ModelRequest,
         auth_overrides: AuthResolutionOverrides,
         cancellation: CancellationToken,
     ) -> SendBoxFuture<'_, Result<crate::AssistantStream, RequestStartError>> {
-        let request_options = ApiRequestOptions::from(&request.options);
-        self.stream_request_with_auth(request, None, request_options, auth_overrides, cancellation)
+        Box::pin(async move {
+            if request.options.cache_retention.is_none() && !cancellation.is_cancelled() {
+                let environment = await_or_cancelled(
+                    self.inner
+                        .auth_context
+                        .env("PI_CACHE_RETENTION".into(), cancellation.clone()),
+                    &cancellation,
+                )
+                .await?
+                .map_err(|error| {
+                    RequestStartError::new(
+                        RequestStartErrorKind::RuntimeUnavailable,
+                        error.to_string(),
+                    )
+                    .with_model(request.model.clone())
+                })?;
+                if environment.as_deref() == Some("long") {
+                    request.options.cache_retention = Some(CacheRetention::Long);
+                }
+            }
+            let request_options = ApiRequestOptions::from(&request.options);
+            self.stream_request_with_auth(
+                request,
+                None,
+                request_options,
+                auth_overrides,
+                cancellation,
+            )
+            .await
+        })
     }
 
     /// Executes fully API-specific options through the registered provider
@@ -1122,11 +1150,6 @@ impl Models {
         cancellation: CancellationToken,
     ) -> SendBoxFuture<'_, Result<crate::AssistantStream, RequestStartError>> {
         Box::pin(async move {
-            cancellation.check().map_err(|_| {
-                RequestStartError::new(RequestStartErrorKind::Cancelled, "request cancelled")
-                    .with_model(request.model.clone())
-            })?;
-
             // The Arc clone is the only registry access in this async request.
             let provider = self.provider(&request.model.provider).ok_or_else(|| {
                 RequestStartError::new(
@@ -1171,6 +1194,10 @@ impl Models {
                     ),
                 )
                 .with_model(request.model.clone()));
+            }
+
+            if cancellation.is_cancelled() {
+                return Ok(crate::provider::pre_cancelled_stream(&model, &api));
             }
 
             let mut auth_overrides = auth_overrides;
@@ -2297,12 +2324,40 @@ impl LocalModels {
     /// secrets in the serializable [`crate::SimpleGenerationOptions`] schema.
     pub fn stream_simple_with_auth(
         &self,
-        request: ModelRequest,
+        mut request: ModelRequest,
         auth_overrides: AuthResolutionOverrides,
         cancellation: CancellationToken,
     ) -> LocalBoxFuture<'_, Result<LocalAssistantStream, RequestStartError>> {
-        let request_options = ApiRequestOptions::from(&request.options);
-        self.stream_request_with_auth(request, None, request_options, auth_overrides, cancellation)
+        Box::pin(async move {
+            if request.options.cache_retention.is_none() && !cancellation.is_cancelled() {
+                let environment = await_or_cancelled(
+                    self.inner
+                        .auth_context
+                        .env("PI_CACHE_RETENTION".into(), cancellation.clone()),
+                    &cancellation,
+                )
+                .await?
+                .map_err(|error| {
+                    RequestStartError::new(
+                        RequestStartErrorKind::RuntimeUnavailable,
+                        error.to_string(),
+                    )
+                    .with_model(request.model.clone())
+                })?;
+                if environment.as_deref() == Some("long") {
+                    request.options.cache_retention = Some(CacheRetention::Long);
+                }
+            }
+            let request_options = ApiRequestOptions::from(&request.options);
+            self.stream_request_with_auth(
+                request,
+                None,
+                request_options,
+                auth_overrides,
+                cancellation,
+            )
+            .await
+        })
     }
 
     /// Executes fully API-specific options through a registered local
@@ -2645,11 +2700,6 @@ impl LocalModels {
         cancellation: CancellationToken,
     ) -> LocalBoxFuture<'_, Result<LocalAssistantStream, RequestStartError>> {
         Box::pin(async move {
-            cancellation.check().map_err(|_| {
-                RequestStartError::new(RequestStartErrorKind::Cancelled, "request cancelled")
-                    .with_model(request.model.clone())
-            })?;
-
             let provider = self.provider(&request.model.provider).ok_or_else(|| {
                 RequestStartError::new(
                     RequestStartErrorKind::UnknownProvider,
@@ -2693,6 +2743,10 @@ impl LocalModels {
                     ),
                 )
                 .with_model(request.model.clone()));
+            }
+
+            if cancellation.is_cancelled() {
+                return Ok(crate::provider::local_pre_cancelled_stream(&model, &api));
             }
 
             let mut auth_overrides = auth_overrides;

@@ -21,7 +21,8 @@ use agentprism_ai::{
     RequestStartErrorKind, ResolveAuthRequest, SecretString, SendBoxFuture,
     SimpleGenerationOptions, SimpleLoweringContext, ThinkingLevelMap, Timestamp, TokenPriceRates,
     ToolCall, ToolCallId, ToolChoice, ToolResultContent, ToolResultMessage, ToolSpec,
-    TransportError, TypedModelDescriptor, Usage, UsageSource, estimate_context_tokens,
+    TransportError, TypedModelDescriptor, Usage, UsageSource,
+    apply_anthropic_messages_full_options_request_headers, estimate_context_tokens,
     transform_context_for_model,
 };
 use agentprism_anthropic::{
@@ -1501,6 +1502,351 @@ fn anthropic_non_strict_null_schema_normalizes_pi_exact() {
 }
 
 /// Architecture v2 part 2 §3.5 and §10.8; pinned Pi basis:
+/// `packages/ai/test/anthropic-eager-tool-input-compat.test.ts`.
+#[test]
+fn anthropic_eager_tool_input_compat_matrix_pi_exact() {
+    let (_, mut model, mut context, mut simple) = parse_fixture("text-only");
+    simple.cache_retention = Some(CacheRetention::None);
+    context.tools = vec![ToolSpec {
+        schema_version: 1,
+        name: "lookup".into(),
+        description: "Look up a value".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "title": "LookupInput",
+            "additionalProperties": false,
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"]
+        }),
+        constrained_sampling: None,
+    }];
+
+    let default_wire: Value =
+        serde_json::from_slice(&encode_fixture("streamSimple", &model, &context, &simple))
+            .expect("default eager wire");
+    assert_eq!(default_wire["tools"][0]["eager_input_streaming"], true);
+    assert!(
+        default_wire["tools"][0]["input_schema"]
+            .get("title")
+            .is_none()
+    );
+    assert!(
+        default_wire["tools"][0]["input_schema"]
+            .get("additionalProperties")
+            .is_none()
+    );
+
+    let ApiModelConfig::AnthropicMessages(config) = &mut model.api else {
+        unreachable!()
+    };
+    config.compat.supports_eager_tool_input_streaming = Some(false);
+    config.compat.force_adaptive_thinking = Some(true);
+    let disabled_wire: Value =
+        serde_json::from_slice(&encode_fixture("streamSimple", &model, &context, &simple))
+            .expect("legacy eager wire");
+    assert!(
+        disabled_wire["tools"][0]
+            .get("eager_input_streaming")
+            .is_none()
+    );
+
+    let ApiModelConfig::AnthropicMessages(config) = &model.api else {
+        unreachable!()
+    };
+    let options = full_options_from_simple(&model, &simple);
+    let mut headers = HeaderMap::new();
+    apply_anthropic_messages_full_options_request_headers(
+        config,
+        &context,
+        &options,
+        None,
+        &mut headers,
+    )
+    .expect("legacy tool headers");
+    assert_eq!(
+        headers.get("anthropic-beta").expect("legacy beta"),
+        "fine-grained-tool-streaming-2025-05-14"
+    );
+
+    let mut no_tools = context.clone();
+    no_tools.tools.clear();
+    let mut no_tool_headers = HeaderMap::new();
+    apply_anthropic_messages_full_options_request_headers(
+        config,
+        &no_tools,
+        &options,
+        None,
+        &mut no_tool_headers,
+    )
+    .expect("no-tool headers");
+    assert!(no_tool_headers.get("anthropic-beta").is_none());
+
+    let ApiModelConfig::AnthropicMessages(config) = &mut model.api else {
+        unreachable!()
+    };
+    config.compat.supports_eager_tool_input_streaming = Some(true);
+    config.compat.supports_strict_tools = Some(true);
+    context.tools[0].constrained_sampling = Some(ConstrainedSampling::Config(
+        ConstrainedSamplingConfig::JsonSchema {
+            strict: JsonSchemaStrictMode::Prefer,
+        },
+    ));
+    let strict_wire: Value =
+        serde_json::from_slice(&encode_fixture("streamSimple", &model, &context, &simple))
+            .expect("strict eager wire");
+    assert_eq!(strict_wire["tools"][0]["strict"], true);
+    assert_eq!(
+        strict_wire["tools"][0]["input_schema"]["additionalProperties"],
+        false
+    );
+    assert_eq!(
+        strict_wire["tools"][0]["input_schema"]["title"],
+        "LookupInput"
+    );
+}
+
+/// Architecture v2 part 2 §3.5, §10.4, §10.7, and §10.8; pinned Pi basis:
+/// `packages/ai/test/fireworks-models.test.ts`, session affinity and tool
+/// compatibility scenarios.
+#[test]
+fn anthropic_fireworks_affinity_cache_and_tool_compat_pi_exact() {
+    let (_, mut model, mut context, mut simple) = parse_fixture("text-only");
+    let ApiModelConfig::AnthropicMessages(config) = &mut model.api else {
+        unreachable!()
+    };
+    config.compat.send_session_affinity_headers = Some(true);
+    config.compat.supports_eager_tool_input_streaming = Some(false);
+    config.compat.supports_cache_control_on_tools = Some(false);
+    config.compat.supports_long_cache_retention = Some(false);
+    context.tools = vec![ToolSpec {
+        schema_version: 1,
+        name: "lookup".into(),
+        description: "Look up a value".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"]
+        }),
+        constrained_sampling: None,
+    }];
+    simple.cache_retention = Some(CacheRetention::Long);
+    let wire: Value =
+        serde_json::from_slice(&encode_fixture("streamSimple", &model, &context, &simple))
+            .expect("Fireworks wire JSON");
+    let tools = wire["tools"].as_array().expect("Fireworks tools");
+    assert_eq!(tools.len(), 1);
+    assert!(tools[0].get("eager_input_streaming").is_none());
+    assert!(tools[0].get("cache_control").is_none());
+
+    let ApiModelConfig::AnthropicMessages(config) = &model.api else {
+        unreachable!()
+    };
+    let options = full_options_from_simple(&model, &simple);
+    let mut headers = HeaderMap::new();
+    apply_anthropic_messages_full_options_request_headers(
+        config,
+        &context,
+        &options,
+        Some("fireworks-session-1"),
+        &mut headers,
+    )
+    .expect("Fireworks request headers");
+    assert_eq!(
+        headers
+            .get("x-session-affinity")
+            .expect("session affinity header"),
+        "fireworks-session-1"
+    );
+
+    let mut none = options;
+    none.cache_retention = CacheRetention::None;
+    let mut none_headers = HeaderMap::new();
+    apply_anthropic_messages_full_options_request_headers(
+        config,
+        &context,
+        &none,
+        Some("fireworks-session-2"),
+        &mut none_headers,
+    )
+    .expect("no-cache Fireworks request headers");
+    assert!(none_headers.get("x-session-affinity").is_none());
+
+    let mut native = config.clone();
+    native.compat = AnthropicMessagesCompat::default();
+    let mut native_model = model.clone();
+    native_model.api = ApiModelConfig::AnthropicMessages(native);
+    let native_wire: Value = serde_json::from_slice(&encode_fixture(
+        "streamSimple",
+        &native_model,
+        &context,
+        &simple,
+    ))
+    .expect("native Anthropic wire JSON");
+    assert_eq!(native_wire["tools"][0]["eager_input_streaming"], true);
+    assert_eq!(
+        native_wire["tools"][0]["cache_control"]["type"],
+        "ephemeral"
+    );
+}
+
+/// Architecture v2 part 2 §3.5 and §10.8; pinned Pi basis:
+/// `packages/ai/test/cache-retention.test.ts`, Anthropic scenarios.
+#[test]
+fn anthropic_cache_retention_policy_matrix_pi_exact() {
+    let (_, mut model, mut context, _) = parse_fixture("text-only");
+    context.system_prompt = Some("You are a helpful assistant.".into());
+    let encode = |model: &ModelDescriptor, retention| {
+        let simple = SimpleGenerationOptions {
+            cache_retention: Some(retention),
+            ..Default::default()
+        };
+        serde_json::from_slice::<Value>(&encode_fixture("streamSimple", model, &context, &simple))
+            .expect("Anthropic cache wire JSON")
+    };
+
+    let short = encode(&model, CacheRetention::Short);
+    assert_eq!(
+        short["system"][0]["cache_control"],
+        serde_json::json!({"type":"ephemeral"})
+    );
+    let last_short = short["messages"]
+        .as_array()
+        .expect("messages")
+        .last()
+        .expect("last message");
+    let last_short_block = last_short["content"]
+        .as_array()
+        .expect("string user content becomes blocks")
+        .last()
+        .expect("last content block");
+    assert_eq!(
+        last_short_block["cache_control"],
+        serde_json::json!({"type":"ephemeral"})
+    );
+
+    let long = encode(&model, CacheRetention::Long);
+    assert_eq!(
+        long["system"][0]["cache_control"],
+        serde_json::json!({"type":"ephemeral","ttl":"1h"})
+    );
+
+    let ApiModelConfig::AnthropicMessages(config) = &mut model.api else {
+        unreachable!()
+    };
+    config.compat.supports_long_cache_retention = Some(false);
+    let unsupported_long = encode(&model, CacheRetention::Long);
+    assert_eq!(
+        unsupported_long["system"][0]["cache_control"],
+        serde_json::json!({"type":"ephemeral"})
+    );
+
+    let none = encode(&model, CacheRetention::None);
+    assert!(none["system"][0].get("cache_control").is_none());
+    let last_none = none["messages"]
+        .as_array()
+        .expect("messages")
+        .last()
+        .expect("last message");
+    if let Some(content) = last_none["content"].as_array() {
+        assert!(
+            content
+                .last()
+                .expect("last block")
+                .get("cache_control")
+                .is_none()
+        );
+    } else {
+        assert_eq!(last_none["content"], "Return a concise fixture response.");
+    }
+}
+
+/// Architecture v2 part 2 §3.1, §3.5, and §10.5; pinned Pi basis:
+/// `packages/ai/test/sampling-options.test.ts`, whose non-OpenAI case requires
+/// the compatibility-only `samplingParams` overlay to be ignored by
+/// Anthropic Messages.
+#[test]
+fn anthropic_sampling_params_are_ignored_pi_exact() {
+    let (_, model, context, _) = parse_fixture("text-only");
+    let simple = SimpleGenerationOptions {
+        sampling: OrderedJsonObject::from_iter([
+            ("top_p", OrderedJsonValue::from(0.9)),
+            ("top_k", OrderedJsonValue::from(40)),
+        ]),
+        ..SimpleGenerationOptions::default()
+    };
+    let body: Value =
+        serde_json::from_slice(&encode_fixture("streamSimple", &model, &context, &simple))
+            .expect("Anthropic sampling wire JSON");
+    assert!(body.get("top_p").is_none());
+    assert!(body.get("top_k").is_none());
+}
+
+/// Architecture v2 part 2 §3.5 and §10.8; pinned Pi basis:
+/// `packages/ai/test/empty.test.ts`, Anthropic Messages scenarios.
+#[test]
+fn anthropic_empty_message_matrix_pi_exact() {
+    let (_, model, base_context, _) = parse_fixture("text-only");
+    for content in [
+        Vec::new(),
+        vec![ContentBlock::Text {
+            id: ContentBlockId::new("empty-text"),
+            text: String::new(),
+        }],
+        vec![ContentBlock::Text {
+            id: ContentBlockId::new("whitespace-text"),
+            text: "   \n\t  ".into(),
+        }],
+    ] {
+        let mut context = base_context.clone();
+        let Message::User(user) = &mut context.messages[0] else {
+            unreachable!()
+        };
+        user.content = content;
+        let wire: Value = serde_json::from_slice(&encode_fixture(
+            "streamSimple",
+            &model,
+            &context,
+            &SimpleGenerationOptions::default(),
+        ))
+        .expect("empty-message Anthropic wire");
+        assert_eq!(wire["model"], "fixture-anthropic-model");
+        assert!(wire["messages"].is_array());
+    }
+
+    let mut context = base_context;
+    let mut empty_assistant = decode_turn_one("text-only", &model);
+    empty_assistant.content.clear();
+    empty_assistant.finish.reason = AssistantFinishReason::Stop;
+    context.messages.push(Message::Assistant(empty_assistant));
+    context
+        .messages
+        .push(Message::User(agentprism_ai::UserMessage {
+            id: MessageId::new("user-follow-up"),
+            content: vec![ContentBlock::Text {
+                id: ContentBlockId::new("user-follow-up-text"),
+                text: "Please respond this time.".into(),
+            }],
+            timestamp: Timestamp::from_unix_millis(FIXTURE_TIMESTAMP + 1),
+        }));
+    let wire: Value = serde_json::from_slice(&encode_fixture(
+        "streamSimple",
+        &model,
+        &context,
+        &SimpleGenerationOptions::default(),
+    ))
+    .expect("empty-assistant Anthropic wire");
+    assert_eq!(
+        wire["messages"]
+            .as_array()
+            .expect("Anthropic messages")
+            .iter()
+            .filter(|message| message["role"] == "user")
+            .count(),
+        2
+    );
+}
+
+/// Architecture v2 part 2 §3.5 and §10.8; pinned Pi basis:
 /// `packages/ai/src/api/anthropic-messages.ts:1168-1207` preserves array-form
 /// user content as individual blocks, including when every block is text.
 #[test]
@@ -1774,6 +2120,60 @@ fn anthropic_oauth_refresh_omits_scope() {
             .is_some_and(|value| !value.is_empty())
     );
     assert!(body.get("scope").is_none());
+}
+
+/// Architecture v2 part 2 §6.2, §6.4, and §10.7; pinned Pi basis:
+/// `packages/ai/test/anthropic-oauth.test.ts`, which retains the fixed
+/// localhost redirect for manual login and cancels the prompt signal after
+/// the authorization result settles.
+#[test]
+fn anthropic_oauth_manual_redirect_and_prompt_settlement_pi_exact() {
+    let transport = Arc::new(FixturePipelineTransport::new([
+        br#"{"access_token":"access-token","refresh_token":"refresh-token","expires_in":3600}"#
+            .to_vec(),
+    ]));
+    let interaction = Arc::new(ManualOAuthInteraction::default());
+    let oauth = AnthropicOAuth::new(Arc::clone(&transport) as Arc<dyn HttpTransport>);
+
+    let credential = futures_executor::block_on(OAuthAuth::login(
+        &oauth,
+        Arc::clone(&interaction) as Arc<dyn AuthInteraction>,
+        CancellationToken::new(),
+    ))
+    .expect("manual Anthropic OAuth login");
+    assert_eq!(credential.access.expose_secret(), "access-token");
+    assert_eq!(credential.refresh.expose_secret(), "refresh-token");
+
+    let authorization_url = interaction
+        .authorization_url
+        .lock()
+        .expect("authorization URL lock")
+        .clone()
+        .expect("authorization URL notification");
+    assert_eq!(
+        authorization_url
+            .query_pairs()
+            .find(|(name, _)| name == "redirect_uri")
+            .map(|(_, value)| value.into_owned())
+            .as_deref(),
+        Some("http://localhost:53692/callback")
+    );
+    assert!(
+        interaction
+            .prompt_cancellation
+            .lock()
+            .expect("prompt cancellation lock")
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled),
+        "the host's manual-code UI must be dismissible after login settles"
+    );
+
+    let requests = transport.requests.lock().expect("token request lock");
+    assert_eq!(requests.len(), 1);
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("exchange body JSON");
+    assert_eq!(body["grant_type"], "authorization_code");
+    assert_eq!(body["code"], "manual-code");
+    assert_eq!(body["redirect_uri"], "http://localhost:53692/callback");
 }
 
 /// Architecture v2 part 2 §3.5, §6.6, and §10.7; pinned Pi basis:
@@ -2910,6 +3310,87 @@ fn anthropic_deferred_tools_and_tool_references_match_pi() {
         body["messages"][2]["content"][1],
         serde_json::json!({"type":"text","text":"fixture file contents"})
     );
+
+    // A marker never recreates a definition that is absent from the current
+    // context, and an unsupported model keeps the ordinary top-level list.
+    let mut missing_definition = context.clone();
+    missing_definition
+        .tools
+        .retain(|tool| tool.name != "deferred_lookup");
+    let missing_body: Value = serde_json::from_slice(&encode_fixture(
+        fixture["entrypoint"].as_str().expect("entrypoint"),
+        &model,
+        &missing_definition,
+        &simple,
+    ))
+    .expect("missing deferred definition JSON");
+    assert_eq!(missing_body["tools"].as_array().unwrap().len(), 1);
+    assert!(
+        missing_body["messages"][2]["content"][0]["content"]
+            .as_array()
+            .is_none_or(|content| content.iter().all(|item| item["type"] != "tool_reference"))
+    );
+
+    let mut unsupported_model = model.clone();
+    let ApiModelConfig::AnthropicMessages(config) = &mut unsupported_model.api else {
+        unreachable!()
+    };
+    config.compat.supports_tool_references = Some(false);
+    let unsupported_body: Value = serde_json::from_slice(&encode_fixture(
+        fixture["entrypoint"].as_str().expect("entrypoint"),
+        &unsupported_model,
+        &context,
+        &simple,
+    ))
+    .expect("unsupported deferred references JSON");
+    assert_eq!(unsupported_body["tools"].as_array().unwrap().len(), 2);
+    assert!(
+        unsupported_body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|tool| tool.get("defer_loading").is_none())
+    );
+
+    // Pi treats a tool used before its marker as immediate. If every current
+    // definition would otherwise be deferred, it also retains one usable
+    // immediate definition and suppresses the reference marker.
+    let mut previously_used = context.clone();
+    let Message::Assistant(assistant) = &mut previously_used.messages[1] else {
+        panic!("fixture assistant")
+    };
+    let ContentBlock::ToolCall { call, .. } = &mut assistant.content[0] else {
+        panic!("fixture tool call")
+    };
+    call.name = "deferred_lookup".into();
+    let used_body: Value = serde_json::from_slice(&encode_fixture(
+        fixture["entrypoint"].as_str().expect("entrypoint"),
+        &model,
+        &previously_used,
+        &simple,
+    ))
+    .expect("previously used deferred tool JSON");
+    assert!(
+        used_body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|tool| tool.get("defer_loading").is_none())
+    );
+
+    let mut only_marked = context;
+    only_marked
+        .tools
+        .retain(|tool| tool.name == "deferred_lookup");
+    let only_marked_body: Value = serde_json::from_slice(&encode_fixture(
+        fixture["entrypoint"].as_str().expect("entrypoint"),
+        &model,
+        &only_marked,
+        &simple,
+    ))
+    .expect("only marked tool JSON");
+    assert_eq!(only_marked_body["tools"].as_array().unwrap().len(), 1);
+    assert!(only_marked_body["tools"][0].get("defer_loading").is_none());
 }
 
 /// Architecture v2 part 2 §3.5 and §10.8; pinned Pi basis:
@@ -3121,6 +3602,66 @@ impl HttpTransport for NeverTransport {
 struct RecordingApiKeyInteraction {
     answers: Mutex<VecDeque<AuthAnswer>>,
     prompts: Mutex<Vec<AuthPrompt>>,
+}
+
+#[derive(Default)]
+struct ManualOAuthInteraction {
+    authorization_url: Mutex<Option<Url>>,
+    prompt_cancellation: Mutex<Option<CancellationToken>>,
+}
+
+impl AuthInteraction for ManualOAuthInteraction {
+    fn capabilities(&self) -> AuthHostCapabilities {
+        AuthHostCapabilities {
+            manual_paste: true,
+            ..AuthHostCapabilities::default()
+        }
+    }
+
+    fn prompt(
+        &self,
+        prompt: AuthPrompt,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<AuthAnswer, AuthInteractionError>> {
+        assert!(matches!(prompt, AuthPrompt::ManualCode { .. }));
+        *self
+            .prompt_cancellation
+            .lock()
+            .expect("prompt cancellation lock") = Some(cancellation);
+        let authorization_url = self
+            .authorization_url
+            .lock()
+            .expect("authorization URL lock")
+            .clone()
+            .expect("authorization URL precedes prompt");
+        let state = authorization_url
+            .query_pairs()
+            .find(|(name, _)| name == "state")
+            .map(|(_, value)| value.into_owned())
+            .expect("OAuth state");
+        let answer = AuthAnswer::Text(format!(
+            "http://localhost:53692/callback?code=manual-code&state={state}"
+        ));
+        Box::pin(async move { Ok(answer) })
+    }
+
+    fn notify(&self, event: AuthEvent) -> Result<(), AuthInteractionError> {
+        if let AuthEvent::OpenUrl { url, .. } = event {
+            *self
+                .authorization_url
+                .lock()
+                .expect("authorization URL lock") = Some(url);
+        }
+        Ok(())
+    }
+
+    fn create_redirect_receiver(
+        &self,
+        _request: RedirectReceiverRequest,
+        _cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<Box<dyn RedirectReceiver>, AuthInteractionError>> {
+        unreachable!("manual-only Anthropic OAuth must not request a redirect receiver")
+    }
 }
 
 impl RecordingApiKeyInteraction {

@@ -1,14 +1,232 @@
 //! Pi-compatible provider retry classification and cancellable establishment
 //! from Architecture v2 part 2 §2.4.
 
-use crate::{CancellationToken, LocalBoxFuture, MiddlewareError, SendBoxFuture, TransportError};
+use crate::{
+    AssistantFinishReason, AssistantMessage, CancellationToken, LocalBoxFuture, MiddlewareError,
+    SendBoxFuture, TransportError,
+};
 use futures_util::future::{Either, select};
 use http::HeaderMap;
+use regex::Regex;
 use std::fmt;
 use std::future::Future;
 use std::ops::RangeInclusive;
 use std::rc::Rc;
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
+
+/// Policy for retrying a completed assistant-producing call after Pi-classified
+/// transient terminal failures.
+///
+/// This is distinct from [`RetryPolicy`], which governs transparent
+/// pre-semantic transport establishment retries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AssistantRetryPolicy {
+    /// Whether completed assistant calls may be retried.
+    pub enabled: bool,
+    /// Number of retries after the initial call.
+    pub max_retries: u32,
+    /// Unjittered exponential backoff base.
+    pub base_delay: Duration,
+}
+
+/// Observable lifecycle event from [`retry_assistant_call_observed`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AssistantRetryEvent {
+    /// A retry was classified and scheduled before its backoff.
+    Scheduled {
+        /// One-based retry attempt.
+        attempt: u32,
+        /// Maximum configured retry attempts.
+        max_attempts: u32,
+        /// Backoff before the retry begins.
+        delay: Duration,
+        /// Sanitized terminal error that caused the retry.
+        error_message: String,
+    },
+    /// Backoff completed and the retried call is about to begin.
+    AttemptStarted,
+    /// A previously scheduled retry sequence ended.
+    Finished {
+        /// Whether a later call completed normally.
+        success: bool,
+        /// Last one-based retry attempt.
+        attempt: u32,
+        /// Final transient error for exhausted or backoff-cancelled retries.
+        final_error: Option<String>,
+    },
+}
+
+/// Classifies Pi's completed assistant-message transient failure wording.
+///
+/// Provider quota, budget, and billing failures take precedence over the
+/// broader transient-pattern set.
+pub fn is_retryable_assistant_error(message: &AssistantMessage) -> bool {
+    if message.finish.reason != AssistantFinishReason::Error {
+        return false;
+    }
+    let Some(error_message) = message
+        .finish
+        .error
+        .as_ref()
+        .map(|error| error.message.as_str())
+    else {
+        return false;
+    };
+    if non_retryable_assistant_error_pattern().is_match(error_message) {
+        return false;
+    }
+    retryable_assistant_error_pattern().is_match(error_message)
+}
+
+/// Retries a completed assistant-producing call with Pi's bounded assistant
+/// retry semantics and no lifecycle observer.
+pub async fn retry_assistant_call<F, Fut>(
+    produce: F,
+    policy: Option<&AssistantRetryPolicy>,
+    cancellation: &CancellationToken,
+) -> AssistantMessage
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = AssistantMessage>,
+{
+    retry_assistant_call_observed(produce, policy, cancellation, |_| {
+        futures_util::future::ready(())
+    })
+    .await
+}
+
+/// Retries a completed assistant-producing call while reporting the lifecycle
+/// callbacks exercised by pinned Pi's `retryAssistantCall` helper.
+pub async fn retry_assistant_call_observed<F, Fut, O, ObserverFuture>(
+    mut produce: F,
+    policy: Option<&AssistantRetryPolicy>,
+    cancellation: &CancellationToken,
+    mut observer: O,
+) -> AssistantMessage
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = AssistantMessage>,
+    O: FnMut(AssistantRetryEvent) -> ObserverFuture,
+    ObserverFuture: Future<Output = ()>,
+{
+    let max_attempts = policy
+        .filter(|policy| policy.enabled)
+        .map_or(0, |policy| policy.max_retries);
+    let mut attempt = 0;
+    let mut last_retry: Option<(u32, String)> = None;
+
+    loop {
+        let response = produce().await;
+        if response.finish.reason == AssistantFinishReason::Aborted {
+            if let Some((attempt, _)) = last_retry {
+                observer(AssistantRetryEvent::Finished {
+                    success: false,
+                    attempt,
+                    final_error: None,
+                })
+                .await;
+            }
+            return response;
+        }
+        if response.finish.reason != AssistantFinishReason::Error {
+            if let Some((attempt, _)) = last_retry {
+                observer(AssistantRetryEvent::Finished {
+                    success: true,
+                    attempt,
+                    final_error: None,
+                })
+                .await;
+            }
+            return response;
+        }
+
+        if attempt >= max_attempts || !is_retryable_assistant_error(&response) {
+            if let Some((attempt, _)) = last_retry {
+                observer(AssistantRetryEvent::Finished {
+                    success: false,
+                    attempt,
+                    final_error: response
+                        .finish
+                        .error
+                        .as_ref()
+                        .map(|error| error.message.clone()),
+                })
+                .await;
+            }
+            return response;
+        }
+
+        attempt += 1;
+        let error_message = response
+            .finish
+            .error
+            .as_ref()
+            .map_or_else(|| "Unknown error".to_owned(), |error| error.message.clone());
+        last_retry = Some((attempt, error_message.clone()));
+        let multiplier = 1_u32
+            .checked_shl(attempt.saturating_sub(1))
+            .unwrap_or(u32::MAX);
+        let delay = policy
+            .expect("enabled retry attempts require a policy")
+            .base_delay
+            .saturating_mul(multiplier);
+        observer(AssistantRetryEvent::Scheduled {
+            attempt,
+            max_attempts,
+            delay,
+            error_message: error_message.clone(),
+        })
+        .await;
+
+        if !assistant_retry_sleep(delay, cancellation).await {
+            observer(AssistantRetryEvent::Finished {
+                success: false,
+                attempt,
+                final_error: Some(error_message),
+            })
+            .await;
+            let mut aborted = response;
+            aborted.finish.reason = AssistantFinishReason::Aborted;
+            aborted.finish.error = None;
+            return aborted;
+        }
+        observer(AssistantRetryEvent::AttemptStarted).await;
+    }
+}
+
+async fn assistant_retry_sleep(duration: Duration, cancellation: &CancellationToken) -> bool {
+    // Pi's abortableSleep performs this check before arming its timer.  Apart
+    // from avoiding needless work, the ordering is observable for a
+    // zero-duration backoff: an already-aborted signal must win over a timer
+    // that is immediately ready.
+    if cancellation.is_cancelled() {
+        return false;
+    }
+    let delay = Box::pin(futures_timer::Delay::new(duration));
+    let cancelled = Box::pin(cancellation.cancelled());
+    matches!(select(delay, cancelled).await, Either::Left(_))
+}
+
+fn non_retryable_assistant_error_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        Regex::new(
+            "(?i)GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing",
+        )
+        .expect("assistant non-retryable pattern is valid")
+    })
+}
+
+fn retryable_assistant_error_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        Regex::new(
+            "(?i)overloaded|rate.?limit|too many requests|429|500|502|503|504|524|service.?unavailable|server.?error|internal.?error|provider.?returned.?error|exceeded request buffer limit while retrying upstream|network.?error|connection.?error|connection.?refused|connection.?lost|other side closed|fetch failed|getaddrinfo|ENOTFOUND|EAI_AGAIN|upstream.?connect|reset before headers|socket hang up|socket connection was closed|timed? out|timeout|terminated|websocket.?closed|websocket.?error|ended without|stream ended before message_stop|stream ended before a terminal response event|http2 request did not get a response|retry delay|you can retry your request|try your request again|please retry your request|ResourceExhausted",
+        )
+        .expect("assistant retryable pattern is valid")
+    })
+}
 
 /// Retry limits and backoff parameters resolved for one logical request.
 #[derive(Clone, Debug, PartialEq)]

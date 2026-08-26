@@ -914,6 +914,42 @@ impl<T: Clone> ThinkingLevelMap<T> {
     }
 }
 
+/// Builds a typed OpenAI effort map from values verified by catalog
+/// generation.
+///
+/// Unverified levels remain explicitly unsupported. `none` maps the
+/// provider-neutral off level; a toggle or budget control without a verified
+/// effort list is intentionally handled by its API-family adapter instead.
+pub fn openai_verified_effort_map<'a>(
+    values: impl IntoIterator<Item = Option<&'a str>>,
+) -> Option<ThinkingLevelMap<OpenAiThinkingValue>> {
+    let values = values.into_iter().flatten().collect::<BTreeSet<_>>();
+    let recognized = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+    if !recognized.iter().any(|value| values.contains(value)) {
+        return None;
+    }
+    let support = |level: &str| {
+        Some(if values.contains(level) {
+            LevelSupport::Value(OpenAiThinkingValue::Effort(level.into()))
+        } else {
+            LevelSupport::Unsupported
+        })
+    };
+    Some(ThinkingLevelMap {
+        off: Some(if values.contains("none") {
+            LevelSupport::Value(OpenAiThinkingValue::Effort("none".into()))
+        } else {
+            LevelSupport::Unsupported
+        }),
+        minimal: support("minimal"),
+        low: support("low"),
+        medium: support("medium"),
+        high: support("high"),
+        xhigh: support("xhigh"),
+        max: support("max"),
+    })
+}
+
 /// Versioned unknown extension value (Architecture v2 part 2 §5.1).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VersionedExtension {

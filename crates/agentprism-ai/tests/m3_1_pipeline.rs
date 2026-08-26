@@ -1250,6 +1250,7 @@ struct CapturedRequest {
     endpoint: Url,
     max_retries: u32,
     timeout: Option<Duration>,
+    telemetry_context: Option<TelemetryContextHandle>,
 }
 
 #[derive(Default)]
@@ -1268,6 +1269,7 @@ impl ChatApi for RecordingChatApi {
             endpoint: request.endpoint,
             max_retries: request.retry_policy.max_retries,
             timeout: request.timeout,
+            telemetry_context: request.request_options.telemetry_context,
         });
         Box::pin(async { Ok(AssistantStream::new(futures_util::stream::empty())) })
     }
@@ -1289,6 +1291,7 @@ impl LocalChatApi for LocalRecordingChatApi {
             endpoint: request.endpoint,
             max_retries: request.retry_policy.max_retries,
             timeout: request.timeout,
+            telemetry_context: request.request_options.telemetry_context,
         });
         Box::pin(async { Ok(LocalAssistantStream::new(futures_util::stream::empty())) })
     }
@@ -1379,6 +1382,7 @@ fn routed_request(
         headers: explicit_headers,
         max_retries: Some(2),
         timeout_ms: Some(321),
+        telemetry_context: Some(TelemetryContextHandle::new(String::from("send-trace"))),
         ..SimpleGenerationOptions::default()
     };
     block_on(ModelRuntime::stream(
@@ -1429,6 +1433,7 @@ fn routed_local_request(
         headers: explicit_headers,
         max_retries: Some(2),
         timeout_ms: Some(321),
+        telemetry_context: Some(TelemetryContextHandle::new(String::from("local-trace"))),
         ..SimpleGenerationOptions::default()
     };
     block_on(LocalModelRuntime::stream(
@@ -1754,6 +1759,41 @@ fn timeout_ms_is_forwarded_by_models() {
         Vec::new(),
     );
     assert_eq!(captured.timeout, Some(Duration::from_millis(321)));
+}
+
+#[test]
+fn telemetry_context_survives_models_dispatch_send_and_local_pi_exact() {
+    let _basis = "packages/ai/test/telemetry-options.test.ts";
+    let (_, send) = routed_request(
+        HeaderMapSpec::new(),
+        HeaderMapSpec::new(),
+        HeaderMap::new(),
+        HeaderMapSpec::new(),
+        Vec::new(),
+    );
+    assert_eq!(
+        send.telemetry_context
+            .as_ref()
+            .and_then(|context| context.downcast_ref::<String>())
+            .map(String::as_str),
+        Some("send-trace")
+    );
+
+    let (_, local) = routed_local_request(
+        HeaderMapSpec::new(),
+        HeaderMapSpec::new(),
+        HeaderMap::new(),
+        HeaderMapSpec::new(),
+        Vec::new(),
+    );
+    assert_eq!(
+        local
+            .telemetry_context
+            .as_ref()
+            .and_then(|context| context.downcast_ref::<String>())
+            .map(String::as_str),
+        Some("local-trace")
+    );
 }
 
 enum PayloadEdit {

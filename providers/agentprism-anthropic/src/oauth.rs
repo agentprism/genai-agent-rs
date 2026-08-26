@@ -223,7 +223,16 @@ async fn authorize_send(
             parse_authorization(arrival.url.as_str(), expected_state)
         }
         (None, true) => {
-            prompt_manual_send(interaction, challenge_id, expected_state, cancellation).await
+            let prompt_cancellation = cancellation.child();
+            let result = prompt_manual_send(
+                interaction,
+                challenge_id,
+                expected_state,
+                prompt_cancellation.clone(),
+            )
+            .await;
+            prompt_cancellation.cancel();
+            result
         }
         (None, false) => unreachable!("unsupported capabilities were rejected"),
     }
@@ -282,7 +291,16 @@ async fn authorize_local(
             parse_authorization(arrival.url.as_str(), expected_state)
         }
         (None, true) => {
-            prompt_manual_local(interaction, challenge_id, expected_state, cancellation).await
+            let prompt_cancellation = cancellation.child();
+            let result = prompt_manual_local(
+                interaction,
+                challenge_id,
+                expected_state,
+                prompt_cancellation.clone(),
+            )
+            .await;
+            prompt_cancellation.cancel();
+            result
         }
         (None, false) => unreachable!("unsupported capabilities were rejected"),
     }

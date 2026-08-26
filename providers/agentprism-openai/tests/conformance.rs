@@ -1,35 +1,36 @@
 use agentprism_ai::{
     ApiFamily, ApiModelConfig, ApiRequestOptions, AssistantEvent, AssistantFinish,
-    AssistantFinishReason, AssistantMessage, AuthAnswer, AuthError, AuthEvent,
+    AssistantFinishReason, AssistantMessage, AuthAnswer, AuthContext, AuthError, AuthEvent,
     AuthHostCapabilities, AuthInteraction, AuthInteractionError, AuthPrompt, AuthResolver,
     CONTEXT_SAFETY_TOKENS, CacheControlFormat, CacheRetention, CacheWriteRetention,
     CacheWriteRetentionPricing, CancellationToken, ChatTemplateKwargValue, ChatTemplateValues,
     ChatTemplateVariable, ChatTemplateVariableName, CommonModelDescriptor, ConstrainedSampling,
     ConstrainedSamplingConfig, ContentBlock, ContentBlockId, Context, Credential, Currency,
-    DefaultRetryClassifier, DeferredToolsMode, EncodeContext, GrammarFormat, HeaderMapSpec,
-    HeaderTransform, HeaderTransformContext, HttpRequest, HttpResponse, HttpTransport,
-    InMemoryCredentialStore, JsonSchemaStrictMode, LevelSupport, LocalAuthInteraction,
-    LocalAuthResolver, LocalBoxFuture, LocalDefaultRetryClassifier, LocalHeaderTransform,
-    LocalHttpResponse, LocalHttpTransport, LocalModelRuntime, LocalModels, LocalOAuthAuth,
-    LocalProviderRegistration, LocalRedirectReceiver, LocalResolveAuthRequest,
-    LocalResolvedApiRequest, MaxTokensField, Message, MessageId, MiddlewareError, Modality,
-    ModalityCapabilities, ModelDescriptor, ModelLimits, ModelPricing, ModelRef, ModelRequest,
-    ModelRuntime, Models, MoneyRate, OAuthAuth, OAuthCredential, OPENAI_CHAT_REASONING_DETAIL_KIND,
-    OPENAI_CHAT_REASONING_FIELD_KIND, OpenAiAllowedToolsMode, OpenAiCompletions,
-    OpenAiCompletionsCompat, OpenAiCompletionsHandoff, OpenAiCompletionsModelConfig,
-    OpenAiCompletionsOptions, OpenAiCompletionsToolChoice, OpenAiReasoningEffortProvenance,
-    OpenAiReasoningMode, OpenAiReasoningPlan, OpenAiReasoningTokenBudget, OpenAiResponses,
-    OpenAiResponsesOptions, OpenAiThinkingFormat, OpenAiThinkingValue, OrderedJsonArray,
-    OrderedJsonObject, OrderedJsonValue, OrderedJsonWriter, ProviderOAuthExtra,
-    ProviderRegistration, RedirectArrival, RedirectReceiver, RedirectReceiverRequest,
-    ReplayApplicability, ReplayCompleteness, ReplayEnvelope, ReplayItem, ReplayItemId, ReplayKind,
-    ReplayScope, ReplayTarget, ResolveAuthRequest, ResolvedApiRequest, RetryPolicy, SecretString,
-    SendBoxFuture, SessionAffinityFormat, SimpleGenerationOptions, SimpleLoweringContext,
-    ThinkingBudgets, ThinkingLevelMap, ThinkingTokenBudgetField, Timestamp, TokenPriceRates,
-    ToolCall, ToolCallId, ToolChoice, ToolResultContent, ToolResultMessage, ToolSpec,
-    TransportError, TypedModelDescriptor, Usage, UsageSource, UserMessage, estimate_context_tokens,
-    import_legacy_openai_chat_tool_signatures, openai_grammar_tool_input_properties,
-    parse_ordered_json, resolve_openai_completions_compat, transform_context_for_model,
+    DefaultRetryClassifier, DeferredToolsMode, EmptyAuthContext, EncodeContext, GrammarFormat,
+    HeaderMapSpec, HeaderTransform, HeaderTransformContext, HttpRequest, HttpResponse,
+    HttpTransport, InMemoryCredentialStore, JsonSchemaStrictMode, LevelSupport,
+    LocalAuthInteraction, LocalAuthResolver, LocalBoxFuture, LocalDefaultRetryClassifier,
+    LocalHeaderTransform, LocalHttpResponse, LocalHttpTransport, LocalModelRuntime, LocalModels,
+    LocalOAuthAuth, LocalProviderRegistration, LocalRedirectReceiver, LocalResolveAuthRequest,
+    LocalResolvedApiRequest, MapAuthContext, MaxTokensField, Message, MessageId, MiddlewareError,
+    Modality, ModalityCapabilities, ModelDescriptor, ModelLimits, ModelPricing, ModelRef,
+    ModelRequest, ModelRuntime, Models, MoneyRate, OAuthAuth, OAuthCredential,
+    OPENAI_CHAT_REASONING_DETAIL_KIND, OPENAI_CHAT_REASONING_FIELD_KIND, OpenAiAllowedToolsMode,
+    OpenAiCompletions, OpenAiCompletionsCompat, OpenAiCompletionsHandoff,
+    OpenAiCompletionsModelConfig, OpenAiCompletionsOptions, OpenAiCompletionsToolChoice,
+    OpenAiReasoningEffortProvenance, OpenAiReasoningMode, OpenAiReasoningPlan,
+    OpenAiReasoningTokenBudget, OpenAiResponses, OpenAiResponsesOptions, OpenAiThinkingFormat,
+    OpenAiThinkingValue, OrderedJsonArray, OrderedJsonObject, OrderedJsonValue, OrderedJsonWriter,
+    ProviderOAuthExtra, ProviderRegistration, RedirectArrival, RedirectReceiver,
+    RedirectReceiverRequest, ReplayApplicability, ReplayCompleteness, ReplayEnvelope, ReplayItem,
+    ReplayItemId, ReplayKind, ReplayScope, ReplayTarget, ResolveAuthRequest, ResolvedApiRequest,
+    RetryPolicy, SecretString, SendBoxFuture, SessionAffinityFormat, SimpleGenerationOptions,
+    SimpleLoweringContext, ThinkingBudgets, ThinkingLevelMap, ThinkingTokenBudgetField, Timestamp,
+    TokenPriceRates, ToolCall, ToolCallId, ToolChoice, ToolResultContent, ToolResultMessage,
+    ToolSpec, TransportError, TypedModelDescriptor, Usage, UsageSource, UserMessage,
+    estimate_context_tokens, import_legacy_openai_chat_tool_signatures,
+    openai_grammar_tool_input_properties, parse_ordered_json, resolve_openai_completions_compat,
+    transform_context_for_model,
 };
 use agentprism_deepseek::{deepseek_models, deepseek_provider_with_api};
 use agentprism_openai::{
@@ -122,6 +123,665 @@ fn openai_tool_choice_is_omitted_without_active_tools_pi_exact() {
         encode_options(&model, &context, options),
         br#"{"model":"fixture-openai-model","messages":[{"role":"user","content":"hello"}],"stream":true,"stream_options":{"include_usage":true},"max_tokens":8192,"reasoning_effort":"none"}"#
     );
+}
+
+/// Architecture v2 part 2 §3.3, §3.6, and §10.8; pinned Pi basis:
+/// `packages/ai/test/openai-completions-empty-tools.test.ts`.
+#[test]
+fn openai_completions_empty_tools_and_token_clamp_matrix_pi_exact() {
+    let mut model = base_fixture_model();
+    let ApiModelConfig::OpenAiCompletions(config) = &mut model.api else {
+        unreachable!()
+    };
+    config.compat.max_tokens_field = Some(MaxTokensField::MaxCompletionTokens);
+    let context = one_user_context();
+    let body: Value = serde_json::from_slice(&encode_options(
+        &model,
+        &context,
+        lower_simple_options(&model, &context, &SimpleGenerationOptions::default()),
+    ))
+    .expect("default Completions wire");
+    // Rust's Context uses a canonical empty Vec for both Pi's omitted and
+    // explicitly empty tool lists; both upstream scenarios therefore lower
+    // through this same assertion.
+    assert!(body.get("tools").is_none());
+    assert_eq!(
+        body["max_completion_tokens"],
+        model.common.limits.max_output_tokens
+    );
+    assert!(body.get("max_tokens").is_none());
+
+    let explicit = lower_simple_options(
+        &model,
+        &context,
+        &SimpleGenerationOptions {
+            max_output_tokens: Some(1_234),
+            ..Default::default()
+        },
+    );
+    assert_eq!(explicit.max_tokens, Some(1_234));
+    let explicit_body: Value = serde_json::from_slice(&encode_options(&model, &context, explicit))
+        .expect("explicit max token wire");
+    assert_eq!(explicit_body["max_completion_tokens"], 1_234);
+    assert!(explicit_body.get("max_tokens").is_none());
+
+    let mut constrained = model.clone();
+    constrained.common.limits.context_window = 10_000;
+    constrained.common.limits.max_output_tokens = 8_000;
+    let mut large_context = Context::new(None);
+    large_context.messages.push(Message::User(UserMessage {
+        id: MessageId::new("large-user"),
+        content: vec![ContentBlock::Text {
+            id: ContentBlockId::new("large-user-text"),
+            text: "x".repeat(8_000),
+        }],
+        timestamp: Timestamp::default(),
+    }));
+    let default_clamp = lower_simple_options(
+        &constrained,
+        &large_context,
+        &SimpleGenerationOptions::default(),
+    );
+    assert_eq!(default_clamp.max_tokens, Some(3_904));
+    let default_clamp_body: Value =
+        serde_json::from_slice(&encode_options(&constrained, &large_context, default_clamp))
+            .expect("default clamped wire");
+    assert_eq!(default_clamp_body["max_completion_tokens"], 3_904);
+    assert!(default_clamp_body.get("max_tokens").is_none());
+    let explicit_clamp = lower_simple_options(
+        &constrained,
+        &large_context,
+        &SimpleGenerationOptions {
+            max_output_tokens: Some(7_000),
+            ..Default::default()
+        },
+    );
+    assert_eq!(explicit_clamp.max_tokens, Some(3_904));
+    let explicit_clamp_body: Value = serde_json::from_slice(&encode_options(
+        &constrained,
+        &large_context,
+        explicit_clamp,
+    ))
+    .expect("explicit clamped wire");
+    assert_eq!(explicit_clamp_body["max_completion_tokens"], 3_904);
+    assert!(explicit_clamp_body.get("max_tokens").is_none());
+
+    assert_history_only_tools_omit_tool_stream();
+}
+
+/// Architecture v2 part 2 §3.6 and §10.8; pinned Pi basis:
+/// `packages/ai/test/cache-retention.test.ts`, OpenAI Completions scenarios.
+#[test]
+fn openai_completions_cache_retention_policy_matrix_pi_exact() {
+    let mut model = base_fixture_model();
+    model.common.base_url = Url::parse("https://my-proxy.example.com/v1").expect("proxy base URL");
+    let context = one_user_context();
+
+    let long: Value = serde_json::from_slice(&encode_options(
+        &model,
+        &context,
+        OpenAiCompletionsOptions {
+            cache_retention: CacheRetention::Long,
+            session_id: Some("session-completions".into()),
+            ..default_full_options(OpenAiReasoningPlan::disabled(), OrderedJsonObject::new())
+        },
+    ))
+    .expect("long-cache Completions wire");
+    assert_eq!(long["prompt_cache_key"], "session-completions");
+    assert_eq!(long["prompt_cache_retention"], "24h");
+
+    let ApiModelConfig::OpenAiCompletions(config) = &mut model.api else {
+        unreachable!()
+    };
+    config.compat.supports_long_cache_retention = Some(false);
+    let unsupported: Value = serde_json::from_slice(&encode_options(
+        &model,
+        &context,
+        OpenAiCompletionsOptions {
+            cache_retention: CacheRetention::Long,
+            session_id: Some("session-completions-false".into()),
+            ..default_full_options(OpenAiReasoningPlan::disabled(), OrderedJsonObject::new())
+        },
+    ))
+    .expect("unsupported long-cache Completions wire");
+    assert!(unsupported.get("prompt_cache_key").is_none());
+    assert!(unsupported.get("prompt_cache_retention").is_none());
+
+    let none: Value = serde_json::from_slice(&encode_options(
+        &model,
+        &context,
+        OpenAiCompletionsOptions {
+            cache_retention: CacheRetention::None,
+            session_id: Some("session-none".into()),
+            ..default_full_options(OpenAiReasoningPlan::disabled(), OrderedJsonObject::new())
+        },
+    ))
+    .expect("disabled-cache Completions wire");
+    assert!(none.get("prompt_cache_key").is_none());
+    assert!(none.get("prompt_cache_retention").is_none());
+}
+
+/// Architecture v2 part 2 §3.6 and §10.8; pinned Pi basis:
+/// `packages/ai/test/openai-completions-prompt-cache.test.ts`.
+#[test]
+fn openai_completions_prompt_cache_and_affinity_matrix_pi_exact() {
+    let mut direct = base_fixture_model();
+    direct.common.base_url = Url::parse("https://api.openai.com/v1").expect("OpenAI base URL");
+
+    let short = capture_completions_request(
+        direct.clone(),
+        SimpleGenerationOptions {
+            session_id: Some("session-123".into()),
+            ..Default::default()
+        },
+        Arc::new(EmptyAuthContext),
+    );
+    let short_body: Value = serde_json::from_slice(&short.body).expect("short cache body");
+    assert_eq!(short_body["prompt_cache_key"], "session-123");
+    assert!(short_body.get("prompt_cache_retention").is_none());
+
+    let long = capture_completions_request(
+        direct.clone(),
+        SimpleGenerationOptions {
+            session_id: Some("x".repeat(67)),
+            cache_retention: Some(CacheRetention::Long),
+            ..Default::default()
+        },
+        Arc::new(EmptyAuthContext),
+    );
+    let long_body: Value = serde_json::from_slice(&long.body).expect("long cache body");
+    assert_eq!(long_body["prompt_cache_key"], "x".repeat(64));
+    assert_eq!(long_body["prompt_cache_retention"], "24h");
+
+    let environment_long = capture_completions_request(
+        direct.clone(),
+        SimpleGenerationOptions {
+            session_id: Some("session-env".into()),
+            ..Default::default()
+        },
+        Arc::new(MapAuthContext::new(
+            BTreeMap::from([("PI_CACHE_RETENTION".to_owned(), "long".to_owned())]),
+            Vec::<String>::new(),
+        )),
+    );
+    let environment_body: Value =
+        serde_json::from_slice(&environment_long.body).expect("environment cache body");
+    assert_eq!(environment_body["prompt_cache_key"], "session-env");
+    assert_eq!(environment_body["prompt_cache_retention"], "24h");
+
+    if let ApiModelConfig::OpenAiCompletions(config) = &mut direct.api {
+        config.compat.send_session_affinity_headers = Some(true);
+        config.compat.session_affinity_format = Some(SessionAffinityFormat::OpenAi);
+    } else {
+        unreachable!()
+    }
+    let affinity = capture_completions_request(
+        direct.clone(),
+        SimpleGenerationOptions {
+            session_id: Some("session-affinity".into()),
+            cache_retention: Some(CacheRetention::Short),
+            ..Default::default()
+        },
+        Arc::new(EmptyAuthContext),
+    );
+    for name in ["session_id", "x-client-request-id", "x-session-affinity"] {
+        assert_eq!(affinity.headers[name], "session-affinity", "{name}");
+    }
+
+    if let ApiModelConfig::OpenAiCompletions(config) = &mut direct.api {
+        config.compat.session_affinity_format = Some(SessionAffinityFormat::OpenAiNoSession);
+    }
+    let no_session = capture_completions_request(
+        direct.clone(),
+        SimpleGenerationOptions {
+            session_id: Some("session-nosession".into()),
+            cache_retention: Some(CacheRetention::Short),
+            ..Default::default()
+        },
+        Arc::new(EmptyAuthContext),
+    );
+    let no_session_body: Value =
+        serde_json::from_slice(&no_session.body).expect("no-session cache body");
+    assert_eq!(no_session_body["prompt_cache_key"], "session-nosession");
+    assert!(no_session_body.get("session_id").is_none());
+    assert!(no_session.headers.get("session_id").is_none());
+    assert_eq!(
+        no_session.headers["x-client-request-id"],
+        "session-nosession"
+    );
+    assert_eq!(
+        no_session.headers["x-session-affinity"],
+        "session-nosession"
+    );
+    assert!(no_session.headers.get("x-session-id").is_none());
+
+    for model_id in [
+        "accounts/fireworks/models/glm-5p2",
+        "accounts/fireworks/routers/glm-5p2-fast",
+    ] {
+        let mut fireworks = base_fixture_model();
+        fireworks.common.model_ref = ModelRef::new("fireworks", model_id);
+        fireworks.common.base_url =
+            Url::parse("https://api.fireworks.ai/inference/v1").expect("Fireworks URL");
+        if let ApiModelConfig::OpenAiCompletions(config) = &mut fireworks.api {
+            config.compat.send_session_affinity_headers = Some(true);
+            config.compat.session_affinity_format = Some(SessionAffinityFormat::OpenAi);
+        }
+        let request = capture_completions_request(
+            fireworks,
+            SimpleGenerationOptions {
+                session_id: Some("fireworks-session".into()),
+                ..Default::default()
+            },
+            Arc::new(EmptyAuthContext),
+        );
+        assert_eq!(
+            request.headers["x-session-affinity"], "fireworks-session",
+            "{model_id}"
+        );
+    }
+
+    let mut explicit_openrouter = base_fixture_model();
+    explicit_openrouter.common.base_url =
+        Url::parse("https://proxy.example.com/v1").expect("proxy URL");
+    if let ApiModelConfig::OpenAiCompletions(config) = &mut explicit_openrouter.api {
+        config.compat.send_session_affinity_headers = Some(true);
+        config.compat.session_affinity_format = Some(SessionAffinityFormat::OpenRouter);
+    }
+    let explicit_openrouter = capture_completions_request(
+        explicit_openrouter,
+        SimpleGenerationOptions {
+            session_id: Some("session-proxy".into()),
+            ..Default::default()
+        },
+        Arc::new(EmptyAuthContext),
+    );
+    let explicit_openrouter_body: Value =
+        serde_json::from_slice(&explicit_openrouter.body).expect("explicit OpenRouter cache body");
+    assert!(explicit_openrouter_body.get("prompt_cache_key").is_none());
+    assert!(explicit_openrouter_body.get("session_id").is_none());
+    assert_eq!(explicit_openrouter.headers["x-session-id"], "session-proxy");
+    for name in ["session_id", "x-client-request-id", "x-session-affinity"] {
+        assert!(explicit_openrouter.headers.get(name).is_none(), "{name}");
+    }
+
+    direct.common.base_url = Url::parse("https://openrouter.ai/api/v1").expect("OpenRouter URL");
+    if let ApiModelConfig::OpenAiCompletions(config) = &mut direct.api {
+        config.compat.session_affinity_format = None;
+    }
+    let openrouter = capture_completions_request(
+        direct.clone(),
+        SimpleGenerationOptions {
+            session_id: Some("session-openrouter".into()),
+            cache_retention: Some(CacheRetention::Short),
+            ..Default::default()
+        },
+        Arc::new(EmptyAuthContext),
+    );
+    assert_eq!(openrouter.headers["x-session-id"], "session-openrouter");
+    assert!(openrouter.headers.get("session_id").is_none());
+    let openrouter_body: Value =
+        serde_json::from_slice(&openrouter.body).expect("auto OpenRouter cache body");
+    assert!(openrouter_body.get("prompt_cache_key").is_none());
+    for name in ["x-client-request-id", "x-session-affinity"] {
+        assert!(openrouter.headers.get(name).is_none(), "{name}");
+    }
+
+    let mut disabled_openrouter = direct.clone();
+    if let ApiModelConfig::OpenAiCompletions(config) = &mut disabled_openrouter.api {
+        config.compat.send_session_affinity_headers = Some(false);
+    }
+    let disabled_openrouter = capture_completions_request(
+        disabled_openrouter,
+        SimpleGenerationOptions {
+            session_id: Some("session-openrouter".into()),
+            ..Default::default()
+        },
+        Arc::new(EmptyAuthContext),
+    );
+    let disabled_openrouter_body: Value =
+        serde_json::from_slice(&disabled_openrouter.body).expect("disabled OpenRouter cache body");
+    assert!(disabled_openrouter_body.get("prompt_cache_key").is_none());
+    for name in [
+        "x-session-id",
+        "session_id",
+        "x-client-request-id",
+        "x-session-affinity",
+    ] {
+        assert!(disabled_openrouter.headers.get(name).is_none(), "{name}");
+    }
+
+    let mut explicit_headers = HeaderMapSpec::new();
+    explicit_headers.insert("session_id".into(), Some("override-session".into()));
+    explicit_headers.insert(
+        "x-client-request-id".into(),
+        Some("override-request".into()),
+    );
+    explicit_headers.insert(
+        "x-session-affinity".into(),
+        Some("override-affinity".into()),
+    );
+    direct.common.base_url = Url::parse("https://api.openai.com/v1").expect("OpenAI URL");
+    if let ApiModelConfig::OpenAiCompletions(config) = &mut direct.api {
+        config.compat.session_affinity_format = Some(SessionAffinityFormat::OpenAi);
+    }
+    let explicit = capture_completions_request(
+        direct.clone(),
+        SimpleGenerationOptions {
+            session_id: Some("generated".into()),
+            cache_retention: Some(CacheRetention::Short),
+            headers: explicit_headers,
+            ..Default::default()
+        },
+        Arc::new(EmptyAuthContext),
+    );
+    assert_eq!(explicit.headers["session_id"], "override-session");
+    assert_eq!(explicit.headers["x-client-request-id"], "override-request");
+    assert_eq!(explicit.headers["x-session-affinity"], "override-affinity");
+
+    let none = capture_completions_request(
+        direct,
+        SimpleGenerationOptions {
+            session_id: Some("disabled".into()),
+            cache_retention: Some(CacheRetention::None),
+            ..Default::default()
+        },
+        Arc::new(EmptyAuthContext),
+    );
+    assert!(none.headers.get("session_id").is_none());
+    assert!(none.headers.get("x-client-request-id").is_none());
+    assert!(none.headers.get("x-session-affinity").is_none());
+    let none_body: Value = serde_json::from_slice(&none.body).expect("disabled cache body");
+    assert!(none_body.get("prompt_cache_key").is_none());
+    assert!(none_body.get("prompt_cache_retention").is_none());
+}
+
+/// Architecture v2 part 2 §3.6 and §10.8; pinned Pi basis:
+/// `packages/ai/test/openai-completions-cache-control-format.test.ts`.
+#[test]
+fn openai_completions_anthropic_cache_marker_matrix_pi_exact() {
+    let mut model = base_fixture_model();
+    let ApiModelConfig::OpenAiCompletions(config) = &mut model.api else {
+        unreachable!()
+    };
+    config.compat.cache_control_format = Some(CacheControlFormat::Anthropic);
+
+    let mut context = one_user_context();
+    context.system_prompt = Some("System prompt".into());
+    context.tools.push(tool_spec("read", object_schema(), None));
+    let marked: Value = serde_json::from_slice(&encode_options(
+        &model,
+        &context,
+        OpenAiCompletionsOptions {
+            cache_retention: CacheRetention::Short,
+            ..default_full_options(OpenAiReasoningPlan::disabled(), OrderedJsonObject::new())
+        },
+    ))
+    .expect("marked cache body");
+    assert_eq!(
+        marked["messages"][0]["content"][0]["cache_control"],
+        serde_json::json!({"type":"ephemeral"})
+    );
+    assert_eq!(
+        marked["tools"][0]["cache_control"],
+        serde_json::json!({"type":"ephemeral"})
+    );
+    let last = marked["messages"]
+        .as_array()
+        .expect("messages")
+        .last()
+        .unwrap();
+    assert_eq!(
+        last["content"][0]["cache_control"],
+        serde_json::json!({"type":"ephemeral"})
+    );
+
+    let mut tool_context = Context::new(Some("System prompt".into()));
+    tool_context.messages.push(Message::User(UserMessage {
+        id: MessageId::new("tool-user"),
+        content: vec![ContentBlock::Text {
+            id: ContentBlockId::new("tool-user-text"),
+            text: "Read the file".into(),
+        }],
+        timestamp: Timestamp::default(),
+    }));
+    tool_context
+        .messages
+        .push(Message::Assistant(assistant_with_tool_call()));
+    tool_context
+        .messages
+        .push(Message::ToolResult(ToolResultMessage {
+            id: MessageId::new("tool-result"),
+            tool_call_id: ToolCallId::new("call-1"),
+            tool_name: "read_file".into(),
+            content: vec![ToolResultContent::Text {
+                id: ContentBlockId::new("tool-result-text"),
+                text: "file contents".into(),
+            }],
+            details: None,
+            usage: None,
+            added_tool_names: Vec::new(),
+            is_error: false,
+            timestamp: Timestamp::default(),
+        }));
+    tool_context
+        .tools
+        .push(tool_spec("read_file", object_schema(), None));
+    let tool_marked: Value = serde_json::from_slice(&encode_options(
+        &model,
+        &tool_context,
+        OpenAiCompletionsOptions {
+            cache_retention: CacheRetention::Short,
+            ..default_full_options(OpenAiReasoningPlan::disabled(), OrderedJsonObject::new())
+        },
+    ))
+    .expect("tool-result cache body");
+    assert_eq!(tool_marked["messages"][1]["content"], "Read the file");
+    let last = tool_marked["messages"]
+        .as_array()
+        .expect("messages")
+        .last()
+        .unwrap();
+    assert_eq!(last["role"], "tool");
+    assert_eq!(
+        last["content"][0]["cache_control"],
+        serde_json::json!({"type":"ephemeral"})
+    );
+
+    let disabled: Value = serde_json::from_slice(&encode_options(
+        &model,
+        &context,
+        OpenAiCompletionsOptions {
+            cache_retention: CacheRetention::None,
+            ..default_full_options(OpenAiReasoningPlan::disabled(), OrderedJsonObject::new())
+        },
+    ))
+    .expect("disabled cache body");
+    assert!(disabled["messages"][0]["content"].is_string());
+    assert!(disabled["tools"][0].get("cache_control").is_none());
+    assert!(
+        disabled["messages"]
+            .as_array()
+            .expect("messages")
+            .last()
+            .unwrap()["content"]
+            .is_string()
+    );
+}
+
+/// Architecture v2 part 2 §3.3 and §10.8; pinned Pi basis:
+/// `packages/ai/test/openai-completions-tool-result-images.test.ts`.
+#[test]
+fn openai_completions_tool_result_image_batch_and_empty_placeholder_pi_exact() {
+    let mut model = base_fixture_model();
+    model.common.modalities.input.insert(Modality::Image);
+    let mut assistant = assistant_with_tool_call();
+    assistant.content = [
+        ("tool-1", "img-1.png", "tool-content-1"),
+        ("tool-2", "img-2.png", "tool-content-2"),
+    ]
+    .into_iter()
+    .map(|(id, path, block)| ContentBlock::ToolCall {
+        id: ContentBlockId::new(block),
+        call: ToolCall {
+            id: ToolCallId::new(id),
+            name: "read".into(),
+            arguments: serde_json::json!({"path":path}),
+        },
+    })
+    .collect();
+    let mut context = Context::new(None);
+    context.messages.push(Message::User(UserMessage {
+        id: MessageId::new("image-user"),
+        content: vec![ContentBlock::Text {
+            id: ContentBlockId::new("image-user-text"),
+            text: "Read the images".into(),
+        }],
+        timestamp: Timestamp::default(),
+    }));
+    context.messages.push(Message::Assistant(assistant));
+    for (index, call_id) in ["tool-1", "tool-2"].into_iter().enumerate() {
+        context
+            .messages
+            .push(Message::ToolResult(ToolResultMessage {
+                id: MessageId::new(format!("image-result-{index}")),
+                tool_call_id: ToolCallId::new(call_id),
+                tool_name: "read".into(),
+                content: vec![
+                    ToolResultContent::Text {
+                        id: ContentBlockId::new(format!("image-notice-{index}")),
+                        text: "Read image file [image/png]".into(),
+                    },
+                    ToolResultContent::Image {
+                        id: ContentBlockId::new(format!("image-{index}")),
+                        data: "ZmFrZQ==".into(),
+                        mime_type: "image/png".into(),
+                    },
+                ],
+                details: None,
+                usage: None,
+                added_tool_names: Vec::new(),
+                is_error: false,
+                timestamp: Timestamp::default(),
+            }));
+    }
+    let body: Value = serde_json::from_slice(&encode_direct(
+        &model,
+        &context,
+        OpenAiReasoningPlan::disabled(),
+        OrderedJsonObject::new(),
+    ))
+    .expect("tool image body");
+    assert_eq!(
+        body["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["user", "assistant", "tool", "tool", "user"]
+    );
+    let images = body["messages"]
+        .as_array()
+        .expect("messages")
+        .last()
+        .unwrap()["content"]
+        .as_array()
+        .expect("image content")
+        .iter()
+        .filter(|part| part["type"] == "image_url")
+        .count();
+    assert_eq!(images, 2);
+
+    let mut empty_context = Context::new(None);
+    empty_context.messages.push(Message::User(UserMessage {
+        id: MessageId::new("empty-tool-user"),
+        content: vec![ContentBlock::Text {
+            id: ContentBlockId::new("empty-tool-user-text"),
+            text: "Run the command".into(),
+        }],
+        timestamp: Timestamp::default(),
+    }));
+    empty_context
+        .messages
+        .push(Message::Assistant(assistant_with_tool_call()));
+    empty_context
+        .messages
+        .push(Message::ToolResult(ToolResultMessage {
+            id: MessageId::new("empty-tool-result"),
+            tool_call_id: ToolCallId::new("call-1"),
+            tool_name: "read_file".into(),
+            content: vec![ToolResultContent::Text {
+                id: ContentBlockId::new("empty-tool-text"),
+                text: String::new(),
+            }],
+            details: None,
+            usage: None,
+            added_tool_names: Vec::new(),
+            is_error: false,
+            timestamp: Timestamp::default(),
+        }));
+    let empty_body: Value = serde_json::from_slice(&encode_direct(
+        &model,
+        &empty_context,
+        OpenAiReasoningPlan::disabled(),
+        OrderedJsonObject::new(),
+    ))
+    .expect("empty tool-result body");
+    let tool = empty_body["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .expect("tool message");
+    assert_eq!(tool["content"], "(no tool output)");
+    assert!(!tool["content"].as_str().unwrap().contains("attached image"));
+}
+
+/// Architecture v2 part 2 §3.6 and §10.8; pinned Pi basis:
+/// `packages/ai/test/empty.test.ts`, OpenAI-compatible Completions scenarios.
+#[test]
+fn openai_completions_empty_message_matrix_pi_exact() {
+    let model = base_fixture_model();
+    for (case, content) in [
+        Vec::new(),
+        vec![ContentBlock::Text {
+            id: ContentBlockId::new("empty-text"),
+            text: String::new(),
+        }],
+        vec![ContentBlock::Text {
+            id: ContentBlockId::new("whitespace-text"),
+            text: "   \n\t  ".into(),
+        }],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut context = one_user_context();
+        let Message::User(user) = &mut context.messages[0] else {
+            unreachable!()
+        };
+        user.content = content;
+        let wire: Value = serde_json::from_slice(&encode_direct(
+            &model,
+            &context,
+            OpenAiReasoningPlan::disabled(),
+            OrderedJsonObject::new(),
+        ))
+        .expect("empty-message Completions wire");
+        assert!(wire["messages"].is_array());
+        if case == 2 {
+            assert_eq!(wire["messages"][0]["role"], "user");
+            assert_eq!(wire["messages"][0]["content"], "   \n\t  ");
+        } else if case == 1 {
+            assert_eq!(wire["messages"][0]["role"], "user");
+            assert_eq!(wire["messages"][0]["content"], "");
+        } else {
+            assert!(wire["messages"].as_array().expect("messages").is_empty());
+        }
+    }
+
+    assert_empty_assistant_omission_preserves_tool_result_bridge();
 }
 
 /// Architecture v2 part 2 §10.2 and §10.8; pinned Pi basis:
@@ -1289,6 +1949,79 @@ fn openai_kimi_deferred_tools_are_filtered_then_reintroduced() {
         .find(|message| message["role"] == "system" && message.get("tools").is_some())
         .expect("deferred system tool message");
     assert_eq!(deferred_message["tools"][0]["function"]["name"], "deferred");
+
+    let mut ordinary_model = model.clone();
+    let ApiModelConfig::OpenAiCompletions(config) = &mut ordinary_model.api else {
+        unreachable!()
+    };
+    config.compat.deferred_tools_mode = None;
+    let ordinary: Value = serde_json::from_slice(&encode_direct(
+        &ordinary_model,
+        &context,
+        OpenAiReasoningPlan::disabled(),
+        OrderedJsonObject::new(),
+    ))
+    .expect("ordinary deferred wire");
+    assert_eq!(
+        ordinary["tools"].as_array().expect("ordinary tools").len(),
+        2
+    );
+    assert!(
+        ordinary["messages"]
+            .as_array()
+            .expect("ordinary messages")
+            .iter()
+            .all(|message| message.get("tools").is_none())
+    );
+
+    let mut batched = context;
+    batched
+        .tools
+        .push(tool_spec("later", object_schema(), None));
+    batched
+        .messages
+        .push(Message::ToolResult(ToolResultMessage {
+            id: MessageId::new("later-result"),
+            tool_call_id: ToolCallId::new("later-call"),
+            tool_name: "load_tools".into(),
+            content: vec![ToolResultContent::Text {
+                id: ContentBlockId::new("later-text"),
+                text: "loaded later".into(),
+            }],
+            details: None,
+            usage: None,
+            added_tool_names: vec!["later".into()],
+            is_error: false,
+            timestamp: Timestamp::from_unix_millis(1_700_000_000_001),
+        }));
+    let batched_wire: Value = serde_json::from_slice(&encode_direct(
+        &model,
+        &batched,
+        OpenAiReasoningPlan::disabled(),
+        OrderedJsonObject::new(),
+    ))
+    .expect("batched deferred wire");
+    let messages = batched_wire["messages"]
+        .as_array()
+        .expect("batched messages");
+    let last_tool = messages
+        .iter()
+        .rposition(|message| message["role"] == "tool")
+        .expect("batched tool results");
+    let system = messages
+        .iter()
+        .position(|message| message["role"] == "system" && message.get("tools").is_some())
+        .expect("batched deferred definitions");
+    assert!(system > last_tool);
+    assert_eq!(
+        messages[system]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["deferred", "later"]
+    );
 }
 
 /// Architecture v2 part 2 §10.5; pinned Pi basis:
@@ -2242,6 +2975,30 @@ data: [DONE]
 
 "#
     .to_vec()
+}
+
+fn capture_completions_request(
+    model: ModelDescriptor,
+    options: SimpleGenerationOptions,
+    auth_context: Arc<dyn AuthContext>,
+) -> HttpRequest {
+    let transport = Arc::new(FixturePipelineTransport::new([session_affinity_response()]));
+    let registration = ProviderRegistration::builder(model.common.model_ref.provider.clone())
+        .base_url(model.common.base_url.clone())
+        .models(vec![model.clone()])
+        .api(
+            OpenAiCompletions::API_ID,
+            openai_completions_api(Arc::clone(&transport) as Arc<dyn HttpTransport>),
+        )
+        .build()
+        .expect("capturing Completions registration");
+    let models = Models::builder()
+        .provider(registration)
+        .auth_context(auth_context)
+        .build()
+        .expect("capturing Completions Models");
+    drain_send_runtime(&models, &model, options, "capture Completions request");
+    transport.requests.lock().expect("request lock")[0].clone()
 }
 
 fn drain_send_runtime(

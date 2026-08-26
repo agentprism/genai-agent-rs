@@ -440,6 +440,45 @@ impl fmt::Debug for ErasedApiFullOptions {
     }
 }
 
+/// Opaque host telemetry context propagated across every request surface.
+///
+/// The handle is request-scoped scratch state: it is cloneable and preserves
+/// identity, but is intentionally omitted from persisted option schemas and
+/// redacted from debug output.
+#[derive(Clone)]
+pub struct TelemetryContextHandle(Arc<dyn Any + Send + Sync>);
+
+impl TelemetryContextHandle {
+    /// Wraps host-defined telemetry state.
+    pub fn new<T: Any + Send + Sync>(context: T) -> Self {
+        Self(Arc::new(context))
+    }
+
+    /// Borrows the host state when its concrete type matches `T`.
+    pub fn downcast_ref<T: Any>(&self) -> Option<&T> {
+        self.0.downcast_ref()
+    }
+
+    /// Returns whether two handles reference the same host context.
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl fmt::Debug for TelemetryContextHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("TelemetryContextHandle(<opaque>)")
+    }
+}
+
+impl PartialEq for TelemetryContextHandle {
+    fn eq(&self, other: &Self) -> bool {
+        self.ptr_eq(other)
+    }
+}
+
+impl Eq for TelemetryContextHandle {}
+
 /// API-independent transport controls for a fully API-specific request.
 ///
 /// Pi's full provider options extend its common request options. Rust keeps
@@ -464,6 +503,9 @@ pub struct ApiRequestOptions {
     pub session_id: Option<String>,
     /// Explicit logical request headers, including deletion markers.
     pub headers: HeaderMapSpec,
+    /// Opaque request-scoped host telemetry context.
+    #[serde(skip)]
+    pub telemetry_context: Option<TelemetryContextHandle>,
 }
 
 impl From<&SimpleGenerationOptions> for ApiRequestOptions {
@@ -476,6 +518,7 @@ impl From<&SimpleGenerationOptions> for ApiRequestOptions {
             websocket_connect_timeout_ms: options.websocket_connect_timeout_ms,
             session_id: options.session_id.clone(),
             headers: options.headers.clone(),
+            telemetry_context: options.telemetry_context.clone(),
         }
     }
 }
@@ -497,6 +540,10 @@ impl fmt::Debug for ApiRequestOptions {
                 &self.session_id.as_ref().map(|_| "<redacted session id>"),
             )
             .field("headers", &"<redacted headers>")
+            .field(
+                "telemetry_context",
+                &self.telemetry_context.as_ref().map(|_| "<opaque>"),
+            )
             .finish()
     }
 }
@@ -609,6 +656,9 @@ pub struct SimpleGenerationOptions {
     pub deferred: Option<crate::DeferredSubmission>,
     /// The sole erased API-family patch for dynamic callers.
     pub api_options: Option<ErasedApiOptionsPatch>,
+    /// Opaque request-scoped host telemetry context. This is never persisted.
+    #[serde(skip)]
+    pub telemetry_context: Option<TelemetryContextHandle>,
 }
 
 impl fmt::Debug for SimpleGenerationOptions {
@@ -643,6 +693,10 @@ impl fmt::Debug for SimpleGenerationOptions {
             .field(
                 "api_options",
                 &self.api_options.as_ref().map(|_| "<redacted API options>"),
+            )
+            .field(
+                "telemetry_context",
+                &self.telemetry_context.as_ref().map(|_| "<opaque>"),
             )
             .finish()
     }

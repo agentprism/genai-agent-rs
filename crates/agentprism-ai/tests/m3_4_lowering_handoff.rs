@@ -453,6 +453,32 @@ fn simple_context_reserves_4096_tokens() {
             last_usage_index: Some(3),
         }
     );
+
+    // packages/ai/test/deferred-tools.test.ts: definitions marked after the
+    // latest provider-usage checkpoint are charged as trailing context.
+    let plain = estimate_context_tokens(&fresh_context).unwrap();
+    let mut marked = fresh_context;
+    marked.tools.push(ToolSpec {
+        schema_version: 1,
+        name: "late_tool".into(),
+        description: "x".repeat(4_000),
+        parameters: json!({"type":"object","properties":{"value":{"type":"string"}}}),
+        constrained_sampling: None,
+    });
+    marked.messages.push(Message::ToolResult(ToolResultMessage {
+        id: MessageId::new("late-marker"),
+        tool_call_id: ToolCallId::new("loader"),
+        tool_name: "load_tools".into(),
+        content: Vec::new(),
+        details: None,
+        usage: None,
+        added_tool_names: vec!["late_tool".into()],
+        is_error: false,
+        timestamp: Timestamp::from_unix_millis(600),
+    }));
+    let marked = estimate_context_tokens(&marked).unwrap();
+    assert!(marked.tokens > plain.tokens + 500);
+    assert!(marked.trailing_tokens > plain.trailing_tokens + 500);
 }
 
 #[test]

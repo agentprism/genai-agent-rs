@@ -145,6 +145,54 @@ impl LoadedSkill {
     }
 }
 
+/// Formats the model-visible skill index appended to a harness system prompt.
+///
+/// Skills retain caller order, entries disabled for model invocation are
+/// omitted, and every XML-sensitive field is escaped. An empty visible set
+/// produces no prompt fragment.
+pub fn format_skills_for_system_prompt(skills: &[SkillDescriptor]) -> String {
+    let visible = skills
+        .iter()
+        .filter(|skill| !skill.disable_model_invocation)
+        .collect::<Vec<_>>();
+    if visible.is_empty() {
+        return String::new();
+    }
+
+    let mut output = String::from(
+        "The following skills provide specialized instructions for specific tasks.\n\
+Read the full skill file when the task matches its description.\n\
+When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\n\
+<available_skills>",
+    );
+    for skill in visible {
+        output.push_str("\n  <skill>\n    <name>");
+        output.push_str(&escape_xml(&skill.name));
+        output.push_str("</name>\n    <description>");
+        output.push_str(&escape_xml(&skill.description));
+        output.push_str("</description>\n    <location>");
+        output.push_str(&escape_xml(&skill.location));
+        output.push_str("</location>\n  </skill>");
+    }
+    output.push_str("\n</available_skills>");
+    output
+}
+
+fn escape_xml(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
 /// Stable skill-loading diagnostic code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -349,6 +397,70 @@ impl LocalSkillCatalog for StaticSkillCatalog {
 pub struct NativeSkillCatalog {
     catalog: StaticSkillCatalog,
     diagnostics: Vec<SkillDiagnostic>,
+}
+
+/// One native skill root paired with application-owned provenance.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourcedSkillRoot<S> {
+    /// Addressed root directory.
+    pub path: PathBuf,
+    /// Opaque application-owned provenance preserved without interpretation.
+    pub source: S,
+}
+
+/// One discovered skill paired with its root provenance.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourcedSkill<S> {
+    /// Loaded skill.
+    pub skill: LoadedSkill,
+    /// Exact source value supplied with the root.
+    pub source: S,
+}
+
+/// One discovery diagnostic paired with its root provenance.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourcedSkillDiagnostic<S> {
+    /// Original discovery warning.
+    pub diagnostic: SkillDiagnostic,
+    /// Exact source value supplied with the root.
+    pub source: S,
+}
+
+/// Complete source-preserving native discovery result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourcedSkillDiscovery<S> {
+    /// Loaded skills in source and traversal order.
+    pub skills: Vec<SourcedSkill<S>>,
+    /// Non-fatal warnings in source and traversal order.
+    pub diagnostics: Vec<SourcedSkillDiagnostic<S>>,
+}
+
+/// Discovers source-tagged native roots while preserving every opaque source
+/// value on both skills and diagnostics.
+pub fn discover_sourced_skills<S: Clone>(
+    inputs: impl IntoIterator<Item = SourcedSkillRoot<S>>,
+) -> Result<SourcedSkillDiscovery<S>, SkillError> {
+    let mut skills = Vec::new();
+    let mut diagnostics = Vec::new();
+    for input in inputs {
+        let discovered = NativeSkillCatalog::discover([&input.path])?;
+        for id in &discovered.catalog.order {
+            skills.push(SourcedSkill {
+                skill: discovered.catalog.skills[id].clone(),
+                source: input.source.clone(),
+            });
+        }
+        diagnostics.extend(discovered.diagnostics.into_iter().map(|diagnostic| {
+            SourcedSkillDiagnostic {
+                diagnostic,
+                source: input.source.clone(),
+            }
+        }));
+    }
+    Ok(SourcedSkillDiscovery {
+        skills,
+        diagnostics,
+    })
 }
 
 impl NativeSkillCatalog {

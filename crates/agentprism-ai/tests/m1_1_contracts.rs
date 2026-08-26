@@ -69,6 +69,47 @@ fn empty_level_map<T>() -> ThinkingLevelMap<T> {
     }
 }
 
+#[test]
+fn reasoning_options_verified_effort_map_pi_exact() {
+    // Architecture v2 part 2 §10.7 catalog conformance. Pi basis:
+    // packages/ai/test/reasoning-options.test.ts.
+    let map = openai_verified_effort_map([Some("none"), Some("low"), Some("high"), Some("max")])
+        .expect("recognized effort values produce a typed map");
+    assert_eq!(
+        map.off,
+        Some(LevelSupport::Value(OpenAiThinkingValue::Effort(
+            "none".into()
+        )))
+    );
+    assert_eq!(map.minimal, Some(LevelSupport::Unsupported));
+    assert_eq!(
+        map.low,
+        Some(LevelSupport::Value(OpenAiThinkingValue::Effort(
+            "low".into()
+        )))
+    );
+    assert_eq!(map.medium, Some(LevelSupport::Unsupported));
+    assert_eq!(
+        map.high,
+        Some(LevelSupport::Value(OpenAiThinkingValue::Effort(
+            "high".into()
+        )))
+    );
+    assert_eq!(map.xhigh, Some(LevelSupport::Unsupported));
+    assert_eq!(
+        map.max,
+        Some(LevelSupport::Value(OpenAiThinkingValue::Effort(
+            "max".into()
+        )))
+    );
+
+    let without_none = openai_verified_effort_map([Some("low"), Some("high"), Some("max")])
+        .expect("recognized effort values produce a typed map");
+    assert_eq!(without_none.off, Some(LevelSupport::Unsupported));
+
+    assert_eq!(openai_verified_effort_map([None, Some("default")]), None);
+}
+
 fn rates(input: i128, output: i128, cache_read: i128, cache_write: i128) -> TokenPriceRates {
     TokenPriceRates {
         input: MoneyRate::new(input),
@@ -663,6 +704,44 @@ fn pricing_types_round_trip_and_use_integer_arithmetic() {
 }
 
 #[test]
+fn total_tokens_authoritative_and_component_fallback_matrix_pi_exact() {
+    // Architecture v2 part 1 §3.9 and part 2 §5.2/§10.6. Pi basis:
+    // packages/ai/test/total-tokens.test.ts. The provider families differ in
+    // where totals originate, but all expose this normalized contract.
+    let components = Usage {
+        input_tokens: 11,
+        output_tokens: 13,
+        reasoning_tokens: Some(5),
+        cache_read_tokens: Some(17),
+        cache_write_tokens: Some(19),
+        cache_write_one_hour_tokens: Some(7),
+        total_tokens: None,
+        source: UsageSource::ProviderReported,
+    };
+    assert_eq!(components.total_tokens(), 60);
+
+    let native_matching = Usage {
+        total_tokens: Some(60),
+        ..components.clone()
+    };
+    assert_eq!(native_matching.total_tokens(), 60);
+
+    let native_authoritative = Usage {
+        total_tokens: Some(73),
+        ..components.clone()
+    };
+    assert_eq!(native_authoritative.total_tokens(), 73);
+
+    // Pinned Pi uses JavaScript truthiness: an explicit provider zero falls
+    // back to components instead of erasing a non-zero context footprint.
+    let native_zero = Usage {
+        total_tokens: Some(0),
+        ..components
+    };
+    assert_eq!(native_zero.total_tokens(), 60);
+}
+
+#[test]
 fn request_wide_pricing_uses_highest_strictly_exceeded_tier() {
     let pricing = ModelPricing {
         default: rates(1_000_000, 0, 0, 0),
@@ -790,6 +869,191 @@ fn model_descriptor_and_typed_compat_fields_round_trip() {
         extensions: ExtensionMap::new(),
     };
     assert_round_trip(&descriptor);
+}
+
+// Architecture v2 part 1 §3.1 and part 2 §10.1; Pi basis:
+// packages/ai/test/text.test.ts.
+#[test]
+fn content_text_extracts_visible_blocks_pi_exact() {
+    let blocks = vec![
+        ContentBlock::Thinking {
+            id: ContentBlockId::new("thinking"),
+            text: "reasoning".into(),
+            redacted: false,
+            replay_item: None,
+        },
+        ContentBlock::Text {
+            id: ContentBlockId::new("first"),
+            text: "first".into(),
+        },
+        ContentBlock::ToolCall {
+            id: ContentBlockId::new("tool"),
+            call: ToolCall {
+                id: ToolCallId::new("1"),
+                name: "read".into(),
+                arguments: serde_json::json!({}),
+            },
+        },
+        ContentBlock::Text {
+            id: ContentBlockId::new("second"),
+            text: "second".into(),
+        },
+    ];
+    assert_eq!(content_text(&blocks, "\n"), "first\nsecond");
+    assert_eq!(content_text(&blocks, ""), "firstsecond");
+    let canonical_string_content = [ContentBlock::Text {
+        id: ContentBlockId::new("plain-string"),
+        text: "hello".into(),
+    }];
+    assert_eq!(content_text(&canonical_string_content, "\n"), "hello");
+
+    let tool_output = vec![
+        ToolResultContent::Text {
+            id: ContentBlockId::new("tool-first"),
+            text: "first".into(),
+        },
+        ToolResultContent::Image {
+            id: ContentBlockId::new("image"),
+            data: "...".into(),
+            mime_type: "image/png".into(),
+        },
+        ToolResultContent::Text {
+            id: ContentBlockId::new("tool-second"),
+            text: "second".into(),
+        },
+    ];
+    assert_eq!(tool_result_content_text(&tool_output, ""), "firstsecond");
+}
+
+// Architecture v2 part 1 §3.1 and part 2 §10; Pi basis:
+// packages/ai/test/uuid.test.ts and packages/ai/src/utils/uuid.ts.
+#[test]
+fn uuid_v7_layout_and_monotonic_order_pi_exact() {
+    let generator = UuidV7Generator::new();
+    let timestamp = 0x0123_4567_89ab;
+    let first = generator
+        .generate_at(
+            timestamp,
+            [
+                0, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xfe, 1, 0x11, 0x22, 0x33, 0x44, 0x55,
+            ],
+        )
+        .expect("first UUID");
+    let second = generator
+        .generate_at(timestamp, [0; 16])
+        .expect("second UUID");
+    let third = generator
+        .generate_at(timestamp, [0; 16])
+        .expect("third UUID");
+
+    assert_eq!(first, "01234567-89ab-7fff-bfff-f91122334455");
+    assert_eq!(second, "01234567-89ab-7fff-bfff-fc0000000000");
+    assert_eq!(third, "01234567-89ac-7000-8000-000000000000");
+    assert!(first < second && second < third);
+    for value in [&first, &second, &third] {
+        assert_eq!(&value[14..15], "7");
+        assert!(matches!(&value[19..20], "8" | "9" | "a" | "b"));
+    }
+}
+
+// Architecture v2 part 2 §3.3 correction/§10; Pi basis:
+// packages/ai/test/telemetry-options.test.ts.
+#[test]
+fn telemetry_context_survives_simple_option_conversion_pi_exact() {
+    let telemetry = TelemetryContextHandle::new(String::from("trace-context"));
+    let simple = SimpleGenerationOptions {
+        telemetry_context: Some(telemetry.clone()),
+        ..SimpleGenerationOptions::default()
+    };
+    let request = ApiRequestOptions::from(&simple);
+    let propagated = request.telemetry_context.expect("telemetry context");
+    assert!(propagated.ptr_eq(&telemetry));
+    assert_eq!(
+        propagated.downcast_ref::<String>().map(String::as_str),
+        Some("trace-context")
+    );
+    assert!(
+        !serde_json::to_string(&simple)
+            .expect("serialize simple options")
+            .contains("trace-context")
+    );
+}
+
+// Architecture v2 part 1 §3.1/part 2 §10.1; Pi basis:
+// packages/ai/test/lax-message-content.test.ts.
+#[test]
+fn message_null_and_missing_content_normalize_to_empty_pi_exact() {
+    let assistant = AssistantMessage {
+        id: MessageId::new("assistant"),
+        provider: ProviderId::new("fixture"),
+        api: ApiId::new("fixture-api"),
+        requested_model: ModelId::new("fixture-model"),
+        response_model: None,
+        response_id: None,
+        deferred: None,
+        end_turn: None,
+        diagnostics: Vec::new(),
+        content: Vec::new(),
+        replay: ReplayEnvelope::new(ReplayScope::new(
+            "fixture",
+            "fixture-api",
+            "fixture-model",
+            "fixture-model",
+        )),
+        usage: Usage::zero(UsageSource::ProviderReported),
+        cost: None,
+        finish: AssistantFinish {
+            reason: AssistantFinishReason::Stop,
+            raw_provider_reason: None,
+            error: None,
+        },
+        timestamp: Timestamp::default(),
+    };
+    let tool_result = ToolResultMessage {
+        id: MessageId::new("tool-result"),
+        tool_call_id: ToolCallId::new("call"),
+        tool_name: "read".into(),
+        content: Vec::new(),
+        details: None,
+        usage: None,
+        added_tool_names: Vec::new(),
+        is_error: false,
+        timestamp: Timestamp::default(),
+    };
+    let values = [
+        serde_json::json!({"role":"user","id":"user","content":null,"timestamp":0}),
+        serde_json::json!({"role":"user","id":"user","timestamp":0}),
+        {
+            let mut value = serde_json::to_value(Message::Assistant(assistant.clone())).unwrap();
+            value["content"] = serde_json::Value::Null;
+            value
+        },
+        {
+            let mut value = serde_json::to_value(Message::Assistant(assistant)).unwrap();
+            value.as_object_mut().unwrap().remove("content");
+            value
+        },
+        {
+            let mut value = serde_json::to_value(Message::ToolResult(tool_result.clone())).unwrap();
+            value["content"] = serde_json::Value::Null;
+            value
+        },
+        {
+            let mut value = serde_json::to_value(Message::ToolResult(tool_result)).unwrap();
+            value.as_object_mut().unwrap().remove("content");
+            value
+        },
+    ];
+
+    for value in values {
+        let message: Message = serde_json::from_value(value).expect("lax content decodes");
+        let empty = match message {
+            Message::User(message) => message.content.is_empty(),
+            Message::Assistant(message) => message.content.is_empty(),
+            Message::ToolResult(message) => message.content.is_empty(),
+        };
+        assert!(empty);
+    }
 }
 
 #[test]

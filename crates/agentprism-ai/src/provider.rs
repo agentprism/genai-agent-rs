@@ -7,37 +7,76 @@
 )]
 
 use crate::{
-    ApiId, ApiRequestOptions, AssistantStream, AttemptFailure, AttemptMiddleware, AuthError,
-    AuthResolutionOverrides, CancellationToken, Context, DefaultRetryClassifier,
-    DeferredCapabilities, DeferredHandle, ErasedApiFullOptions, ErasedApiOptionsPatch,
-    ErasedPayloadContext, ErasedPayloadTransform, HeaderMapSpec, HttpRequest, HttpResponse,
-    HttpTransport, LocalAssistantStream, LocalAttemptMiddleware, LocalBoxFuture,
-    LocalDefaultRetryClassifier, LocalDefaultRetrySleeper, LocalErasedPayloadTransform,
-    LocalHttpResponse, LocalHttpTransport, LocalManagedModelCatalog, LocalModelCatalogSource,
-    LocalProviderCatalogState, LocalResponseObserver, LocalRetryClassifier, LocalRetrySleeper,
-    ManagedModelCatalog, ModelCatalogSource, ModelDescriptor, ModelRef,
-    PayloadTransformDisposition, ProviderCatalogState, ProviderId, ProviderPayload,
-    ProviderResponseMetadata, RequestStartError, RequestStartErrorKind, ResponseObservationContext,
-    ResponseObserver, RetryClassifier, RetryDecision, RetryPolicy, RetrySleeper, SecretString,
-    SendBoxFuture, SimpleGenerationOptions, apply_header_spec,
+    ApiId, ApiRequestOptions, AssistantAssembler, AssistantEvent, AssistantStream, AttemptFailure,
+    AttemptMiddleware, AuthError, AuthResolutionOverrides, CancellationReason, CancellationToken,
+    Context, DefaultRetryClassifier, DeferredCapabilities, DeferredHandle, ErasedApiFullOptions,
+    ErasedApiOptionsPatch, ErasedPayloadContext, ErasedPayloadTransform, HeaderMapSpec,
+    HttpRequest, HttpResponse, HttpTransport, LocalAssistantStream, LocalAttemptMiddleware,
+    LocalBoxFuture, LocalDefaultRetryClassifier, LocalDefaultRetrySleeper,
+    LocalErasedPayloadTransform, LocalHttpResponse, LocalHttpTransport, LocalManagedModelCatalog,
+    LocalModelCatalogSource, LocalProviderCatalogState, LocalResponseObserver,
+    LocalRetryClassifier, LocalRetrySleeper, ManagedModelCatalog, MessageId, ModelCatalogSource,
+    ModelDescriptor, ModelRef, PayloadTransformDisposition, ProviderCatalogState, ProviderId,
+    ProviderPayload, ProviderResponseMetadata, RequestStartError, RequestStartErrorKind,
+    ResponseObservationContext, ResponseObserver, RetryClassifier, RetryDecision, RetryPolicy,
+    RetrySleeper, SecretString, SendBoxFuture, SimpleGenerationOptions, apply_header_spec,
     establish_with_retry_and_local_sleeper, establish_with_retry_and_sleeper,
     request_id_from_headers,
 };
 use futures_util::{
     StreamExt,
     future::{Either, select},
+    stream,
 };
 use http::HeaderMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::{Duration, SystemTime};
 use url::Url;
 
 /// Maximum bytes retained while normalizing a provider failure body.
 pub const MAX_PROVIDER_ERROR_BODY_BYTES: usize = 64 * 1024;
+
+static NEXT_PRE_CANCELLED_MESSAGE_ID: AtomicU64 = AtomicU64::new(1);
+
+fn pre_cancelled_events(model: &ModelDescriptor, api: &ApiId) -> [AssistantEvent; 2] {
+    let started = AssistantEvent::MessageStarted {
+        message_id: MessageId::new(format!(
+            "pre-cancelled-{}",
+            NEXT_PRE_CANCELLED_MESSAGE_ID.fetch_add(1, Ordering::Relaxed)
+        )),
+        provider: model.common.model_ref.provider.clone(),
+        api: api.clone(),
+        model: model.common.model_ref.model.clone(),
+    };
+    let mut assembler = AssistantAssembler::new();
+    let applied = assembler.apply(&started);
+    debug_assert!(applied.is_ok(), "a fresh assembler accepts MessageStarted");
+    let cancelled = AssistantEvent::Cancelled {
+        message: assembler.finish_cancelled(CancellationReason::new("Request was aborted")),
+    };
+    [started, cancelled]
+}
+
+/// Produces Pi's in-band terminal response when cancellation was already
+/// requested before a Send-family adapter starts transport work.
+pub(crate) fn pre_cancelled_stream(model: &ModelDescriptor, api: &ApiId) -> AssistantStream {
+    AssistantStream::new(stream::iter(pre_cancelled_events(model, api)))
+}
+
+/// Local-executor counterpart of [`pre_cancelled_stream`].
+pub(crate) fn local_pre_cancelled_stream(
+    model: &ModelDescriptor,
+    api: &ApiId,
+) -> LocalAssistantStream {
+    LocalAssistantStream::new(stream::iter(pre_cancelled_events(model, api)))
+}
 
 /// Public provider identity and logical request defaults.
 #[derive(Clone, Eq, PartialEq)]
@@ -991,10 +1030,9 @@ impl HttpChatApi {
         request: ResolvedApiRequest,
         cancellation: CancellationToken,
     ) -> Result<AssistantStream, AiError> {
-        cancellation.check().map_err(|_| {
-            AiError::new(AiErrorKind::Cancelled, "request cancelled")
-                .with_model(request.model.common.model_ref.clone())
-        })?;
+        if cancellation.is_cancelled() {
+            return Ok(pre_cancelled_stream(&request.model, &request.api));
+        }
 
         let execution = ApiExecutionContext {
             model: &request.model,
@@ -1681,10 +1719,9 @@ impl LocalHttpChatApi {
         request: LocalResolvedApiRequest,
         cancellation: CancellationToken,
     ) -> Result<LocalAssistantStream, AiError> {
-        cancellation.check().map_err(|_| {
-            AiError::new(AiErrorKind::Cancelled, "request cancelled")
-                .with_model(request.model.common.model_ref.clone())
-        })?;
+        if cancellation.is_cancelled() {
+            return Ok(local_pre_cancelled_stream(&request.model, &request.api));
+        }
 
         let execution = LocalApiExecutionContext {
             model: &request.model,

@@ -2,6 +2,7 @@
 
 use agentprism_ai::*;
 use agentprism_cloudflare_ai_gateway::*;
+use futures_util::StreamExt;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -197,6 +198,161 @@ fn cloudflare_stream_materializes_endpoint_and_auth_pi_exact() {
     assert!(!resolved.headers.contains_key(http::header::AUTHORIZATION));
 }
 
+#[derive(Clone, Default)]
+struct CaptureCloudflareRequests {
+    requests: Arc<Mutex<Vec<HttpRequest>>>,
+}
+
+impl HttpTransport for CaptureCloudflareRequests {
+    fn execute(
+        &self,
+        request: HttpRequest,
+        _cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<HttpResponse, TransportError>> {
+        let is_completions = request.url.path().ends_with("/chat/completions");
+        self.requests.lock().unwrap().push(request);
+        Box::pin(async move {
+            if is_completions {
+                Ok(HttpResponse::from_bytes(
+                    200,
+                    http::HeaderMap::new(),
+                    br#"data: {"id":"chat-cf","model":"workers-ai/@cf/moonshotai/kimi-k2.6","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}
+
+data: [DONE]
+
+"#
+                    .to_vec(),
+                ))
+            } else {
+                Ok(HttpResponse::from_bytes(
+                    400,
+                    http::HeaderMap::new(),
+                    b"captured".to_vec(),
+                ))
+            }
+        })
+    }
+}
+
+fn cloudflare_context(system_prompt: Option<&str>) -> Context {
+    let mut context = Context::new(system_prompt.map(str::to_owned));
+    context.messages.push(Message::User(UserMessage {
+        id: MessageId::new("cloudflare-user"),
+        content: vec![ContentBlock::Text {
+            id: ContentBlockId::new("cloudflare-text"),
+            text: "hi".into(),
+        }],
+        timestamp: Timestamp::from_unix_millis(1),
+    }));
+    context
+}
+
+#[test]
+fn cloudflare_openai_completions_empty_tools_scenarios_pi_exact() {
+    // Architecture v2 part 2 §3.3, §3.6, §6.1, and §10.8; Pi basis:
+    // packages/ai/test/openai-completions-empty-tools.test.ts, Cloudflare
+    // conservative fields, endpoint/auth, BYOK, and Workers AI affinity.
+    let capture = Arc::new(CaptureCloudflareRequests::default());
+    let registration = provider(ProviderInputs {
+        http: capture.clone(),
+        environment: BTreeMap::new(),
+    })
+    .unwrap();
+    let catalog = registration.catalog.snapshot();
+    let workers = catalog
+        .iter()
+        .find(|model| {
+            model.common.model_ref.model.as_str() == "workers-ai/@cf/moonshotai/kimi-k2.6"
+        })
+        .expect("Workers AI Kimi model")
+        .clone();
+    let byok = catalog
+        .iter()
+        .find(|model| model.common.model_ref.model.as_str() == "gpt-5.1")
+        .expect("Cloudflare BYOK model")
+        .clone();
+    let models = Models::builder()
+        .provider(registration)
+        .auth_context(Arc::new(MapAuthContext::new(
+            BTreeMap::from([
+                ("CLOUDFLARE_API_KEY".into(), "cf-token".into()),
+                ("CLOUDFLARE_ACCOUNT_ID".into(), "account-id".into()),
+                ("CLOUDFLARE_GATEWAY_ID".into(), "gateway-id".into()),
+            ]),
+            Vec::<String>::new(),
+        )))
+        .build()
+        .unwrap();
+
+    let mut stream = futures_executor::block_on(ModelRuntime::stream(
+        &models,
+        ModelRequest {
+            model: workers.common.model_ref.clone(),
+            context: cloudflare_context(Some("You are helpful.")),
+            options: SimpleGenerationOptions {
+                max_output_tokens: Some(1_234),
+                reasoning: Some(ReasoningLevel::High),
+                session_id: Some("session-1".into()),
+                ..Default::default()
+            },
+        },
+        CancellationToken::new(),
+    ))
+    .expect("Cloudflare Workers AI stream");
+    futures_executor::block_on(async { while stream.next().await.is_some() {} });
+
+    let requests = capture.requests.lock().unwrap();
+    let request = requests.first().expect("Workers AI request");
+    assert_eq!(
+        request.url.as_str(),
+        "https://gateway.ai.cloudflare.com/v1/account-id/gateway-id/compat/chat/completions"
+    );
+    let body: serde_json::Value =
+        serde_json::from_slice(&request.body).expect("Workers AI request JSON");
+    assert_eq!(body["messages"][0]["role"], "system");
+    assert_eq!(body["max_tokens"], 1_234);
+    for field in [
+        "tools",
+        "max_completion_tokens",
+        "reasoning_effort",
+        "store",
+    ] {
+        assert!(body.get(field).is_none(), "unexpected {field}");
+    }
+    assert!(!request.headers.contains_key(http::header::AUTHORIZATION));
+    assert_eq!(request.headers["cf-aig-authorization"], "Bearer cf-token");
+    for name in ["session_id", "x-client-request-id", "x-session-affinity"] {
+        assert_eq!(request.headers[name], "session-1", "{name}");
+    }
+    drop(requests);
+
+    let mut headers = HeaderMapSpec::new();
+    headers.insert("Authorization".into(), Some("Bearer upstream-token".into()));
+    let result = futures_executor::block_on(ModelRuntime::stream(
+        &models,
+        ModelRequest {
+            model: byok.common.model_ref,
+            context: cloudflare_context(None),
+            options: SimpleGenerationOptions {
+                headers,
+                ..Default::default()
+            },
+        },
+        CancellationToken::new(),
+    ));
+    assert!(
+        result.is_err(),
+        "BYOK capture intentionally returns HTTP 400"
+    );
+    let requests = capture.requests.lock().unwrap();
+    let request = requests.last().expect("BYOK request");
+    assert_eq!(
+        request.headers[http::header::AUTHORIZATION],
+        "Bearer upstream-token"
+    );
+    assert_eq!(request.headers["cf-aig-authorization"], "Bearer cf-token");
+}
+
 #[test]
 fn cloudflare_auth_login_and_precedence_pi_exact() {
     // Pi basis: models.ts applies `{ ...stored.env, ...overrides.env }`, so
@@ -300,6 +456,7 @@ fn cloudflare_auth_login_and_precedence_pi_exact() {
 #[derive(Default)]
 struct CapturingBinding {
     runs: Mutex<Vec<(String, GatewayBindingRequest)>>,
+    cancellations: Mutex<Vec<CancellationToken>>,
 }
 
 impl GatewayBinding for CapturingBinding {
@@ -307,9 +464,10 @@ impl GatewayBinding for CapturingBinding {
         &self,
         gateway: String,
         request: GatewayBindingRequest,
-        _cancellation: CancellationToken,
+        cancellation: CancellationToken,
     ) -> SendBoxFuture<'_, Result<HttpResponse, TransportError>> {
         self.runs.lock().unwrap().push((gateway, request));
+        self.cancellations.lock().unwrap().push(cancellation);
         Box::pin(async {
             let mut headers = http::HeaderMap::new();
             headers.insert("cf-aig-log-id", "log-1".parse().unwrap());
@@ -360,19 +518,57 @@ fn cloudflare_gateway_binding_pi_exact() {
         Url::parse("https://gateway.ai.cloudflare.com/v1/account-id/my-gateway").unwrap(),
         "my-gateway",
     );
-    let response = futures_executor::block_on(transport.execute(
+    for (url, body) in [
+        (
+            "https://gateway.ai.cloudflare.com/v1/account-id/my-gateway/anthropic/v1/messages",
+            br#"{"model":"claude"}"#.as_slice(),
+        ),
+        (
+            "https://gateway.ai.cloudflare.com/v1/account-id/my-gateway/openai/responses?beta=true",
+            br#"{"model":"gpt"}"#.as_slice(),
+        ),
+        (
+            "https://gateway.ai.cloudflare.com/v1/account-id/my-gateway/workers-ai/v1/chat/completions",
+            br#"{"model":"@cf/meta/llama"}"#.as_slice(),
+        ),
+    ] {
+        futures_executor::block_on(transport.execute(
+            binding_request(url, http::Method::POST, body),
+            CancellationToken::new(),
+        ))
+        .expect("binding provider/endpoint translation");
+    }
+    let forwarded_cancellation = CancellationToken::new();
+    let mut response = futures_executor::block_on(transport.execute(
         binding_request(
             "https://gateway.ai.cloudflare.com/v1/account-id/my-gateway/openai/responses?beta=true",
             http::Method::POST,
             br#"{"model":"gpt"}"#,
         ),
-        CancellationToken::new(),
+        forwarded_cancellation.clone(),
     ))
     .unwrap();
     assert_eq!(response.status, 207);
     assert_eq!(response.headers["cf-aig-log-id"], "log-1");
+    assert_eq!(
+        futures_executor::block_on(response.body.next())
+            .expect("streaming response chunk")
+            .expect("streaming response bytes"),
+        b"data: {}\n\n"
+    );
     let runs = binding.runs.lock().unwrap();
-    let (gateway, request) = &runs[0];
+    assert_eq!(
+        runs.iter()
+            .take(3)
+            .map(|(_, request)| (request.provider.as_str(), request.endpoint.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("anthropic", "v1/messages"),
+            ("openai", "responses?beta=true"),
+            ("workers-ai", "v1/chat/completions"),
+        ]
+    );
+    let (gateway, request) = &runs[3];
     assert_eq!(gateway, "my-gateway");
     assert_eq!(request.provider, "openai");
     assert_eq!(request.endpoint, "responses?beta=true");
@@ -382,10 +578,25 @@ fn cloudflare_gateway_binding_pi_exact() {
     assert_eq!(request.headers["cf-aig-metadata"], r#"{"user":"42"}"#);
     assert_eq!(request.headers["x-api-key"], "provider-key");
     drop(runs);
+    forwarded_cancellation.cancel();
+    assert!(
+        binding
+            .cancellations
+            .lock()
+            .unwrap()
+            .last()
+            .is_some_and(CancellationToken::is_cancelled)
+    );
 
     for (url, method, body, needle) in [
         (
             "https://api.openai.com/v1/responses",
+            http::Method::POST,
+            b"{}".as_slice(),
+            "outside the configured gateway prefix",
+        ),
+        (
+            "https://gateway.ai.cloudflare.com/v1/other-account/my-gateway/openai/responses",
             http::Method::POST,
             b"{}".as_slice(),
             "outside the configured gateway prefix",
@@ -402,6 +613,18 @@ fn cloudflare_gateway_binding_pi_exact() {
             b"not json".as_slice(),
             "non-JSON body",
         ),
+        (
+            "https://gateway.ai.cloudflare.com/v1/account-id/my-gateway/anthropic",
+            http::Method::POST,
+            b"{}".as_slice(),
+            "missing provider/endpoint path",
+        ),
+        (
+            "https://gateway.ai.cloudflare.com/v1/account-id/my-gateway/../other-gateway/anthropic/v1/messages",
+            http::Method::POST,
+            b"{}".as_slice(),
+            "outside the configured gateway prefix",
+        ),
     ] {
         let error = futures_executor::block_on(
             transport.execute(binding_request(url, method, body), CancellationToken::new()),
@@ -409,4 +632,18 @@ fn cloudflare_gateway_binding_pi_exact() {
         .unwrap_err();
         assert!(error.to_string().contains(needle));
     }
+
+    futures_executor::block_on(transport.execute(
+        binding_request(
+            "https://gateway.ai.cloudflare.com/v1/account-id/my-gateway/anthropic/../anthropic/v1/./messages",
+            http::Method::POST,
+            br#"{"model":"claude"}"#,
+        ),
+        CancellationToken::new(),
+    ))
+    .expect("URL-normalized dot segments route like their normal form");
+    let runs = binding.runs.lock().unwrap();
+    let (_, normalized) = runs.last().expect("normalized binding run");
+    assert_eq!(normalized.provider, "anthropic");
+    assert_eq!(normalized.endpoint, "v1/messages");
 }

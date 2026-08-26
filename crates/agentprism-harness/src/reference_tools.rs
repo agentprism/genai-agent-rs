@@ -1,18 +1,114 @@
 //! Executor-neutral reference-tool helpers from Architecture v2 part 2 §7.11.
 
-use crate::{TruncationLimits, TruncationResult, TruncationStrategy, truncate};
-use agentprism_ai::CancellationToken;
-use agentprism_env::{
-    AgentFileSystem, AgentPath, ArtifactError, ArtifactRef, CanonicalPath, EditResult,
-    FileSystemError, LocalAgentFileSystem, LocalTemporaryArtifactStore, ProcessExitStatus,
-    ReadLimits, TemporaryArtifactRequest, TemporaryArtifactStore,
+use crate::{TruncationLimits, TruncationResult, TruncationStrategy, format_size, truncate};
+use agentprism_ai::{
+    CancellationToken, ContentBlockId, LocalBoxFuture, SendBoxFuture, ToolResultContent,
 };
+use agentprism_core::ToolOutput;
+use agentprism_env::{
+    AgentFileSystem, AgentPath, ArtifactError, ArtifactRef, CanonicalPath, Clock, ClockError,
+    EditResult, FileSystemError, LocalAgentFileSystem, LocalClock, LocalProcessSpawner,
+    LocalRunningProcess, LocalTemporaryArtifactStore, ProcessCommand, ProcessError, ProcessEvent,
+    ProcessExitStatus, ProcessOutcome, ProcessSpawner, ProcessTermination, ReadLimits,
+    RunningProcess, TemporaryArtifactRequest, TemporaryArtifactStore, TerminationPolicy,
+};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use bytes::Bytes;
 use dashmap::{DashMap, mapref::entry::Entry};
-use futures_util::lock::Mutex as AsyncMutex;
+use futures_util::{StreamExt, future::Either, future::select, lock::Mutex as AsyncMutex};
 use serde::{Deserialize, Serialize};
-use std::{future::Future, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    future::Future,
+    sync::{Arc, Mutex as SyncMutex, MutexGuard as SyncMutexGuard},
+    time::Duration,
+};
 use unicode_normalization::UnicodeNormalization;
+
+/// Persisted read-tool detail schema version.
+pub const READ_TOOL_DETAILS_SCHEMA_VERSION: u32 = 1;
+
+/// Persisted bash-tool detail schema version.
+pub const BASH_TOOL_DETAILS_SCHEMA_VERSION: u32 = 1;
+
+/// Pi's default model-visible line limit for file and shell output.
+pub const DEFAULT_TOOL_MAX_LINES: usize = 2_000;
+
+/// Pi's default model-visible UTF-8 byte limit for file and shell output.
+pub const DEFAULT_TOOL_MAX_BYTES: usize = 50 * 1_024;
+
+/// Optional bounds for the reference read operation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ReadToolRequest {
+    /// One-based line offset. Omission starts at line one.
+    pub offset: Option<usize>,
+    /// Caller-selected maximum lines before ordinary tool truncation.
+    pub limit: Option<usize>,
+}
+
+/// Persistable accounting returned when the reference read operation truncates.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ReadToolDetails {
+    /// Native schema version.
+    pub schema_version: u32,
+    /// Complete truncation accounting.
+    pub truncation: TruncationResult,
+}
+
+/// Successful image conversion performed by a host image processor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessedReadImage {
+    /// Base64 image bytes without a data URL prefix.
+    pub data: String,
+    /// Media type of the processed image.
+    pub mime_type: String,
+    /// Ordered model-visible conversion or resize notices.
+    pub hints: Vec<String>,
+}
+
+/// Send image conversion seam used by the read reference operation.
+pub trait ReadImageProcessor: Send + Sync + 'static {
+    /// Converts or resizes a detected supported image.
+    fn process(
+        &self,
+        bytes: Bytes,
+        mime_type: &str,
+        auto_resize_images: bool,
+    ) -> SendBoxFuture<'_, Result<ProcessedReadImage, String>>;
+}
+
+/// Local counterpart of [`ReadImageProcessor`].
+pub trait LocalReadImageProcessor: 'static {
+    /// Converts or resizes a detected supported image.
+    fn process(
+        &self,
+        bytes: Bytes,
+        mime_type: &str,
+        auto_resize_images: bool,
+    ) -> LocalBoxFuture<'_, Result<ProcessedReadImage, String>>;
+}
+
+/// Read-tool configuration shared by the Send and Local operations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReadToolOptions {
+    /// Whether an injected image processor should resize images.
+    pub auto_resize_images: bool,
+    /// Maximum model-visible UTF-8 bytes.
+    pub max_bytes: usize,
+    /// Maximum model-visible logical lines.
+    pub max_lines: usize,
+}
+
+impl Default for ReadToolOptions {
+    fn default() -> Self {
+        Self {
+            auto_resize_images: true,
+            max_bytes: DEFAULT_TOOL_MAX_BYTES,
+            max_lines: DEFAULT_TOOL_MAX_LINES,
+        }
+    }
+}
 
 /// Per-canonical-path asynchronous mutation serializer.
 #[derive(Debug, Default)]
@@ -55,6 +151,337 @@ impl FileMutationQueue {
     /// Returns the number of path locks retained for active or queued work.
     pub fn active_paths(&self) -> usize {
         self.locks.len()
+    }
+}
+
+/// Reads text or a supported image through the Send filesystem capability.
+///
+/// Text uses Pi's one-based offset, caller limit, 2,000-line/50-KiB default
+/// truncation, and continuation notices. Image type is detected from bytes,
+/// not the file extension.
+pub async fn read_tool(
+    filesystem: &dyn AgentFileSystem,
+    path: &AgentPath,
+    request: ReadToolRequest,
+    options: ReadToolOptions,
+    image_processor: Option<&dyn ReadImageProcessor>,
+    cancellation: CancellationToken,
+) -> Result<ToolOutput, FileSystemError> {
+    let read = filesystem
+        .read(path, ReadLimits::default(), cancellation)
+        .await?;
+    read_tool_output(path, read.data, request, options, image_processor).await
+}
+
+/// Local counterpart of [`read_tool`].
+pub async fn read_local_tool(
+    filesystem: &dyn LocalAgentFileSystem,
+    path: &AgentPath,
+    request: ReadToolRequest,
+    options: ReadToolOptions,
+    image_processor: Option<&dyn LocalReadImageProcessor>,
+    cancellation: CancellationToken,
+) -> Result<ToolOutput, FileSystemError> {
+    let read = filesystem
+        .read(path, ReadLimits::default(), cancellation)
+        .await?;
+    read_local_tool_output(path, read.data, request, options, image_processor).await
+}
+
+async fn read_tool_output(
+    path: &AgentPath,
+    data: Bytes,
+    request: ReadToolRequest,
+    options: ReadToolOptions,
+    image_processor: Option<&dyn ReadImageProcessor>,
+) -> Result<ToolOutput, FileSystemError> {
+    if let Some(mime_type) = detect_supported_image_mime_type(&data) {
+        return if let Some(processor) = image_processor {
+            match processor
+                .process(data, mime_type, options.auto_resize_images)
+                .await
+            {
+                Ok(image) => Ok(processed_image_output(image)),
+                Err(message) => Ok(image_failure_output(mime_type, &message)),
+            }
+        } else {
+            Ok(unprocessed_image_output(data, mime_type))
+        };
+    }
+    text_read_output(path, &data, request, options)
+}
+
+async fn read_local_tool_output(
+    path: &AgentPath,
+    data: Bytes,
+    request: ReadToolRequest,
+    options: ReadToolOptions,
+    image_processor: Option<&dyn LocalReadImageProcessor>,
+) -> Result<ToolOutput, FileSystemError> {
+    if let Some(mime_type) = detect_supported_image_mime_type(&data) {
+        return if let Some(processor) = image_processor {
+            match processor
+                .process(data, mime_type, options.auto_resize_images)
+                .await
+            {
+                Ok(image) => Ok(processed_image_output(image)),
+                Err(message) => Ok(image_failure_output(mime_type, &message)),
+            }
+        } else {
+            Ok(unprocessed_image_output(data, mime_type))
+        };
+    }
+    text_read_output(path, &data, request, options)
+}
+
+fn text_read_output(
+    path: &AgentPath,
+    data: &[u8],
+    request: ReadToolRequest,
+    options: ReadToolOptions,
+) -> Result<ToolOutput, FileSystemError> {
+    let text = String::from_utf8_lossy(data);
+    let lines = text.split('\n').collect::<Vec<_>>();
+    let start = request.offset.unwrap_or(1).saturating_sub(1);
+    if start >= lines.len() {
+        return Err(FileSystemError::Invalid {
+            path: path.clone(),
+            message: format!(
+                "Offset {} is beyond end of file ({} lines total)",
+                request.offset.unwrap_or(1),
+                lines.len()
+            ),
+        });
+    }
+
+    let end = request.limit.map_or(lines.len(), |limit| {
+        start.saturating_add(limit).min(lines.len())
+    });
+    let selected = lines[start..end].join("\n");
+    let truncation = truncate(
+        &selected,
+        TruncationLimits {
+            max_bytes: options.max_bytes,
+            max_lines: options.max_lines,
+            strategy: TruncationStrategy::Head,
+        },
+    );
+    let start_display = start + 1;
+    let mut output = truncation.content.clone();
+    let details = if truncation.first_line_exceeds_limit {
+        let first_line_bytes = lines[start].len();
+        output = format!(
+            "[Line {start_display} is {}, exceeds {} limit. Use bash: sed -n '{start_display}p' {path} | head -c {}]",
+            format_size(first_line_bytes as u64),
+            format_size(options.max_bytes as u64),
+            options.max_bytes
+        );
+        Some(ReadToolDetails {
+            schema_version: READ_TOOL_DETAILS_SCHEMA_VERSION,
+            truncation,
+        })
+    } else if truncation.truncated {
+        let end_display = start_display + truncation.output_lines.saturating_sub(1) as usize;
+        let qualifier = if truncation.truncated_by == Some(crate::TruncatedBy::Bytes) {
+            format!(" ({} limit)", format_size(options.max_bytes as u64))
+        } else {
+            String::new()
+        };
+        output.push_str(&format!(
+            "\n\n[Showing lines {start_display}-{end_display} of {}{qualifier}. Use offset={} to continue.]",
+            logical_file_line_count(&text),
+            end_display + 1
+        ));
+        Some(ReadToolDetails {
+            schema_version: READ_TOOL_DETAILS_SCHEMA_VERSION,
+            truncation,
+        })
+    } else if request.limit.is_some() && end < lines.len() {
+        output.push_str(&format!(
+            "\n\n[{} more lines in file. Use offset={} to continue.]",
+            lines.len() - end,
+            end + 1
+        ));
+        None
+    } else {
+        None
+    };
+
+    let mut result = ToolOutput::new(vec![ToolResultContent::Text {
+        id: ContentBlockId::new("read-text"),
+        text: output,
+    }]);
+    result.details = details
+        .map(|details| serde_json::value::to_raw_value(&details))
+        .transpose()
+        .map_err(|error| FileSystemError::Invalid {
+            path: path.clone(),
+            message: error.to_string(),
+        })?;
+    Ok(result)
+}
+
+fn logical_file_line_count(text: &str) -> usize {
+    if text.is_empty() {
+        0
+    } else if text.ends_with('\n') {
+        text.split('\n').count().saturating_sub(1)
+    } else {
+        text.split('\n').count()
+    }
+}
+
+fn detect_supported_image_mime_type(data: &[u8]) -> Option<&'static str> {
+    if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if data.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if data.len() >= 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else if data.starts_with(b"BM") {
+        Some("image/bmp")
+    } else {
+        None
+    }
+}
+
+fn processed_image_output(image: ProcessedReadImage) -> ToolOutput {
+    let hints = if image.hints.is_empty() {
+        String::new()
+    } else {
+        format!("\n{}", image.hints.join("\n"))
+    };
+    ToolOutput::new(vec![
+        ToolResultContent::Text {
+            id: ContentBlockId::new("read-image-notice"),
+            text: format!("Read image file [{}]{hints}", image.mime_type),
+        },
+        ToolResultContent::Image {
+            id: ContentBlockId::new("read-image"),
+            data: image.data,
+            mime_type: image.mime_type,
+        },
+    ])
+}
+
+fn image_failure_output(mime_type: &str, message: &str) -> ToolOutput {
+    ToolOutput::new(vec![ToolResultContent::Text {
+        id: ContentBlockId::new("read-image-notice"),
+        text: format!("Read image file [{mime_type}]\n{message}"),
+    }])
+}
+
+fn unprocessed_image_output(data: Bytes, mime_type: &str) -> ToolOutput {
+    if mime_type == "image/bmp" {
+        return image_failure_output(
+            mime_type,
+            "[Image omitted: configure an imageProcessor to convert BMP images.]",
+        );
+    }
+    ToolOutput::new(vec![
+        ToolResultContent::Text {
+            id: ContentBlockId::new("read-image-notice"),
+            text: format!("Read image file [{mime_type}]"),
+        },
+        ToolResultContent::Image {
+            id: ContentBlockId::new("read-image"),
+            data: BASE64_STANDARD.encode(data),
+            mime_type: mime_type.to_owned(),
+        },
+    ])
+}
+
+/// Creates or overwrites a file while holding the canonical-path mutation lock.
+/// Cancellation is checked both before and after the write, so the queue is not
+/// released while an aborted host write is still settling.
+pub async fn write_tool(
+    filesystem: &dyn AgentFileSystem,
+    mutations: &FileMutationQueue,
+    path: &AgentPath,
+    content: &str,
+    cancellation: CancellationToken,
+) -> Result<ToolOutput, FileSystemError> {
+    let canonical = mutation_key(filesystem, path).await?;
+    mutations
+        .with_path_lock(canonical, async move {
+            cancellation
+                .check()
+                .map_err(|_| FileSystemError::Cancelled { path: path.clone() })?;
+            let write = filesystem
+                .write(
+                    path,
+                    Bytes::copy_from_slice(content.as_bytes()),
+                    cancellation.clone(),
+                )
+                .await?;
+            cancellation
+                .check()
+                .map_err(|_| FileSystemError::Cancelled { path: path.clone() })?;
+            Ok(ToolOutput::new(vec![ToolResultContent::Text {
+                id: ContentBlockId::new("write-text"),
+                text: format!("Successfully wrote {} bytes to {path}", write.bytes_written),
+            }]))
+        })
+        .await
+}
+
+/// Local counterpart of [`write_tool`].
+pub async fn write_local_tool(
+    filesystem: &dyn LocalAgentFileSystem,
+    mutations: &FileMutationQueue,
+    path: &AgentPath,
+    content: &str,
+    cancellation: CancellationToken,
+) -> Result<ToolOutput, FileSystemError> {
+    let canonical = mutation_local_key(filesystem, path).await?;
+    mutations
+        .with_path_lock(canonical, async move {
+            cancellation
+                .check()
+                .map_err(|_| FileSystemError::Cancelled { path: path.clone() })?;
+            let write = filesystem
+                .write(
+                    path,
+                    Bytes::copy_from_slice(content.as_bytes()),
+                    cancellation.clone(),
+                )
+                .await?;
+            cancellation
+                .check()
+                .map_err(|_| FileSystemError::Cancelled { path: path.clone() })?;
+            Ok(ToolOutput::new(vec![ToolResultContent::Text {
+                id: ContentBlockId::new("write-text"),
+                text: format!("Successfully wrote {} bytes to {path}", write.bytes_written),
+            }]))
+        })
+        .await
+}
+
+async fn mutation_key(
+    filesystem: &dyn AgentFileSystem,
+    path: &AgentPath,
+) -> Result<CanonicalPath, FileSystemError> {
+    match filesystem.canonicalize(path).await {
+        Ok(path) => Ok(path),
+        Err(FileSystemError::NotFound { .. }) => {
+            Ok(CanonicalPath::new(path.as_path().to_path_buf()))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn mutation_local_key(
+    filesystem: &dyn LocalAgentFileSystem,
+    path: &AgentPath,
+) -> Result<CanonicalPath, FileSystemError> {
+    match filesystem.canonicalize(path).await {
+        Ok(path) => Ok(path),
+        Err(FileSystemError::NotFound { .. }) => {
+            Ok(CanonicalPath::new(path.as_path().to_path_buf()))
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -147,9 +574,14 @@ pub async fn edit_file(
                     &locked_path,
                     &content,
                     &prepared.final_content,
-                    cancellation,
+                    cancellation.clone(),
                 )
                 .await?;
+            cancellation
+                .check()
+                .map_err(|_| FileSystemError::Cancelled {
+                    path: locked_path.clone(),
+                })?;
             Ok(EditToolResultDetails {
                 diff: prepared.diff,
                 metadata,
@@ -186,9 +618,14 @@ pub async fn edit_local_file(
                     &locked_path,
                     &content,
                     &prepared.final_content,
-                    cancellation,
+                    cancellation.clone(),
                 )
                 .await?;
+            cancellation
+                .check()
+                .map_err(|_| FileSystemError::Cancelled {
+                    path: locked_path.clone(),
+                })?;
             Ok(EditToolResultDetails {
                 diff: prepared.diff,
                 metadata,
@@ -238,6 +675,8 @@ pub async fn edit_local_file_exact(
 /// Persistable metadata for a bounded bash result and its complete-output artifact.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BashToolResultDetails {
+    /// Native schema version.
+    pub schema_version: u32,
     /// Process exit code, absent when termination was signal-only.
     pub exit_code: Option<i32>,
     /// Portable signal label, when reported.
@@ -266,6 +705,731 @@ pub struct BashToolResult {
     pub details: BashToolResultDetails,
     /// Complete truncation accounting.
     pub truncation: TruncationResult,
+}
+
+/// Mutable, executor-neutral shell execution passed through Pi's optional
+/// asynchronous `prepare` hook before process creation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BashExecutionRequest {
+    /// Exact shell program or path.
+    pub shell: String,
+    /// Command submitted to the shell.
+    pub command: String,
+    /// Optional command prepended on its own line.
+    pub command_prefix: Option<String>,
+    /// Optional working directory.
+    pub current_dir: Option<AgentPath>,
+    /// Explicit environment overlay.
+    pub environment: BTreeMap<String, String>,
+    /// Whether the process inherits the host environment.
+    pub inherit_environment: bool,
+    /// Optional positive execution timeout.
+    pub timeout: Option<Duration>,
+    /// Model-visible output limits.
+    pub limits: TruncationLimits,
+}
+
+impl BashExecutionRequest {
+    /// Creates a request using `bash -lc`, inherited environment, no timeout,
+    /// and Pi's default output limits.
+    pub fn new(command: impl Into<String>) -> Self {
+        Self {
+            shell: "bash".into(),
+            command: command.into(),
+            command_prefix: None,
+            current_dir: None,
+            environment: BTreeMap::new(),
+            inherit_environment: true,
+            timeout: None,
+            limits: TruncationLimits {
+                max_bytes: DEFAULT_TOOL_MAX_BYTES,
+                max_lines: DEFAULT_TOOL_MAX_LINES,
+                strategy: TruncationStrategy::Tail,
+            },
+        }
+    }
+
+    /// Produces the portable process command after applying the prefix.
+    pub fn process_command(&self) -> ProcessCommand {
+        let command = self.command_prefix.as_ref().map_or_else(
+            || self.command.clone(),
+            |prefix| format!("{prefix}\n{}", self.command),
+        );
+        let mut process =
+            ProcessCommand::new(self.shell.clone()).with_arguments(["-lc".to_owned(), command]);
+        process.current_dir.clone_from(&self.current_dir);
+        process.environment.clone_from(&self.environment);
+        process.inherit_environment = self.inherit_environment;
+        process
+    }
+}
+
+/// Sanitized failure returned by an application-provided Bash prepare hook.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BashPrepareError {
+    /// Host-visible failure detail.
+    pub message: String,
+}
+
+impl BashPrepareError {
+    /// Creates a prepare-hook failure.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for BashPrepareError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for BashPrepareError {}
+
+/// Send-capable asynchronous Bash prepare hook.
+///
+/// The hook receives the caller's exact turn context and logical cancellation
+/// signal. It may mutate the command, working directory, environment, and
+/// inheritance policy before the process is spawned.
+pub trait BashPrepare<C: ?Sized>: Send + Sync + 'static {
+    /// Mutates one execution after command-prefix application and before spawn.
+    fn prepare<'a>(
+        &'a self,
+        execution: &'a mut BashExecutionRequest,
+        context: &'a C,
+        cancellation: &'a CancellationToken,
+    ) -> SendBoxFuture<'a, Result<(), BashPrepareError>>;
+}
+
+/// Local-executor counterpart of [`BashPrepare`].
+pub trait LocalBashPrepare<C: ?Sized>: 'static {
+    /// Mutates one execution after command-prefix application and before spawn.
+    fn prepare<'a>(
+        &'a self,
+        execution: &'a mut BashExecutionRequest,
+        context: &'a C,
+        cancellation: &'a CancellationToken,
+    ) -> LocalBoxFuture<'a, Result<(), BashPrepareError>>;
+}
+
+/// Successful shell result after process joining and output recovery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BashExecutionResult {
+    /// Bounded model-visible result and complete-output reference.
+    pub result: BashToolResult,
+    /// Portable process termination outcome.
+    pub outcome: ProcessOutcome,
+}
+
+/// Send callback for coalesced, bounded bash output updates.
+pub trait BashUpdateSink: Send + Sync + 'static {
+    /// Receives one current output snapshot. No callback occurs after the
+    /// execution future settles.
+    fn update(&self, update: BashToolResult);
+}
+
+/// Local counterpart of [`BashUpdateSink`].
+pub trait LocalBashUpdateSink: 'static {
+    /// Receives one current output snapshot. No callback occurs after the
+    /// execution future settles.
+    fn update(&self, update: BashToolResult);
+}
+
+/// Failure from executor-neutral shell execution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BashExecutionError {
+    /// The application-provided prepare hook rejected the execution.
+    Prepare(BashPrepareError),
+    /// Process creation, observation, or termination failed.
+    Process(ProcessError),
+    /// Complete output could not be persisted.
+    Artifact(ArtifactError),
+    /// Timeout observation failed through the host clock capability.
+    Clock(ClockError),
+    /// The process exited unsuccessfully after producing this recoverable result.
+    NonZero {
+        /// Complete bounded and persisted output result.
+        result: Box<BashExecutionResult>,
+    },
+    /// The configured deadline terminated the process after producing this result.
+    TimedOut {
+        /// Requested timeout.
+        timeout: Duration,
+        /// Complete bounded and persisted output result.
+        result: Box<BashExecutionResult>,
+    },
+    /// Caller cancellation terminated the process after producing this result.
+    Cancelled {
+        /// Complete bounded and persisted output result.
+        result: Box<BashExecutionResult>,
+    },
+}
+
+impl fmt::Display for BashExecutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Prepare(error) => error.fmt(formatter),
+            Self::Process(error) => error.fmt(formatter),
+            Self::Artifact(error) => error.fmt(formatter),
+            Self::Clock(error) => error.fmt(formatter),
+            Self::NonZero { result } => formatter.write_str(&append_bash_status(
+                &result.result.output,
+                result.outcome.status.code.map_or_else(
+                    || "Command failed".into(),
+                    |code| format!("Command exited with code {code}"),
+                ),
+            )),
+            Self::TimedOut { timeout, result } => formatter.write_str(&append_bash_status(
+                &result.result.output,
+                format!("Command timed out after {} seconds", timeout.as_secs_f64()),
+            )),
+            Self::Cancelled { result } => formatter.write_str(&append_bash_status(
+                &result.result.output,
+                "Command aborted".into(),
+            )),
+        }
+    }
+}
+
+impl std::error::Error for BashExecutionError {}
+
+impl From<BashPrepareError> for BashExecutionError {
+    fn from(error: BashPrepareError) -> Self {
+        Self::Prepare(error)
+    }
+}
+
+impl From<ProcessError> for BashExecutionError {
+    fn from(error: ProcessError) -> Self {
+        Self::Process(error)
+    }
+}
+
+impl From<ArtifactError> for BashExecutionError {
+    fn from(error: ArtifactError) -> Self {
+        Self::Artifact(error)
+    }
+}
+
+impl From<ClockError> for BashExecutionError {
+    fn from(error: ClockError) -> Self {
+        Self::Clock(error)
+    }
+}
+
+fn execution_after_prefix(request: &BashExecutionRequest) -> BashExecutionRequest {
+    let mut execution = request.clone();
+    if let Some(prefix) = execution.command_prefix.take() {
+        execution.command = format!("{prefix}\n{}", execution.command);
+    }
+    execution
+}
+
+/// Applies an asynchronous Send prepare hook, then executes the mutated Bash
+/// request. Prefix application precedes the hook exactly as in pinned Pi.
+pub async fn execute_bash_tool_with_prepare<C: ?Sized + 'static>(
+    processes: &dyn ProcessSpawner,
+    clock: &dyn Clock,
+    artifacts: &dyn TemporaryArtifactStore,
+    request: &BashExecutionRequest,
+    context: &C,
+    prepare: &dyn BashPrepare<C>,
+    cancellation: CancellationToken,
+) -> Result<BashExecutionResult, BashExecutionError> {
+    execute_bash_tool_with_prepare_and_updates(
+        processes,
+        clock,
+        artifacts,
+        request,
+        context,
+        prepare,
+        None,
+        cancellation,
+    )
+    .await
+}
+
+/// Applies an asynchronous Send prepare hook and executes with output updates.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the reference tool keeps each injected capability and Pi hook input explicit"
+)]
+pub async fn execute_bash_tool_with_prepare_and_updates<C: ?Sized + 'static>(
+    processes: &dyn ProcessSpawner,
+    clock: &dyn Clock,
+    artifacts: &dyn TemporaryArtifactStore,
+    request: &BashExecutionRequest,
+    context: &C,
+    prepare: &dyn BashPrepare<C>,
+    updates: Option<&dyn BashUpdateSink>,
+    cancellation: CancellationToken,
+) -> Result<BashExecutionResult, BashExecutionError> {
+    let mut execution = execution_after_prefix(request);
+    prepare
+        .prepare(&mut execution, context, &cancellation)
+        .await?;
+    execute_bash_tool_with_updates(
+        processes,
+        clock,
+        artifacts,
+        &execution,
+        updates,
+        cancellation,
+    )
+    .await
+}
+
+/// Applies an asynchronous Local prepare hook, then executes the mutated Bash
+/// request. Prefix application precedes the hook exactly as in pinned Pi.
+pub async fn execute_local_bash_tool_with_prepare<C: ?Sized + 'static>(
+    processes: &dyn LocalProcessSpawner,
+    clock: &dyn LocalClock,
+    artifacts: &dyn LocalTemporaryArtifactStore,
+    request: &BashExecutionRequest,
+    context: &C,
+    prepare: &dyn LocalBashPrepare<C>,
+    cancellation: CancellationToken,
+) -> Result<BashExecutionResult, BashExecutionError> {
+    execute_local_bash_tool_with_prepare_and_updates(
+        processes,
+        clock,
+        artifacts,
+        request,
+        context,
+        prepare,
+        None,
+        cancellation,
+    )
+    .await
+}
+
+/// Applies a Local prepare hook and executes with local output updates.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the Local reference tool mirrors the explicit Send capability boundary"
+)]
+pub async fn execute_local_bash_tool_with_prepare_and_updates<C: ?Sized + 'static>(
+    processes: &dyn LocalProcessSpawner,
+    clock: &dyn LocalClock,
+    artifacts: &dyn LocalTemporaryArtifactStore,
+    request: &BashExecutionRequest,
+    context: &C,
+    prepare: &dyn LocalBashPrepare<C>,
+    updates: Option<&dyn LocalBashUpdateSink>,
+    cancellation: CancellationToken,
+) -> Result<BashExecutionResult, BashExecutionError> {
+    let mut execution = execution_after_prefix(request);
+    prepare
+        .prepare(&mut execution, context, &cancellation)
+        .await?;
+    execute_local_bash_tool_with_updates(
+        processes,
+        clock,
+        artifacts,
+        &execution,
+        updates,
+        cancellation,
+    )
+    .await
+}
+
+/// Executes a prepared shell request through Send environment capabilities.
+///
+/// Stdout and stderr are combined in event order. Every timeout or caller
+/// cancellation joins the process before returning, and its output is passed
+/// through the same truncation and artifact path as a successful command.
+pub async fn execute_bash_tool(
+    processes: &dyn ProcessSpawner,
+    clock: &dyn Clock,
+    artifacts: &dyn TemporaryArtifactStore,
+    request: &BashExecutionRequest,
+    cancellation: CancellationToken,
+) -> Result<BashExecutionResult, BashExecutionError> {
+    execute_bash_tool_with_updates(processes, clock, artifacts, request, None, cancellation).await
+}
+
+/// Executes a prepared shell request and emits bounded, coalesced snapshots.
+pub async fn execute_bash_tool_with_updates(
+    processes: &dyn ProcessSpawner,
+    clock: &dyn Clock,
+    artifacts: &dyn TemporaryArtifactStore,
+    request: &BashExecutionRequest,
+    updates: Option<&dyn BashUpdateSink>,
+    cancellation: CancellationToken,
+) -> Result<BashExecutionResult, BashExecutionError> {
+    cancellation.check().map_err(|_| ProcessError::Cancelled)?;
+    let process_cancellation = cancellation.child();
+    let mut process = processes
+        .spawn(request.process_command(), process_cancellation.clone())
+        .await?;
+    let output = Arc::new(SyncMutex::new(Vec::new()));
+    let (outcome, timed_out) = collect_send_process(
+        process.as_mut(),
+        clock,
+        ProcessCollectionOptions {
+            timeout: request.timeout,
+            limits: request.limits,
+        },
+        Arc::clone(&output),
+        updates,
+        process_cancellation,
+        &cancellation,
+    )
+    .await?;
+    let complete = String::from_utf8_lossy(&lock_sync(&output)).into_owned();
+    let result = prepare_bash_tool_result(
+        artifacts,
+        &complete,
+        &outcome.status,
+        request.limits,
+        CancellationToken::new(),
+    )
+    .await?;
+    let execution = BashExecutionResult {
+        result: with_bash_display_notice(result),
+        outcome,
+    };
+    if let Some(updates) = updates {
+        updates.update(execution.result.clone());
+    }
+    classify_bash_execution(
+        execution,
+        request.timeout,
+        timed_out,
+        cancellation.is_cancelled(),
+    )
+}
+
+/// Local counterpart of [`execute_bash_tool`].
+pub async fn execute_local_bash_tool(
+    processes: &dyn LocalProcessSpawner,
+    clock: &dyn LocalClock,
+    artifacts: &dyn LocalTemporaryArtifactStore,
+    request: &BashExecutionRequest,
+    cancellation: CancellationToken,
+) -> Result<BashExecutionResult, BashExecutionError> {
+    execute_local_bash_tool_with_updates(processes, clock, artifacts, request, None, cancellation)
+        .await
+}
+
+/// Local counterpart of [`execute_bash_tool_with_updates`].
+pub async fn execute_local_bash_tool_with_updates(
+    processes: &dyn LocalProcessSpawner,
+    clock: &dyn LocalClock,
+    artifacts: &dyn LocalTemporaryArtifactStore,
+    request: &BashExecutionRequest,
+    updates: Option<&dyn LocalBashUpdateSink>,
+    cancellation: CancellationToken,
+) -> Result<BashExecutionResult, BashExecutionError> {
+    cancellation.check().map_err(|_| ProcessError::Cancelled)?;
+    let process_cancellation = cancellation.child();
+    let mut process = processes
+        .spawn(request.process_command(), process_cancellation.clone())
+        .await?;
+    let output = Arc::new(SyncMutex::new(Vec::new()));
+    let (outcome, timed_out) = collect_local_process(
+        process.as_mut(),
+        clock,
+        ProcessCollectionOptions {
+            timeout: request.timeout,
+            limits: request.limits,
+        },
+        Arc::clone(&output),
+        updates,
+        process_cancellation,
+        &cancellation,
+    )
+    .await?;
+    let complete = String::from_utf8_lossy(&lock_sync(&output)).into_owned();
+    let result = prepare_local_bash_tool_result(
+        artifacts,
+        &complete,
+        &outcome.status,
+        request.limits,
+        CancellationToken::new(),
+    )
+    .await?;
+    let execution = BashExecutionResult {
+        result: with_bash_display_notice(result),
+        outcome,
+    };
+    if let Some(updates) = updates {
+        updates.update(execution.result.clone());
+    }
+    classify_bash_execution(
+        execution,
+        request.timeout,
+        timed_out,
+        cancellation.is_cancelled(),
+    )
+}
+
+#[derive(Clone, Copy)]
+struct ProcessCollectionOptions {
+    timeout: Option<Duration>,
+    limits: TruncationLimits,
+}
+
+async fn collect_send_process(
+    process: &mut dyn RunningProcess,
+    clock: &dyn Clock,
+    options: ProcessCollectionOptions,
+    output: Arc<SyncMutex<Vec<u8>>>,
+    updates: Option<&dyn BashUpdateSink>,
+    process_cancellation: CancellationToken,
+    cancellation: &CancellationToken,
+) -> Result<(ProcessOutcome, bool), BashExecutionError> {
+    let Some(timeout) = options.timeout else {
+        return collect_send_events(process, output, options.limits, updates)
+            .await
+            .map(|outcome| (outcome, false))
+            .map_err(Into::into);
+    };
+    if timeout.is_zero() {
+        return Err(ProcessError::Spawn {
+            message: "timeout must be positive".into(),
+        }
+        .into());
+    }
+
+    let collection = Box::pin(collect_send_events(
+        process,
+        output,
+        options.limits,
+        updates,
+    ));
+    let deadline = Box::pin(clock.sleep(timeout, cancellation.child()));
+    let race = match select(collection, deadline).await {
+        Either::Left((outcome, _deadline)) => ProcessRace::Completed(outcome),
+        Either::Right((deadline, collection)) => {
+            drop(collection);
+            ProcessRace::Deadline(deadline)
+        }
+    };
+    match race {
+        ProcessRace::Completed(outcome) => Ok((outcome?, false)),
+        ProcessRace::Deadline(deadline) => {
+            process_cancellation.cancel();
+            let outcome = process.terminate(TerminationPolicy::default()).await?;
+            match deadline {
+                Ok(()) => Ok((outcome, !cancellation.is_cancelled())),
+                Err(ClockError::Cancelled) if cancellation.is_cancelled() => Ok((outcome, false)),
+                Err(error) => Err(error.into()),
+            }
+        }
+    }
+}
+
+async fn collect_local_process(
+    process: &mut dyn LocalRunningProcess,
+    clock: &dyn LocalClock,
+    options: ProcessCollectionOptions,
+    output: Arc<SyncMutex<Vec<u8>>>,
+    updates: Option<&dyn LocalBashUpdateSink>,
+    process_cancellation: CancellationToken,
+    cancellation: &CancellationToken,
+) -> Result<(ProcessOutcome, bool), BashExecutionError> {
+    let Some(timeout) = options.timeout else {
+        return collect_local_events(process, output, options.limits, updates)
+            .await
+            .map(|outcome| (outcome, false))
+            .map_err(Into::into);
+    };
+    if timeout.is_zero() {
+        return Err(ProcessError::Spawn {
+            message: "timeout must be positive".into(),
+        }
+        .into());
+    }
+
+    let collection = Box::pin(collect_local_events(
+        process,
+        output,
+        options.limits,
+        updates,
+    ));
+    let deadline = Box::pin(clock.sleep(timeout, cancellation.child()));
+    let race = match select(collection, deadline).await {
+        Either::Left((outcome, _deadline)) => ProcessRace::Completed(outcome),
+        Either::Right((deadline, collection)) => {
+            drop(collection);
+            ProcessRace::Deadline(deadline)
+        }
+    };
+    match race {
+        ProcessRace::Completed(outcome) => Ok((outcome?, false)),
+        ProcessRace::Deadline(deadline) => {
+            process_cancellation.cancel();
+            let outcome = process.terminate(TerminationPolicy::default()).await?;
+            match deadline {
+                Ok(()) => Ok((outcome, !cancellation.is_cancelled())),
+                Err(ClockError::Cancelled) if cancellation.is_cancelled() => Ok((outcome, false)),
+                Err(error) => Err(error.into()),
+            }
+        }
+    }
+}
+
+enum ProcessRace {
+    Completed(Result<ProcessOutcome, ProcessError>),
+    Deadline(Result<(), ClockError>),
+}
+
+async fn collect_send_events(
+    process: &mut dyn RunningProcess,
+    output: Arc<SyncMutex<Vec<u8>>>,
+    limits: TruncationLimits,
+    updates: Option<&dyn BashUpdateSink>,
+) -> Result<ProcessOutcome, ProcessError> {
+    let mut bytes_at_last_update = 0;
+    let mut events = process.events();
+    while let Some(event) = events.next().await {
+        match event? {
+            ProcessEvent::Stdout(bytes) | ProcessEvent::Stderr(bytes) => {
+                lock_sync(&output).extend_from_slice(&bytes);
+                let total = lock_sync(&output).len();
+                if total.saturating_sub(bytes_at_last_update) >= 4 * 1_024 {
+                    if let Some(updates) = updates {
+                        updates.update(intermediate_bash_result(&output, limits));
+                    }
+                    bytes_at_last_update = total;
+                }
+            }
+            ProcessEvent::Exited(outcome) => return Ok(outcome),
+            _ => {}
+        }
+    }
+    Err(ProcessError::Io {
+        message: "process event stream ended without an exit outcome".into(),
+    })
+}
+
+async fn collect_local_events(
+    process: &mut dyn LocalRunningProcess,
+    output: Arc<SyncMutex<Vec<u8>>>,
+    limits: TruncationLimits,
+    updates: Option<&dyn LocalBashUpdateSink>,
+) -> Result<ProcessOutcome, ProcessError> {
+    let mut bytes_at_last_update = 0;
+    let mut events = process.events();
+    while let Some(event) = events.next().await {
+        match event? {
+            ProcessEvent::Stdout(bytes) | ProcessEvent::Stderr(bytes) => {
+                lock_sync(&output).extend_from_slice(&bytes);
+                let total = lock_sync(&output).len();
+                if total.saturating_sub(bytes_at_last_update) >= 4 * 1_024 {
+                    if let Some(updates) = updates {
+                        updates.update(intermediate_bash_result(&output, limits));
+                    }
+                    bytes_at_last_update = total;
+                }
+            }
+            ProcessEvent::Exited(outcome) => return Ok(outcome),
+            _ => {}
+        }
+    }
+    Err(ProcessError::Io {
+        message: "process event stream ended without an exit outcome".into(),
+    })
+}
+
+fn intermediate_bash_result(
+    output: &SyncMutex<Vec<u8>>,
+    mut limits: TruncationLimits,
+) -> BashToolResult {
+    limits.strategy = TruncationStrategy::Tail;
+    let output = String::from_utf8_lossy(&lock_sync(output)).into_owned();
+    build_bash_result(
+        &ProcessExitStatus {
+            code: None,
+            signal: None,
+            success: true,
+        },
+        truncate(&output, limits),
+        None,
+    )
+}
+
+fn classify_bash_execution(
+    mut execution: BashExecutionResult,
+    timeout: Option<Duration>,
+    timed_out: bool,
+    cancelled: bool,
+) -> Result<BashExecutionResult, BashExecutionError> {
+    if cancelled || execution.outcome.termination == ProcessTermination::Cancelled {
+        return Err(BashExecutionError::Cancelled {
+            result: Box::new(execution),
+        });
+    }
+    if timed_out {
+        return Err(BashExecutionError::TimedOut {
+            timeout: timeout.expect("a timeout race requires a configured duration"),
+            result: Box::new(execution),
+        });
+    }
+    if !execution.outcome.status.success {
+        return Err(BashExecutionError::NonZero {
+            result: Box::new(execution),
+        });
+    }
+    if execution.result.output.is_empty() {
+        execution.result.output = "(no output)".into();
+    }
+    Ok(execution)
+}
+
+fn with_bash_display_notice(mut result: BashToolResult) -> BashToolResult {
+    if !result.truncation.truncated {
+        return result;
+    }
+    let artifact = result
+        .details
+        .full_output_artifact
+        .as_ref()
+        .expect("truncated bash output always has a recovery artifact");
+    let end_line = result.truncation.total_lines;
+    let notice = if result.truncation.last_line_partial {
+        format!(
+            "[Showing last {} of line {end_line} (line is {}). Full output: {}]",
+            format_size(result.truncation.output_bytes),
+            format_size(result.truncation.total_bytes),
+            artifact.path
+        )
+    } else {
+        let start_line = end_line
+            .saturating_sub(result.truncation.output_lines)
+            .saturating_add(1);
+        let qualifier = if result.truncation.truncated_by == Some(crate::TruncatedBy::Bytes) {
+            format!(
+                " ({} limit)",
+                format_size(result.truncation.max_bytes as u64)
+            )
+        } else {
+            String::new()
+        };
+        format!(
+            "[Showing lines {start_line}-{end_line} of {}{qualifier}. Full output: {}]",
+            result.truncation.total_lines, artifact.path
+        )
+    };
+    result.output = append_bash_status(&result.output, notice);
+    result
+}
+
+fn append_bash_status(output: &str, status: String) -> String {
+    if output.is_empty() {
+        status
+    } else {
+        format!("{output}\n\n{status}")
+    }
+}
+
+fn lock_sync<T>(mutex: &SyncMutex<T>) -> SyncMutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Bounds bash output from the tail and stores complete output when needed.
@@ -701,6 +1865,7 @@ fn build_bash_result(
     BashToolResult {
         output: truncation.content.clone(),
         details: BashToolResultDetails {
+            schema_version: BASH_TOOL_DETAILS_SCHEMA_VERSION,
             exit_code: status.code,
             signal: status.signal.clone(),
             truncated: truncation.truncated,

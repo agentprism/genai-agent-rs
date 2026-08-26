@@ -663,6 +663,138 @@ fn mistral_descriptor() -> ModelDescriptor {
     }
 }
 
+/// Architecture v2 part 2 §9.2 and §10.8; pinned Pi basis:
+/// `packages/ai/test/empty.test.ts`, Mistral scenarios, and
+/// `packages/ai/src/api/mistral-conversations.ts` (`toChatMessages`).
+#[test]
+fn mistral_empty_message_matrix_pi_exact() {
+    let model = mistral_models()
+        .expect("pinned Mistral catalog")
+        .into_iter()
+        .find(|model| model.common.model_ref.model.as_str() == "devstral-medium-latest")
+        .expect("pinned devstral-medium-latest model");
+    let user = |id: &str, content: Vec<ContentBlock>| {
+        Message::User(UserMessage {
+            id: MessageId::new(id),
+            content,
+            timestamp: Timestamp::default(),
+        })
+    };
+
+    let mut empty_array = Context::new(None);
+    empty_array.messages.push(user("empty-array", Vec::new()));
+
+    let mut empty_string = Context::new(None);
+    empty_string.messages.push(user(
+        "empty-string",
+        vec![ContentBlock::Text {
+            id: ContentBlockId::new("empty-string-text"),
+            text: String::new(),
+        }],
+    ));
+
+    let mut whitespace = Context::new(None);
+    whitespace.messages.push(user(
+        "whitespace",
+        vec![ContentBlock::Text {
+            id: ContentBlockId::new("whitespace-text"),
+            text: "   \n\t  ".into(),
+        }],
+    ));
+
+    let mut empty_assistant = Context::new(None);
+    empty_assistant.messages.push(user(
+        "before-empty-assistant",
+        vec![ContentBlock::Text {
+            id: ContentBlockId::new("before-empty-assistant-text"),
+            text: "Hello, how are you?".into(),
+        }],
+    ));
+    empty_assistant
+        .messages
+        .push(Message::Assistant(AssistantMessage {
+            id: MessageId::new("empty-assistant"),
+            provider: ProviderId::new("mistral"),
+            api: ApiId::new(MistralConversations::API_ID),
+            requested_model: ModelId::new("devstral-medium-latest"),
+            response_model: None,
+            response_id: None,
+            deferred: None,
+            end_turn: None,
+            diagnostics: Vec::new(),
+            content: Vec::new(),
+            replay: ReplayEnvelope::new(ReplayScope::new(
+                "mistral",
+                MistralConversations::API_ID,
+                "devstral-medium-latest",
+                "devstral-medium-latest",
+            )),
+            usage: Usage::zero(UsageSource::Unknown),
+            cost: None,
+            finish: AssistantFinish {
+                reason: AssistantFinishReason::Stop,
+                raw_provider_reason: Some("stop".into()),
+                error: None,
+            },
+            timestamp: Timestamp::default(),
+        }));
+    empty_assistant.messages.push(user(
+        "after-empty-assistant",
+        vec![ContentBlock::Text {
+            id: ContentBlockId::new("after-empty-assistant-text"),
+            text: "Please respond this time.".into(),
+        }],
+    ));
+
+    for (case, context, expected_messages) in [
+        ("empty content array", empty_array, json!([])),
+        (
+            "empty string",
+            empty_string,
+            json!([{"role": "user", "content": ""}]),
+        ),
+        (
+            "whitespace-only content",
+            whitespace,
+            json!([{"role": "user", "content": "   \n\t  "}]),
+        ),
+        (
+            "empty assistant message",
+            empty_assistant,
+            json!([
+                {"role": "user", "content": "Hello, how are you?"},
+                {"role": "user", "content": "Please respond this time."}
+            ]),
+        ),
+    ] {
+        let send_transport = CapturingMistralTransport::terminal();
+        let mut send_request = mistral_request(model.clone());
+        send_request.context = context.clone();
+        let send_events = successful_send_events(Arc::new(send_transport.clone()), send_request);
+
+        let local_transport = CapturingMistralTransport::terminal();
+        let mut local_request = local_mistral_request(model.clone());
+        local_request.context = context;
+        let local_events = successful_local_events(Rc::new(local_transport.clone()), local_request);
+
+        for (runtime, events) in [("Send", send_events), ("Local", local_events)] {
+            let terminal = events
+                .last()
+                .and_then(AssistantEvent::terminal_message)
+                .unwrap_or_else(|| panic!("{runtime} {case} terminal Mistral assistant"));
+            assert_eq!(terminal.finish.reason, AssistantFinishReason::Stop);
+        }
+
+        let send_body = send_transport.last().body;
+        let local_body = local_transport.last().body;
+        assert_eq!(send_body, local_body, "{case} Send/Local body mismatch");
+        let wire: Value = serde_json::from_slice(&send_body)
+            .unwrap_or_else(|error| panic!("{case} Mistral request JSON: {error}"));
+        assert_eq!(wire["model"], "devstral-medium-latest", "{case}");
+        assert_eq!(wire["messages"], expected_messages, "{case}");
+    }
+}
+
 fn assert_transport_diagnostics(message: &AssistantMessage) {
     let restored: AssistantMessage = serde_json::from_slice(
         &serde_json::to_vec(message).expect("persist Mistral diagnostic message"),

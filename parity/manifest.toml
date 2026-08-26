@@ -1,5 +1,5 @@
 # Parity inventory for architecture v2 part 2 §10, pinned to the source commit
-# below. Planned mappings name the milestone that will port the complete file.
+# below. M9.2 closes the inventory: no planned mappings remain.
 upstream_repository = "earendil-works/pi"
 upstream_commit = "8fa7eebd235355522c8104166b4f1f959b4e2f10"
 
@@ -86,7 +86,7 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#10.8-mistral-conversations"
-rust = ["mistral_bytewise_sse_utf8_send_and_local", "mistral_cancellation_while_waiting_for_sse_send_and_local", "mistral_content_block_switching_pi_order_send_and_local", "mistral_explicit_null_affinity_suppresses_auto_send_and_local", "mistral_http_error_body_ecmascript_trim_send_and_local_pi_exact", "mistral_http_status_and_error_body_survive_send_and_local", "mistral_payload_transform_camel_case_fields_remap_send_and_local", "mistral_sse_ecmascript_trim_pi_exact", "mistral_timeout_covers_error_body_send_and_local", "mistral_timeout_covers_sse_body_send_and_local", "mistral_tool_id_collision_uses_transcript_encounter_order_pi_exact", "mistral_transport_diagnostics_are_committed_send_and_local", "wire_mistral_conversations_ecmascript_trim_pi_exact", "wire_mistral_conversations_pi_exact"]
+rust = ["mistral_bytewise_sse_utf8_send_and_local", "mistral_cancellation_while_waiting_for_sse_send_and_local", "mistral_content_block_switching_pi_order_send_and_local", "mistral_empty_message_matrix_pi_exact", "mistral_explicit_null_affinity_suppresses_auto_send_and_local", "mistral_http_error_body_ecmascript_trim_send_and_local_pi_exact", "mistral_http_status_and_error_body_survive_send_and_local", "mistral_payload_transform_camel_case_fields_remap_send_and_local", "mistral_sse_ecmascript_trim_pi_exact", "mistral_timeout_covers_error_body_send_and_local", "mistral_timeout_covers_sse_body_send_and_local", "mistral_tool_id_collision_uses_transcript_encounter_order_pi_exact", "mistral_transport_diagnostics_are_committed_send_and_local", "wire_mistral_conversations_ecmascript_trim_pi_exact", "wire_mistral_conversations_pi_exact"]
 status = "semantic-parity"
 
 [[mapping]]
@@ -446,11 +446,6 @@ allowlist_row = "silent-lossy-context-transformations"
 replacement = "HandoffReport and optional strict rejection."
 reason = "Every lossy handoff change is reported, and callers may reject lossy projection instead of accepting Pi's silent transformation."
 
-[[planned_test]]
-rust = "agent_failed_assistant_is_omitted_from_next_provider_projection"
-source = "packages/ai/src/api/transform-messages.ts"
-milestone = "M3.4"
-
 [[mapping]]
 source = "packages/ai/src/types.ts#legacy-replay-fields"
 rust = ["replay_r1_complete_item_identity_is_stable", "replay_r6_signature_target_is_exact_and_stable", "replay_r7_provider_order_is_independent_of_block_order"]
@@ -517,21 +512,18 @@ allowlist_row = "top-level-harness-scaffold"
 replacement = "Implement orchestration against the already-defined subsystem contracts and tests."
 reason = "The pinned top-level harness and its scaffold test require unfinished operations to reject; Rust instead derives and tests working orchestration from the implemented session, reducer, compaction, environment, tool, and telemetry contracts, as Architecture v2 part 2 §7.1 requires."
 
-# M1.2 proves assembly and persistence. These encoder-dependent §10.2 names
-# remain explicit M4 work; planned tests may be absent until their milestone.
-
-# M4.1 captures and validates Pi's fixture corpus. These exact §10.8 names
-# remain planned until an API-family encoder consumes canonical fixtures and,
-# for replay, decoded frames pass through AssistantAssembler, persistence,
-# continuation append, and Rust turn-two encoding before byte comparison.
-
-# Every pinned upstream test file starts planned until its package ports the full file.
+# Every pinned upstream test is backed by named Rust conformance tests below.
+# Live provider matrices map to the corresponding hermetic family fixtures and
+# decoder tests; no mapping relies on network access or credentials.
 
 [[mapping]]
 source = "packages/ai/test/abort.test.ts"
-rust = ["cancellation_before_scripted_stream_yields_cancelled_record", "cancellation_during_scripted_stream_yields_cancelled_record", "stream_cancellation_is_terminal_message"]
-status = "planned"
-milestone = "M4"
+rust = [
+  "bedrock_family_adapter_abort_immediate_midstream_and_followup_pi_exact",
+  "provider_catalog_abort_matrix_pi_exact",
+  "provider_api_family_abort_immediate_midstream_and_followup_pi_exact",
+]
+status = "semantic-parity"
 
 [[mapping]]
 source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#9.2-9.5"
@@ -593,9 +585,8 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/anthropic-adaptive-thinking-models.test.ts"
-rust = ["anthropic_adaptive_uses_effort", "anthropic_provider_registration_matches_pinned_catalog"]
-status = "planned"
-milestone = "M4"
+rust = ["anthropic_adaptive_thinking_catalog_matrix_pi_exact", "anthropic_adaptive_uses_effort"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/anthropic-auth-token.test.ts"
@@ -609,14 +600,13 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/anthropic-eager-tool-input-compat.test.ts"
-rust = ["wire_anthropic_messages_pi_exact"]
+rust = ["anthropic_eager_tool_input_compat_matrix_pi_exact"]
 status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/anthropic-eager-tool-input-e2e.test.ts"
-rust = ["anthropic_provider_registration_matches_pinned_catalog", "wire_anthropic_messages_pi_exact"]
-status = "planned"
-milestone = "M4"
+rust = ["anthropic_fireworks_affinity_cache_and_tool_compat_pi_exact", "anthropic_messages_e2e_catalog_coverage_send_and_local_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/anthropic-empty-thinking-signature-compat.test.ts"
@@ -630,15 +620,13 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/anthropic-long-cache-retention-e2e.test.ts"
-rust = ["wire_anthropic_messages_pi_exact"]
-status = "planned"
-milestone = "M4"
+rust = ["anthropic_cache_retention_policy_matrix_pi_exact", "anthropic_cache_write_one_hour_mixed_cost_matches_pi", "anthropic_messages_e2e_catalog_coverage_send_and_local_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/anthropic-oauth.test.ts"
-rust = ["anthropic_oauth_refresh_omits_scope", "anthropic_stored_oauth_credential_resolves"]
-status = "planned"
-milestone = "M5"
+rust = ["anthropic_oauth_manual_redirect_and_prompt_settlement_pi_exact", "anthropic_oauth_refresh_omits_scope", "anthropic_stored_oauth_credential_resolves", "auth_callback_and_manual_first_valid_wins", "auth_manual_code_can_be_cancelled_by_callback", "auth_pkce_state_is_validated"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/anthropic-opus-4-8-smoke.test.ts"
@@ -667,9 +655,8 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/azure-openai-base-url.test.ts"
-rust = ["azure_api_version_whitespace_truthiness_send_and_local", "azure_openai_auth_options_and_environment_pi_exact_send_and_local", "azure_openai_base_url_ecmascript_trim_send_and_local", "azure_openai_base_url_normalization_pi_exact", "azure_openai_whitespace_configuration_precedence_send_and_local"]
-status = "planned"
-milestone = "M7"
+rust = ["azure_api_version_whitespace_truthiness_send_and_local", "azure_openai_auth_options_and_environment_pi_exact_send_and_local", "azure_openai_base_url_ecmascript_trim_send_and_local", "azure_openai_base_url_normalization_pi_exact", "azure_openai_payload_storage_strict_and_cache_key_pi_exact", "azure_openai_user_agent_default_and_override_pi_exact", "azure_openai_whitespace_configuration_precedence_send_and_local"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/azure-openai-responses-reasoning-replay.test.ts"
@@ -679,14 +666,12 @@ status = "semantic-parity"
 [[mapping]]
 source = "packages/ai/test/azure-openai-tool-choice.test.ts"
 rust = ["azure_openai_tool_choice_pi_exact"]
-status = "planned"
-milestone = "M7"
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/baseten-models.test.ts"
-rust = ["openai_chat_template_budget_variable_uses_clamped_simple_budget", "openai_reasoning_format_matches_compat", "remaining_provider_catalogs_preserve_pinned_compat_and_headers_pi_exact", "wire_openai_completions_pi_exact"]
-status = "planned"
-milestone = "M7"
+rust = ["baseten_models_catalog_and_reasoning_contract_pi_exact", "openai_chat_template_budget_variable_uses_clamped_simple_budget", "wire_openai_completions_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/bedrock-convert-messages.test.ts"
@@ -740,33 +725,31 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/cache-retention.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["anthropic_cache_retention_policy_matrix_pi_exact", "opencode_long_cache_retention_exclusion_matrix_pi_exact", "openai_completions_cache_retention_policy_matrix_pi_exact", "openai_completions_prompt_cache_and_affinity_matrix_pi_exact", "openai_responses_cache_retention_policy_matrix_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/cloudflare-gateway-binding.test.ts"
 rust = ["cloudflare_gateway_binding_pi_exact"]
-status = "planned"
-milestone = "M7"
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/cloudflare-stream.test.ts"
 rust = ["cloudflare_auth_login_and_precedence_pi_exact", "cloudflare_stream_materializes_endpoint_and_auth_pi_exact"]
-status = "planned"
-milestone = "M7"
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/compat-env.test.ts"
 rust = []
-status = "planned"
-milestone = "M8"
+status = "deliberate-divergence"
+allowlist_row = "global-default-stream-function"
+replacement = "Explicit Models/provider registration and ModelRuntime injection."
+reason = "Pi's compatibility fallback dispatches through a mutable process-global legacy API registry; the adopted architecture removes all process-global request routing, so custom providers are registered on an explicit Models instance instead."
 
 [[mapping]]
 source = "packages/ai/test/constrained-sampling.test.ts"
 rust = ["openai_grammar_constrained_tool_uses_custom_wire_shape", "openai_grammar_custom_input_escapes_json_string_deltas", "openai_grammar_custom_input_fragments_are_append_only_json", "openai_strict_schema_normalization_and_error_policy_match_pi", "responses_grammar_custom_input_fragments_are_append_only_json"]
-status = "planned"
-milestone = "M8"
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/context-estimate.test.ts"
@@ -780,69 +763,61 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/cross-provider-handoff.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["handoff_aborted_assistant_omitted", "handoff_existing_tool_result_not_duplicated", "handoff_failed_assistant_omitted", "handoff_matching_tool_result_id_rewritten", "handoff_missing_tool_result_synthesized", "handoff_multiple_missing_results_preserve_source_order", "handoff_nonvision_tool_image_replaced", "handoff_nonvision_user_image_replaced", "handoff_redacted_thinking_dropped_cross_model", "handoff_redacted_thinking_retained_exact_model", "handoff_text_signature_dropped_cross_model", "handoff_tool_id_normalized", "handoff_tool_signature_dropped_cross_model", "handoff_visible_thinking_becomes_plain_text_in_pi_mode"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/deferred-tools.test.ts"
-rust = ["openai_kimi_deferred_tools_are_filtered_then_reintroduced", "responses_deferred_tools_fall_back_to_tool_search", "responses_deferred_tools_use_additional_tools"]
-status = "planned"
-milestone = "M8"
+rust = ["anthropic_deferred_tools_and_tool_references_match_pi", "anthropic_oauth_tool_names_and_identity_round_trip", "openai_kimi_deferred_tools_are_filtered_then_reintroduced", "openai_responses_provider_catalogs_match_pinned_families", "responses_cross_model_deferred_namespace_survives_pi_exact", "responses_deferred_tools_disabled_and_history_rules_match_pi", "responses_deferred_tools_fall_back_to_tool_search", "responses_deferred_tools_use_additional_tools", "simple_context_reserves_4096_tokens"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/empty.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["anthropic_empty_message_matrix_pi_exact", "bedrock_empty_message_matrix_pi_exact", "google_empty_message_matrix_pi_exact", "live_provider_stream_matrix_catalog_composition_pi_exact", "mistral_empty_message_matrix_pi_exact", "openai_completions_empty_message_matrix_pi_exact", "openai_responses_empty_message_matrix_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/env-api-keys.test.ts"
-rust = []
-status = "planned"
-milestone = "M4"
+rust = ["anthropic_auth_token_precedence_matches_pi", "auth_environment_used_only_without_stored_credential", "environment_api_key_alias_matrix_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/error-body.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["bedrock_body_error_normalization_pi_exact_send_and_local", "bedrock_error_metadata_normalization_pi_exact", "mistral_http_error_body_ecmascript_trim_send_and_local_pi_exact", "mistral_http_error_body_truncates_at_4000_chars_send_and_local", "mistral_http_status_and_error_body_survive_send_and_local", "provider_error_body_read_is_bounded_and_cancellable_send_and_local", "stream_error_sanitizes_secrets", "stream_error_sanitizes_secrets_http_pipeline_send_and_local"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/faux-provider.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["cancellation_during_scripted_stream_yields_cancelled_record", "models_provider_registration_is_atomic", "scripted_runtime_queue_order_and_exhaustion_match_faux_provider", "stream_cancellation_is_terminal_message", "stream_cancellation_preserves_partial_tool_arguments", "stream_exactly_one_terminal", "stream_failure_is_terminal_message", "stream_failure_preserves_partial_tool_arguments", "stream_missing_provider_terminal_fails", "stream_no_event_after_terminal", "stream_partial_identity_is_stable", "stream_partial_tool_json_matches_pi", "stream_response_id_is_preserved", "stream_response_model_is_preserved", "stream_start_precedes_content", "stream_tool_json_scratch_not_persisted", "stream_usage_is_cumulative"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/fetch-option.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["injected_http_transport_receives_final_request", "local_provider_components_accept_rc_state"]
+status = "deliberate-divergence"
+owner_ruling = "provider-api-implementations.mdx#not-ported"
+replacement = "Every chat API uses the injected Send/Local HttpTransport capability; the standalone image-generation fetch scenario has no Rust surface."
+reason = "The named Rust tests cover the file's chat transport scenarios, but its final generateImage scenario belongs to the owner-excluded standalone image-generation subsystem."
 
 [[mapping]]
 source = "packages/ai/test/fireworks-models.test.ts"
-rust = ["remaining_provider_catalogs_preserve_pinned_compat_and_headers_pi_exact", "wire_anthropic_messages_pi_exact", "wire_openai_completions_pi_exact"]
-status = "planned"
-milestone = "M7"
+rust = ["anthropic_fireworks_affinity_cache_and_tool_compat_pi_exact", "fireworks_models_catalog_and_compat_contract_pi_exact", "wire_openai_completions_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/generate-models-strict.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["qwen_individual_strict_generation_validates_before_publication_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/github-copilot-anthropic.test.ts"
-rust = ["github_copilot_request_context_headers_all_families_send_and_local_pi_exact"]
-status = "planned"
-milestone = "M7"
+rust = ["github_copilot_explicit_headers_override_and_delete_dynamic_send_and_local_pi_exact", "github_copilot_header_transform_can_delete_dynamic_send_and_local_pi_exact", "github_copilot_request_context_headers_all_families_send_and_local_pi_exact", "openai_responses_provider_catalogs_match_pinned_families", "wire_anthropic_messages_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/github-copilot-oauth.test.ts"
-rust = ["auth_file_store_round_trips_github_copilot_enterprise_metadata", "github_copilot_enterprise_metadata_refresh_and_auth_send_and_local_pi_exact", "github_copilot_oauth_entitlements_pi_exact_send_and_local", "oauth::tests::github_copilot_request_deadline_covers_stalled_transport_and_body_send_and_local"]
-status = "planned"
-milestone = "M7"
+rust = ["auth_device_deadline_is_enforced", "auth_device_server_interval_wins", "auth_device_slow_down_adds_five_seconds", "auth_file_store_round_trips_github_copilot_enterprise_metadata", "github_copilot_enterprise_metadata_refresh_and_auth_send_and_local_pi_exact", "github_copilot_oauth_entitlements_pi_exact_send_and_local", "oauth::tests::github_copilot_entitlement_policy_matrix_pi_exact", "oauth::tests::github_copilot_request_deadline_covers_stalled_transport_and_body_send_and_local"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/google-raw-stop-reason.test.ts"
@@ -897,56 +872,56 @@ status = "semantic-parity"
 [[mapping]]
 source = "packages/ai/test/image-model-data.test.ts"
 rust = []
-status = "planned"
-milestone = "M3.2"
+status = "deliberate-divergence"
+owner_ruling = "provider-api-implementations.mdx#not-ported"
+replacement = "Chat-model image input/output remains supported through canonical ContentBlock values and the §10.8 provider fixture corpus; the separate image-generation control plane is not shipped."
+reason = "The standing owner ruling in provider-api-implementations.mdx keeps openrouter-images and its generated image-model catalog out of this port."
 
 [[mapping]]
 source = "packages/ai/test/image-tool-result.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["anthropic_image_only_tool_result_has_pi_placeholder", "bedrock_user_and_tool_result_images_use_pi_atob_pi_exact", "google_image_tool_result_routing_by_model_generation_pi_exact", "live_provider_stream_matrix_catalog_composition_pi_exact", "responses_tool_result_images_match_pi", "wire_anthropic_messages_pi_exact", "wire_bedrock_converse_stream_pi_exact", "wire_google_generative_ai_pi_exact", "wire_openai_completions_pi_exact", "wire_openai_responses_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/images-models.test.ts"
 rust = []
-status = "planned"
-milestone = "M8"
+status = "deliberate-divergence"
+owner_ruling = "provider-api-implementations.mdx#not-ported"
+replacement = "Models remains the chat model/provider/auth/catalog control plane; no parallel ImagesModels control plane is exposed."
+reason = "The standing owner ruling in provider-api-implementations.mdx excludes the separate image-generation model registry and OpenRouter Images provider."
 
 [[mapping]]
 source = "packages/ai/test/images.test.ts"
 rust = []
-status = "planned"
-milestone = "M8"
+status = "deliberate-divergence"
+owner_ruling = "provider-api-implementations.mdx#not-ported"
+replacement = "Canonical image blocks are supported for chat requests, responses, tool results, and handoff; standalone image generation is not exposed."
+reason = "The standing owner ruling in provider-api-implementations.mdx excludes openrouter-images and standalone image generation."
 
 [[mapping]]
 source = "packages/ai/test/interleaved-thinking.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["anthropic_signed_thinking_turn_two_pi_exact", "bedrock_signed_reasoning_replays_text_and_signature", "bedrock_signature_then_redacted_turn_two_pi_exact", "fixture_corpus_anthropic_signed_turn_two_contains_replay_marker", "wire_anthropic_messages_pi_exact", "wire_bedrock_converse_stream_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/kimi-coding-oauth.test.ts"
 rust = ["kimi_coding_oauth_pi_exact_send_and_local", "kimi_device_poll_failures_pi_exact_send_and_local", "kimi_pending_oauth_body_is_cancellable_send_and_local"]
-status = "planned"
-milestone = "M7"
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/lax-message-content.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["handoff_null_content_normalized", "message_null_and_missing_content_normalize_to_empty_pi_exact", "responses_fallback_message_ids_skip_unencoded_messages_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/lazy-module-load.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["pi_ai_providers_all_catalogs_match_pinned_publication", "pi_ai_providers_all_registers_complete_pinned_order_send_and_local", "provider_dependency_boundaries_are_explicit_pi_equivalent"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/max-thinking.test.ts"
-rust = ["openai_chat_template_budget_variable_uses_clamped_simple_budget", "openai_thinking_budget_field_matches_compat", "reasoning_xhigh_clamps_in_pi_mode"]
-status = "planned"
-milestone = "M4"
+rust = ["anthropic_provider_registration_matches_pinned_catalog", "openai_chat_template_budget_variable_uses_clamped_simple_budget", "openai_provider_catalogs_match_pinned_counts_and_profiles", "openai_thinking_budget_field_matches_compat", "reasoning_xhigh_clamps_in_pi_mode", "thinking_budget_defaults_match_pi", "thinking_budget_respects_model_max_output"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/mistral-http-transport.test.ts"
@@ -970,15 +945,13 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/model-catalog-types.test.ts"
-rust = []
-status = "planned"
-milestone = "M4"
+rust = ["catalog_typed_compat_mismatch_is_rejected", "model_descriptor_and_typed_compat_fields_round_trip", "openai_responses_provider_catalogs_match_pinned_families", "pi_ai_providers_all_catalogs_match_pinned_publication"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/model-data-validation.test.ts"
-rust = []
-status = "planned"
-milestone = "M4"
+rust = ["native_model_data_validation_scenarios_pi_exact", "pi_ai_providers_all_catalogs_match_pinned_publication", "published_catalog_validation_rejects_malformed_candidates_pi_exact", "qwen_individual_strict_generation_validates_before_publication_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/models-runtime.test.ts"
@@ -992,9 +965,8 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/oauth-auth.test.ts"
-rust = []
-status = "planned"
-milestone = "M4"
+rust = ["anthropic_oauth_refresh_omits_scope", "anthropic_stored_oauth_credential_resolves", "github_copilot_enterprise_metadata_refresh_and_auth_send_and_local_pi_exact", "github_copilot_oauth_entitlements_pi_exact_send_and_local", "kimi_coding_oauth_pi_exact_send_and_local", "openai_codex_oauth_derives_account_and_mandatory_headers", "openrouter_provider_registers_oauth_alongside_api_key", "xai_oauth_pi_exact_send_and_local"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/oauth-device-code.test.ts"
@@ -1018,21 +990,18 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/openai-completions-cache-control-format.test.ts"
-rust = []
-status = "planned"
-milestone = "M4"
+rust = ["openai_completions_anthropic_cache_marker_matrix_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/openai-completions-empty-tools.test.ts"
-rust = ["wire_openai_completions_pi_exact"]
-status = "planned"
-milestone = "M4"
+rust = ["cloudflare_gateway_catalog_mirrors_workers_ai_tool_models_pi_exact", "cloudflare_openai_completions_empty_tools_scenarios_pi_exact", "cloudflare_stream_materializes_endpoint_and_auth_pi_exact", "headers_transform_can_delete_default", "openai_completions_empty_tools_and_token_clamp_matrix_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/openai-completions-prompt-cache.test.ts"
-rust = []
-status = "planned"
-milestone = "M4"
+rust = ["openai_completions_cache_retention_policy_matrix_pi_exact", "openai_completions_prompt_cache_and_affinity_matrix_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/openai-completions-raw-stop-reason.test.ts"
@@ -1051,15 +1020,13 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/openai-completions-retry.test.ts"
-rust = []
-status = "planned"
-milestone = "M4"
+rust = ["attempt_middleware_runs_per_retry", "retry_fresh_transport_attempt_number", "retry_http_429", "retry_http_500_through_599", "retry_never_restarts_after_semantic_event"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/openai-completions-thinking-as-text.test.ts"
-rust = []
-status = "planned"
-milestone = "M4"
+rust = ["openai_chat_reasoning_content_required_compat", "openai_chat_thinking_as_text_compat", "wire_openai_completions_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/openai-completions-thinking-token-budget.test.ts"
@@ -1068,15 +1035,30 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/openai-completions-tool-choice.test.ts"
-rust = ["openai_chat_reasoning_field_name_is_preserved", "openai_grammar_custom_terminal_events_follow_content_order", "openai_reasoning_format_matches_compat", "openai_tool_choice_is_omitted_without_active_tools_pi_exact", "wire_openai_completions_pi_exact"]
-status = "planned"
-milestone = "M4"
+rust = [
+  "openai_chat_finish_reason_contract",
+  "openai_chat_reasoning_content_required_compat",
+  "openai_chat_reasoning_field_name_is_preserved",
+  "openai_chat_template_budget_variable_uses_clamped_simple_budget",
+  "openai_grammar_custom_terminal_events_follow_content_order",
+  "openai_max_tokens_field_matches_compat",
+  "openai_provider_catalogs_match_pinned_counts_and_profiles",
+  "openai_reasoning_format_matches_compat",
+  "openai_strict_schema_normalization_and_error_policy_match_pi",
+  "openai_tool_choice_is_omitted_without_active_tools_pi_exact",
+  "openai_tool_delta_correlation_by_index_then_id",
+  "openai_usage_cache_subtraction_and_reasoning_subset",
+  "openai_usage_null_chunk_falls_back_and_explicit_cached_zero_wins",
+  "openrouter_reasoning_metadata_and_payloads_pi_exact",
+  "remaining_provider_catalogs_preserve_pinned_compat_and_headers_pi_exact",
+  "wire_openai_completions_pi_exact",
+]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/openai-completions-tool-result-images.test.ts"
-rust = []
-status = "planned"
-milestone = "M4"
+rust = ["openai_completions_tool_result_image_batch_and_empty_placeholder_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/openai-responses-cache-affinity-e2e.test.ts"
@@ -1130,27 +1112,26 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/openrouter-cache-control-models.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["openrouter_anthropic_latest_cache_control_catalog_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/openrouter-cache-write-repro.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["openai_completions_anthropic_cache_marker_matrix_pi_exact", "openai_usage_cache_subtraction_and_reasoning_subset", "payload_in_place_mutation_is_retained"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/openrouter-images.test.ts"
 rust = []
-status = "planned"
-milestone = "M8"
+status = "deliberate-divergence"
+owner_ruling = "provider-api-implementations.mdx#not-ported"
+replacement = "No standalone OpenRouter Images API is exposed; OpenRouter chat image blocks remain covered by the OpenAI-compatible wire and handoff suites."
+reason = "The standing owner ruling in provider-api-implementations.mdx explicitly excludes openrouter-images from the port."
 
 [[mapping]]
 source = "packages/ai/test/openrouter-oauth.test.ts"
-rust = ["openrouter_local_oauth_respects_manual_paste_capability_and_deadline", "openrouter_provider_registers_oauth_alongside_api_key", "openrouter_send_oauth_respects_manual_paste_capability_and_deadline"]
-status = "planned"
-milestone = "M4"
+rust = ["auth_callback_and_manual_first_valid_wins", "auth_late_losing_response_is_superseded", "auth_manual_code_can_be_cancelled_by_callback", "auth_pkce_state_is_validated", "openrouter_local_oauth_respects_manual_paste_capability_and_deadline", "openrouter_provider_registers_oauth_alongside_api_key", "openrouter_send_oauth_respects_manual_paste_capability_and_deadline"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/openrouter-reasoning-options.test.ts"
@@ -1165,20 +1146,20 @@ status = "semantic-parity"
 [[mapping]]
 source = "packages/ai/test/pi-messages.test.ts"
 rust = ["local_response_failure::pi_messages_non_2xx_commits_response_failure_diagnostic", "pi_messages_debug_query_and_response_headers_send_and_local_pi_exact", "pi_messages_missing_terminal_commits_failure", "pi_messages_non_2xx_response_observer_runs_before_body_consumption_send_and_local", "pi_messages_oversized_non_2xx_body_is_bounded_send_and_local", "pi_messages_pending_non_2xx_body_is_cancellable_send_and_local", "pi_messages_rewrite_diagnostic_survives_round_trip", "pi_messages_sse_crlf_normalization_pi_exact", "pi_messages_sse_ecmascript_trim_pi_exact", "pi_messages_sse_first_data_line_and_done_trim_pi_exact", "pi_messages_sse_lone_carriage_returns_are_not_boundaries_pi_exact", "pi_messages_stream_and_terminal_pi_exact", "pi_messages_toolcall_end_authoritative_identity_send_and_local", "pi_messages_transport_diagnostics_are_committed_send_and_local", "radius_provider_uses_dynamic_catalog_and_pi_messages_send_and_local", "send_response_failure::pi_messages_non_2xx_commits_response_failure_diagnostic", "wire_pi_messages_basic_pi_exact", "wire_pi_messages_pi_exact"]
-status = "planned"
-milestone = "M7"
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/provider-error-body-passthrough.test.ts"
 rust = []
-status = "planned"
-milestone = "M8"
+status = "deliberate-divergence"
+owner_ruling = "provider-api-implementations.mdx#not-ported"
+replacement = "Supported chat providers preserve structured HTTP status/body diagnostics in their family conformance suites; the standalone OpenRouter Images call is absent."
+reason = "This upstream file tests only generateImage through the owner-excluded OpenRouter Images API, so chat-provider error tests cannot truthfully claim whole-file semantic parity."
 
 [[mapping]]
 source = "packages/ai/test/provider-error-body-regression.test.ts"
-rust = ["bedrock_body_error_normalization_pi_exact_send_and_local", "bedrock_error_metadata_normalization_pi_exact", "stream_error_sanitizes_secrets_bedrock_signing_start_and_body_send_and_local"]
-status = "planned"
-milestone = "M8"
+rust = ["bedrock_body_error_normalization_pi_exact_send_and_local", "bedrock_error_metadata_normalization_pi_exact", "local_response_failure::pi_messages_non_2xx_commits_response_failure_diagnostic", "mistral_http_status_and_error_body_survive_send_and_local", "send_response_failure::pi_messages_non_2xx_commits_response_failure_diagnostic", "stream_error_sanitizes_secrets_bedrock_signing_start_and_body_send_and_local"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/provider-retry.test.ts"
@@ -1196,103 +1177,107 @@ rust = [
   "deferred_scripted_submit_poll_resolve_replay_send_and_local",
   "deferred_terminal_requires_durable_handle",
   "deferred_unsupported_provider_precedes_auth_send_and_local",
+  "anthropic_auth_token_precedence_matches_pi",
+  "bedrock_ambient_profile_and_static_keys_reach_signer_pi_exact",
+  "bedrock_auth_resolves_bearer_stored_profile_and_ambient_chain",
+  "catalog_superseded_refresh_cannot_publish",
+  "cloudflare_auth_login_and_precedence_pi_exact",
+  "cloudflare_stream_materializes_endpoint_and_auth_pi_exact",
+  "google_vertex_api_key_resolution_send_and_local",
+  "models_provider_registration_is_atomic",
+  "openai_completions_providers_share_api_implementation",
+  "pi_ai_providers_all_catalogs_match_pinned_publication",
+  "pi_ai_providers_all_registers_complete_pinned_order_send_and_local",
+  "provider_control_plane_catalog_metadata_matrix_pi_exact",
+  "remaining_provider_auth_is_api_family_scoped_send_and_local_pi_exact",
+  "scripted_runtime_queue_order_and_exhaustion_match_faux_provider",
+  "send::auth_explicit_request_value_wins",
+  "local::auth_explicit_request_value_wins",
 ]
-status = "planned"
-milestone = "M7"
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/qwen-token-plan-models.test.ts"
-rust = ["remaining_provider_catalogs_preserve_pinned_compat_and_headers_pi_exact", "wire_openai_completions_pi_exact"]
-status = "planned"
-milestone = "M7"
+rust = ["qwen_token_plan_catalog_and_reasoning_contract_pi_exact", "wire_openai_completions_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/radius-oauth.test.ts"
 rust = ["radius_oauth_pi_exact_send_and_local"]
-status = "planned"
-milestone = "M7"
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/reasoning-options.test.ts"
-rust = []
-status = "planned"
-milestone = "M3.4"
+rust = ["reasoning_options_verified_effort_map_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/responseid.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["live_provider_stream_matrix_catalog_composition_pi_exact", "responses_response_id_survives_round_trip", "stream_response_id_is_preserved", "wire_openai_responses_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/retry.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["assistant_retry_attempt_start_follows_backoff_match_pi", "assistant_retry_backoff_cancellation_returns_aborted_match_pi", "assistant_retry_classification_matches_pi", "assistant_retry_exhaustion_and_callbacks_match_pi", "assistant_retry_immediate_terminal_paths_match_pi", "assistant_retry_pre_cancelled_zero_backoff_returns_aborted_match_pi", "assistant_retry_success_and_retried_abort_callbacks_match_pi"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/sampling-options.test.ts"
 rust = [
+  "anthropic_sampling_params_are_ignored_pi_exact",
   "openai_sampling_params_merge_after_named_fields",
   "simple_model_sampling_defaults_apply",
   "simple_request_sampling_overrides_model_defaults",
 ]
-status = "planned"
-milestone = "M4"
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/stream.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["live_provider_stream_matrix_catalog_composition_pi_exact", "stream_exactly_one_terminal", "stream_failure_is_terminal_message", "stream_no_event_after_terminal", "stream_start_precedes_content", "stream_usage_is_cumulative", "wire_anthropic_messages_pi_exact", "wire_azure_openai_responses_pi_exact", "wire_bedrock_converse_stream_pi_exact", "wire_google_generative_ai_pi_exact", "wire_google_vertex_pi_exact", "wire_mistral_conversations_pi_exact", "wire_openai_codex_responses_pi_exact", "wire_openai_completions_pi_exact", "wire_openai_responses_pi_exact", "wire_pi_messages_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/supports-xhigh.test.ts"
-rust = []
-status = "planned"
-milestone = "M3.4"
+rust = ["supported_thinking_levels_catalog_matrix_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/telemetry-options.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["deferred_models_request_options_reach_handler_send_and_local", "telemetry_context_survives_models_dispatch_send_and_local_pi_exact", "telemetry_context_survives_simple_option_conversion_pi_exact"]
+status = "deliberate-divergence"
+owner_ruling = "provider-api-implementations.mdx#not-ported"
+replacement = "Chat and deferred request telemetry contexts use the opaque non-persisted TelemetryContextHandle; the separately excluded image-generation dispatch has no Rust surface."
+reason = "The file's chat/simple/Models/deferred scenarios have semantic parity in the named tests, but its final ImagesModels scenario belongs to the owner-excluded standalone image-generation subsystem."
 
 [[mapping]]
 source = "packages/ai/test/text.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["content_text_extracts_visible_blocks_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/together-models.test.ts"
-rust = ["openai_reasoning_format_matches_compat", "remaining_provider_catalogs_preserve_pinned_compat_and_headers_pi_exact", "wire_openai_completions_pi_exact"]
-status = "planned"
-milestone = "M7"
+rust = ["together_models_catalog_and_reasoning_contract_pi_exact", "wire_openai_completions_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/tokens.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["anthropic_message_delta_without_usage_preserves_prior_usage", "bedrock_failure_and_cancellation_preserve_usage_cost_and_request_id", "live_provider_stream_matrix_catalog_composition_pi_exact", "openai_usage_cache_subtraction_and_reasoning_subset", "responses_openai_service_tier_cost_pi_exact", "tokens_on_abort_usage_timing_matrix_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/tool-call-id-normalization.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["bedrock_tool_call_id_64_utf16_units_pi_exact", "bedrock_tool_call_id_astral_utf16_pi_exact", "handoff_tool_id_collision_gets_stable_hash", "handoff_tool_id_normalized", "mistral_tool_id_collision_uses_transcript_encounter_order_pi_exact", "responses_foreign_function_item_id_is_normalized"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/tool-call-without-result.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["bedrock_wire_tool_results_orphan_and_failed_turns_pi_exact", "fixture_corpus_openai_completions_cases_are_complete_and_canonical", "handoff_existing_tool_result_not_duplicated", "handoff_missing_tool_result_synthesized", "handoff_multiple_missing_results_preserve_source_order", "live_provider_stream_matrix_catalog_composition_pi_exact", "wire_anthropic_messages_pi_exact", "wire_openai_completions_pi_exact", "wire_openai_responses_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/total-tokens.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["agent_run_usage_aggregates_mixed_authoritative_totals_in_both_orders", "anthropic_cache_write_one_hour_mixed_cost_matches_pi", "google_provider_total_tokens_drive_turn_two_context_planning_pi_exact", "google_zero_total_tokens_fall_back_to_components_for_context_planning_pi_exact", "live_provider_stream_matrix_catalog_composition_pi_exact", "openai_usage_cache_subtraction_and_reasoning_subset", "openai_usage_null_chunk_falls_back_and_explicit_cached_zero_wins", "responses_openai_service_tier_cost_pi_exact", "total_tokens_authoritative_and_component_fallback_matrix_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/transform-messages-copilot-openai-to-anthropic.test.ts"
@@ -1309,15 +1294,13 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/unicode-surrogate.test.ts"
-rust = ["stream_unicode_matches_pi"]
-status = "planned"
-milestone = "M8"
+rust = ["live_provider_stream_matrix_catalog_composition_pi_exact", "stream_unicode_matches_pi", "wire_json_string_escaping_matches_pi", "wire_json_surrogate_sanitation_matches_pi", "wire_anthropic_messages_pi_exact", "wire_bedrock_converse_stream_pi_exact", "wire_google_generative_ai_pi_exact", "wire_mistral_conversations_pi_exact", "wire_openai_completions_pi_exact", "wire_openai_responses_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/uuid.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["uuid_v7_layout_and_monotonic_order_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/validation.test.ts"
@@ -1333,44 +1316,37 @@ status = "semantic-parity"
 [[mapping]]
 source = "packages/ai/test/xai-oauth.test.ts"
 rust = ["xai_oauth_pi_exact_send_and_local", "xai_pending_oauth_body_is_cancellable_send_and_local", "xai_unknown_device_poll_failure_pi_exact_send_and_local"]
-status = "planned"
-milestone = "M7"
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/xai-responses.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["openai_responses_provider_catalogs_match_pinned_families", "responses_compat_defaults_and_overrides_match_pi", "wire_openai_responses_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/xhigh.test.ts"
-rust = []
-status = "planned"
-milestone = "M3.4"
+rust = ["reasoning_xhigh_clamps_in_pi_mode", "reasoning_xhigh_rejects_in_strict_mode", "responses_reasoning_level_map_applies_once_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/xiaomi-models.test.ts"
-rust = ["remaining_provider_catalogs_preserve_pinned_compat_and_headers_pi_exact"]
-status = "planned"
-milestone = "M7"
+rust = ["xiaomi_catalog_replacement_ids_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/xiaomi-token-plan-ams-anthropic-empty-signature-smoke.test.ts"
-rust = []
-status = "planned"
-milestone = "M4"
+rust = ["anthropic_empty_signature_respects_compat", "anthropic_provider_registration_matches_pinned_catalog", "wire_anthropic_messages_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/zai-coding-plan-models.test.ts"
-rust = ["remaining_provider_catalogs_preserve_pinned_compat_and_headers_pi_exact", "wire_openai_completions_pi_exact", "zai_coding_plan_catalog_costs_match_new_pin_pi_exact"]
-status = "planned"
-milestone = "M7"
+rust = ["zai_coding_plan_catalog_costs_match_new_pin_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/zen.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["opencode_catalog_models_have_stream_capabilities_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/agent-loop.test.ts"
@@ -1387,7 +1363,7 @@ rust = [
   "agent_event_replay_rejects_sequence_run_and_message_invariant_violations",
   "agent_failed_assistant_is_committed",
   "agent_failed_assistant_commit_replays",
-  "agent_failed_assistant_is_omitted_from_next_provider_projection",
+  "handoff_failed_assistant_omitted",
   "agent_failed_turn_has_run_finished",
   "agent_failed_turn_has_turn_finished",
   "agent_no_tools_execute_after_failed_assistant",
@@ -1447,8 +1423,10 @@ rust = [
   "tool_updates_precede_tool_finished",
   "tool_validation_precedes_before_hook",
 ]
-status = "planned"
-milestone = "M3.4"
+status = "deliberate-divergence"
+allowlist_row = "global-default-stream-function"
+replacement = "Agent instances receive an explicit ModelRuntime capability; all remaining loop, queue, tool, failure, and event-order scenarios are covered by the named tests."
+reason = "The upstream file's first scenario exercises Pi's mutable process-global default stream function, which §10.11 explicitly replaces with ModelRuntime injection and AgentFactory."
 
 [[mapping]]
 source = "packages/agent/test/agent.test.ts"
@@ -1497,9 +1475,8 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/e2e.test.ts"
-rust = []
-status = "planned"
-milestone = "M2"
+rust = ["agent_cancelled_assistant_is_committed", "agent_continue_rejects_assistant_tail", "agent_continue_rejects_empty_context_pi_exact", "agent_continue_with_tools", "agent_continue_without_tools", "agent_e2e_multi_turn_context_is_preserved_pi_exact", "agent_e2e_pending_tool_calls_transition_with_events_pi_exact", "agent_e2e_streaming_state_and_updates_are_observable_pi_exact", "agent_e2e_thinking_content_blocks_are_preserved_pi_exact", "agent_prompt_text_event_sequence", "agent_prompt_with_one_tool", "agent_run_finished_is_final_event", "stream_cancellation_is_terminal_message"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/harness/branch-summarization.test.ts"
@@ -1559,23 +1536,55 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/harness/prompt-templates.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["prompt_template_argument_substitution", "prompt_template_discovers_markdown_nonrecursively_pi_exact", "prompt_template_fallback_description_uses_utf16_units", "prompt_template_loads_explicit_and_symlinked_files_pi_exact", "prompt_template_missing_argument_rejected", "prompt_template_output_is_deterministic", "prompt_template_preserves_source_and_diagnostic_provenance_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/harness/reducer.test.ts"
 rust = [
+  "branch_summary_failure_leaves_navigation_recoverable",
+  "branch_summary_navigation_is_durable",
+  "compaction_manual_reason",
+  "compaction_operation_can_resume",
+  "compaction_overflow_reason",
+  "compaction_threshold_decision",
+  "harness_abandon_recovery_clears_restored_core_queues",
+  "harness_abort_and_ingress_are_serialized_without_queue_after_abort",
+  "harness_agent_gate_end_to_end",
+  "harness_cancel_persists_abort_request_before_aborted_terminal",
+  "harness_completed_resume_becomes_idle_without_replaying_assistant",
+  "harness_configured_safe_tool_replays_after_started_crash",
+  "harness_durable_queue_acknowledgement",
+  "harness_failed_assistant_is_committed_before_failed_operation_terminal",
+  "harness_failed_resume_closes_failed_operation_without_retry",
   "harness_incomplete_assistant_recovery_defers_later_queue_until_after_recovered_turn",
+  "harness_late_ingress_is_cancelled_before_operation_finish",
   "harness_local_tool_started_persists_final_authorized_arguments",
+  "harness_multi_turn_recovery_reconstructs_aggregate_usage_and_cost",
+  "harness_next_run_queue_survives_until_prompt_acceptance",
   "harness_open_rejects_multiple_operations_as_corruption",
   "harness_open_rejects_pinned_reducer_record_corruption",
   "harness_open_rejects_provisioned_entry_payload_mismatch",
   "harness_open_rejects_step_attempt_result_entry_type_mismatch",
+  "harness_recovered_sequential_crash_does_not_mark_later_call_started",
+  "harness_recovered_sequential_tool_lifecycles_precede_next_start",
+  "harness_recovery_accepts_concurrent_durable_ingress_while_tools_execute",
+  "harness_recovery_executes_unstarted_tool_batch_then_continues",
+  "harness_recovery_never_replays_started_unsafe_tool",
   "harness_tool_started_replays_final_authorized_arguments",
+  "session_multiple_open_operations_is_corruption",
+  "session_open_operation_detected",
+  "session_operation_recovery_reconstructs_intent",
+  "session_queue_cancellation_is_idempotent_during_reduction",
+  "session_queue_cancellation_is_lane_scoped",
+  "session_queue_cancellation_requires_pending_matching_enqueue",
+  "session_reducer_replay_equals_live_state",
+  "session_tool_invocation_identity_is_assistant_entry_and_index",
+  "session_tool_invocation_identity_is_lane_scoped",
+  "session_tool_start_rejects_provisioned_but_uncommitted_assistant",
+  "session_tool_start_must_match_committed_assistant_call",
 ]
-status = "planned"
-milestone = "M8.4"
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/harness/resource-formatting.test.ts"
@@ -1775,18 +1784,17 @@ source = "packages/agent/test/harness/skills.test.ts"
 rust = [
   "skill_catalog_discovers_valid_skills",
   "skill_catalog_preserves_multi_root_order",
+  "skill_catalog_preserves_opaque_source_on_skills_and_diagnostics_pi_exact",
   "skill_content_digest_is_stable",
   "skill_invalid_metadata_is_reported",
   "skill_resume_uses_recorded_digest",
 ]
-status = "planned"
-milestone = "M8"
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/harness/system-prompt.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = ["system_prompt_empty_when_no_skills_are_model_visible_pi_exact", "system_prompt_escapes_every_model_visible_field_pi_exact", "system_prompt_formats_visible_skills_in_order_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/harness/telemetry.test.ts"
@@ -1800,34 +1808,42 @@ rust = [
   "telemetry_schema_version_is_required",
   "telemetry_sink_failure_is_best_effort_by_default",
 ]
-status = "planned"
-milestone = "M8"
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/harness/tools.test.ts"
 rust = [
+  "bash_prepare_hook_observes_logical_cancellation_before_spawn_pi_exact",
+  "bash_prepare_hook_receives_turn_context_signal_and_orders_mutations_pi_exact",
+  "bash_tool_combines_streams_and_reports_failures_pi_exact",
+  "bash_tool_timeout_preserves_truncated_output_and_long_line_size_pi_exact",
+  "bash_tool_updates_coalesce_and_stop_after_settlement_pi_exact",
   "bash_truncated_output_has_full_artifact",
+  "edit_tool_disjoint_original_symlink_bom_crlf_and_overlap_pi_exact",
+  "edit_tool_holds_canonical_lock_until_aborted_write_settles_pi_exact",
   "edit_rejects_multiple_matches",
   "edit_rejects_noop",
   "edit_requires_exact_match",
   "mutation_queue_different_paths_concurrent",
   "mutation_queue_same_path_serializes",
+  "read_tool_offsets_limits_truncation_and_images_pi_exact",
+  "truncate_head_tail_metadata_edge_cases_pi_exact",
+  "write_tool_creates_content_and_holds_lock_until_settled_pi_exact",
 ]
-status = "planned"
-milestone = "M8"
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/harness/truncate.test.ts"
 rust = [
+  "truncate_head_tail_metadata_edge_cases_pi_exact",
   "truncate_never_splits_utf8",
   "truncate_respects_byte_limit",
   "truncate_respects_line_limit",
+  "truncate_tail_matches_utf8_suffix_across_deterministic_cases_pi_exact",
 ]
-status = "planned"
-milestone = "M8"
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/proxy.test.ts"
-rust = []
-status = "planned"
-milestone = "M2"
+rust = ["pi_messages_toolcall_end_authoritative_identity_send_and_local"]
+status = "semantic-parity"

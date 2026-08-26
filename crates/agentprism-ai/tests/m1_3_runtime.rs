@@ -92,6 +92,20 @@ fn run(response: ScriptedResponse, request: ModelRequest) -> Vec<AssistantEvent>
     events
 }
 
+fn run_next(
+    runtime: &ScriptedRuntime,
+    request: ModelRequest,
+    cancellation: CancellationToken,
+) -> Vec<AssistantEvent> {
+    let mut stream = ready(ModelRuntime::stream(runtime, request, cancellation))
+        .expect("scripted stream starts");
+    let mut events = Vec::new();
+    while let Some(event) = next_event(&mut stream) {
+        events.push(event);
+    }
+    events
+}
+
 fn assemble(events: &[AssistantEvent]) -> AssistantMessage {
     let mut assembler = AssistantAssembler::new();
     for event in events {
@@ -292,6 +306,167 @@ fn cancellation_during_scripted_stream_yields_cancelled_record() {
 }
 
 #[test]
+fn abort_immediate_midstream_and_followup_matrix_pi_exact() {
+    // Architecture v2 part 2 §2.1 and §10.1. Pi basis:
+    // packages/ai/test/abort.test.ts testImmediateAbort, testAbortSignal, and
+    // testAbortThenNewMessage. ScriptedRuntime makes all four calls hermetic.
+    let runtime = ScriptedRuntime::builder()
+        .response(text_response("discarded"))
+        .response(text_response("after immediate abort"))
+        .response(text_response("partial response"))
+        .response(text_response("after midstream abort"))
+        .build();
+
+    let immediate = CancellationToken::new();
+    immediate.cancel();
+    let mut immediate_stream = ready(ModelRuntime::stream(
+        &runtime,
+        request("fake", "model"),
+        immediate,
+    ))
+    .expect("pre-cancelled request still returns a terminal stream");
+    let mut immediate_events = Vec::new();
+    while let Some(event) = next_event(&mut immediate_stream) {
+        immediate_events.push(event);
+    }
+    let immediate_message = assemble(&immediate_events);
+    assert_eq!(
+        immediate_message.finish.reason,
+        AssistantFinishReason::Aborted
+    );
+    assert!(immediate_message.content.is_empty());
+
+    let mut after_immediate_request = request("fake", "model");
+    after_immediate_request
+        .context
+        .messages
+        .push(Message::Assistant(immediate_message));
+    after_immediate_request
+        .context
+        .messages
+        .push(Message::User(UserMessage {
+            id: MessageId::new("after-immediate-user"),
+            content: vec![ContentBlock::Text {
+                id: ContentBlockId::new("after-immediate-text"),
+                text: "What is 2 + 2?".to_owned(),
+            }],
+            timestamp: Timestamp::from_unix_millis(1),
+        }));
+    let after_immediate = assemble(&run_next(
+        &runtime,
+        after_immediate_request,
+        CancellationToken::new(),
+    ));
+    assert_eq!(after_immediate.finish.reason, AssistantFinishReason::Stop);
+    assert!(!after_immediate.content.is_empty());
+
+    let midstream = CancellationToken::new();
+    let mut midstream_stream = ready(ModelRuntime::stream(
+        &runtime,
+        request("fake", "model"),
+        midstream.clone(),
+    ))
+    .expect("midstream request starts");
+    let mut midstream_events = Vec::new();
+    loop {
+        let event = next_event(&mut midstream_stream).expect("partial text precedes terminal");
+        let has_text = matches!(event, AssistantEvent::TextDelta { .. });
+        midstream_events.push(event);
+        if has_text {
+            midstream.cancel();
+            break;
+        }
+    }
+    while let Some(event) = next_event(&mut midstream_stream) {
+        midstream_events.push(event);
+    }
+    let midstream_message = assemble(&midstream_events);
+    assert_eq!(
+        midstream_message.finish.reason,
+        AssistantFinishReason::Aborted
+    );
+    assert!(!midstream_message.content.is_empty());
+
+    let mut after_midstream_request = request("fake", "model");
+    after_midstream_request
+        .context
+        .messages
+        .push(Message::Assistant(midstream_message));
+    after_midstream_request
+        .context
+        .messages
+        .push(Message::User(UserMessage {
+            id: MessageId::new("after-midstream-user"),
+            content: vec![ContentBlock::Text {
+                id: ContentBlockId::new("after-midstream-text"),
+                text: "Continue with five names.".to_owned(),
+            }],
+            timestamp: Timestamp::from_unix_millis(2),
+        }));
+    let after_midstream = assemble(&run_next(
+        &runtime,
+        after_midstream_request,
+        CancellationToken::new(),
+    ));
+    assert_eq!(after_midstream.finish.reason, AssistantFinishReason::Stop);
+    assert!(!after_midstream.content.is_empty());
+}
+
+#[test]
+fn tokens_on_abort_usage_timing_matrix_pi_exact() {
+    // Architecture v2 part 2 §2.1 and §10.1. Pi basis:
+    // packages/ai/test/tokens.test.ts provider categories: final-only usage,
+    // early input-only usage, and early cumulative input/output usage.
+    let cases = [
+        (text_response("late-only"), false, 0, 0),
+        (
+            text_response("input-only").with_usage(usage(13, 0)),
+            true,
+            13,
+            0,
+        ),
+        (
+            text_response("early-cumulative").with_usage(usage(17, 19)),
+            true,
+            17,
+            19,
+        ),
+    ];
+
+    for (response, wait_for_usage, expected_input, expected_output) in cases {
+        let runtime = ScriptedRuntime::builder().response(response).build();
+        let cancellation = CancellationToken::new();
+        let mut stream = ready(ModelRuntime::stream(
+            &runtime,
+            request("fixture-provider", "model"),
+            cancellation.clone(),
+        ))
+        .expect("usage fixture starts");
+        let mut events = Vec::new();
+        loop {
+            let event = next_event(&mut stream).expect("fixture has a pre-terminal event");
+            let cancel_now = if wait_for_usage {
+                matches!(event, AssistantEvent::UsageUpdated { .. })
+            } else {
+                matches!(event, AssistantEvent::TextDelta { .. })
+            };
+            events.push(event);
+            if cancel_now {
+                cancellation.cancel();
+                break;
+            }
+        }
+        while let Some(event) = next_event(&mut stream) {
+            events.push(event);
+        }
+        let message = assemble(&events);
+        assert_eq!(message.finish.reason, AssistantFinishReason::Aborted);
+        assert_eq!(message.usage.input_tokens, expected_input);
+        assert_eq!(message.usage.output_tokens, expected_output);
+    }
+}
+
+#[test]
 fn stream_start_precedes_content() {
     // §10.1; Pi basis: packages/ai/src/types.ts and provider stream implementations.
     let events = run(text_response("hello"), request("fake", "model"));
@@ -415,6 +590,55 @@ fn stream_usage_is_cumulative() {
         request("fake", "model"),
     );
     assert_eq!(assemble(&events).usage, usage(7, 11));
+}
+
+#[test]
+fn scripted_runtime_queue_order_and_exhaustion_match_faux_provider() {
+    // Architecture v2 part 1 §5.1/§10.1; Pi basis:
+    // packages/ai/test/faux-provider.test.ts response queue ordering,
+    // per-call model identity, and exhausted-queue failure.
+    let runtime = ScriptedRuntime::builder()
+        .response(text_response("first"))
+        .response(text_response("second"))
+        .build();
+    assert_eq!(runtime.remaining(), 2);
+
+    let collect = |model: &str| {
+        let mut stream = ready(ModelRuntime::stream(
+            &runtime,
+            request("faux", model),
+            CancellationToken::new(),
+        ))
+        .expect("queued scripted response starts");
+        let mut events = Vec::new();
+        while let Some(event) = next_event(&mut stream) {
+            events.push(event);
+        }
+        assemble(&events)
+    };
+
+    let first = collect("model-a");
+    let second = collect("model-b");
+    assert!(matches!(
+        first.content.as_slice(),
+        [ContentBlock::Text { text, .. }] if text == "first"
+    ));
+    assert!(matches!(
+        second.content.as_slice(),
+        [ContentBlock::Text { text, .. }] if text == "second"
+    ));
+    assert_eq!(first.requested_model, ModelId::new("model-a"));
+    assert_eq!(second.requested_model, ModelId::new("model-b"));
+    assert_eq!(runtime.remaining(), 0);
+
+    let exhausted = ready(ModelRuntime::stream(
+        &runtime,
+        request("faux", "model-c"),
+        CancellationToken::new(),
+    ))
+    .expect_err("an exhausted response queue rejects the next call");
+    assert_eq!(exhausted.kind, RequestStartErrorKind::RuntimeUnavailable);
+    assert_eq!(exhausted.model, Some(ModelRef::new("faux", "model-c")));
 }
 
 #[test]

@@ -106,6 +106,7 @@ dependencies = [
  "agentprism-openai",
  "agentprism-provider-common",
  "futures-executor",
+ "futures-util",
  "http",
  "serde_json",
  "url",
@@ -254,6 +255,7 @@ dependencies = [
  "agentprism-env",
  "agentprism-session",
  "async-stream",
+ "base64",
  "bytes",
  "dashmap",
  "futures-channel",
@@ -364,9 +366,11 @@ dependencies = [
  "futures-timer",
  "futures-util",
  "http",
+ "rustix",
  "serde",
  "serde_json",
  "url",
+ "windows-sys",
  "zstd",
 ]
 
@@ -440,7 +444,9 @@ dependencies = [
  "agentprism-ai",
  "futures-util",
  "http",
+ "serde",
  "serde_json",
+ "sha2",
  "url",
 ]
 
@@ -491,6 +497,8 @@ dependencies = [
  "agentprism-zai",
  "agentprism-zai-coding-cn",
  "futures-executor",
+ "futures-util",
+ "http",
  "serde_json",
 ]
 
@@ -547,6 +555,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "libc",
+ "serde_json",
  "tempfile",
  "tokio",
  "url",

@@ -4,14 +4,16 @@ use agentprism_ai::{
     ModelRef, ModelRequest, ModelRuntime, OpaquePayload, ProviderId, PublicError, ReasoningLevel,
     ReplayApplicability, ReplayCompleteness, ReplayEnvelope, ReplayItem, ReplayItemId, ReplayKind,
     ReplayScope, ReplayTarget, RequestStartError, RequestStartErrorKind, ScriptedRuntime,
-    SendBoxFuture, Timestamp, Usage, UsageSource, UserMessage, text_response,
+    SendBoxFuture, Timestamp, ToolResultContent, ToolSpec, Usage, UsageSource, UserMessage,
+    text_response, tool_call_response,
 };
 use agentprism_core::{
     Agent, AgentError, AgentEvent, AgentRecord, AgentState, MessageRole, QueueKind, RunOutcome,
-    ToolRegistry,
+    Tool, ToolCallContext, ToolError, ToolOutput, ToolRegistry, ToolUpdateSink,
 };
 use agentprism_runtime_tokio::{AgentEventSink, TokioAgentError, TokioAgentHandle};
 use futures_util::stream;
+use serde_json::json;
 use std::collections::VecDeque;
 use std::sync::{
     Arc, Mutex, MutexGuard,
@@ -45,6 +47,192 @@ fn sink(
     + 'static,
 ) -> Arc<dyn AgentEventSink> {
     Arc::new(callback)
+}
+
+struct E2eEchoTool {
+    spec: ToolSpec,
+}
+
+impl E2eEchoTool {
+    fn new() -> Self {
+        Self {
+            spec: ToolSpec {
+                schema_version: 1,
+                name: "echo".into(),
+                description: "echo".into(),
+                parameters: json!({ "type": "object" }),
+                constrained_sampling: None,
+            },
+        }
+    }
+}
+
+impl Tool for E2eEchoTool {
+    fn spec(&self) -> &ToolSpec {
+        &self.spec
+    }
+
+    fn execute(
+        &self,
+        context: ToolCallContext,
+        _updates: Arc<dyn ToolUpdateSink>,
+        _cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<ToolOutput, ToolError>> {
+        Box::pin(async move {
+            Ok(ToolOutput::new(vec![ToolResultContent::Text {
+                id: ContentBlockId::new(format!("{}-result", context.call.id.as_str())),
+                text: "ok".into(),
+            }]))
+        })
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn agent_e2e_streaming_state_and_updates_are_observable_pi_exact() {
+    // §10.9 Lifecycle/state. Pi basis: packages/agent/test/e2e.test.ts,
+    // "emits lifecycle updates while streaming" and its state assertions.
+    let agent = Agent::new(
+        Arc::new(ScriptedRuntime::new([text_response("1 2 3 4 5")])),
+        state(),
+        ToolRegistry::new(),
+    )
+    .unwrap();
+    let handle = TokioAgentHandle::new(agent).unwrap();
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    handle
+        .subscribe(sink({
+            let handle = handle.clone();
+            let observations = observations.clone();
+            move |event, _cancellation| {
+                let snapshot = handle.latest_snapshot();
+                let name = match &event {
+                    AgentEvent::RunStarted { .. } => "run_started",
+                    AgentEvent::TurnStarted { .. } => "turn_started",
+                    AgentEvent::MessageStarted {
+                        role: MessageRole::Assistant,
+                        ..
+                    } => "assistant_started",
+                    AgentEvent::AssistantUpdate {
+                        event: AssistantEvent::TextDelta { .. },
+                        ..
+                    } => "text_update",
+                    AgentEvent::MessageCommitted {
+                        message: AgentRecord::Llm(Message::Assistant(_)),
+                    } => "assistant_committed",
+                    AgentEvent::TurnFinished { .. } => "turn_finished",
+                    AgentEvent::RunFinished { .. } => "run_finished",
+                    _ => "other",
+                };
+                let partial_has_text = snapshot.streaming.as_ref().is_some_and(|streaming| {
+                    streaming.content.iter().any(
+                        |block| matches!(block, ContentBlock::Text { text, .. } if !text.is_empty()),
+                    )
+                });
+                lock(&observations).push((
+                    name,
+                    snapshot.streaming.is_some(),
+                    partial_has_text,
+                    snapshot.state.transcript.len(),
+                ));
+                Box::pin(async {})
+            }
+        }))
+        .await
+        .unwrap();
+
+    let run = handle
+        .prompt_records([user("e2e-state-user", "Count from 1 to 5.")])
+        .await
+        .unwrap();
+    assert!(matches!(
+        run.outcome().await.unwrap(),
+        RunOutcome::Completed { .. }
+    ));
+    {
+        let observations = lock(&observations);
+        let position = |name| {
+            observations
+                .iter()
+                .position(|observation| observation.0 == name)
+                .unwrap_or_else(|| panic!("missing {name}"))
+        };
+        assert!(position("run_started") < position("assistant_started"));
+        assert!(position("assistant_started") < position("assistant_committed"));
+        assert!(position("assistant_committed") < position("run_finished"));
+        assert!(observations.iter().any(|observation| {
+            observation.0 == "assistant_started" && observation.1 && !observation.2
+        }));
+        assert!(observations.iter().any(|observation| {
+            observation.0 == "text_update" && observation.1 && observation.2
+        }));
+        assert!(observations.iter().any(|observation| {
+            observation.0 == "assistant_committed" && !observation.1 && observation.3 == 2
+        }));
+    }
+    let snapshot = handle.latest_snapshot();
+    assert!(snapshot.streaming.is_none());
+    assert!(snapshot.pending_tool_calls.is_empty());
+    assert_eq!(snapshot.state.transcript.len(), 2);
+    handle.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn agent_e2e_pending_tool_calls_transition_with_events_pi_exact() {
+    // §10.9 Tools/state. Pi basis: packages/agent/test/e2e.test.ts,
+    // "executes tools and tracks pending tool calls".
+    let runtime = ScriptedRuntime::new([
+        tool_call_response("echo", json!({ "value": "one" })),
+        text_response("done"),
+    ]);
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(E2eEchoTool::new())).unwrap();
+    let agent = Agent::new(Arc::new(runtime), state(), tools).unwrap();
+    let handle = TokioAgentHandle::new(agent).unwrap();
+    let transitions = Arc::new(Mutex::new(Vec::new()));
+    handle
+        .subscribe(sink({
+            let handle = handle.clone();
+            let transitions = transitions.clone();
+            move |event, _cancellation| {
+                let phase = match event {
+                    AgentEvent::ToolExecutionStarted { .. } => Some("start"),
+                    AgentEvent::ToolExecutionFinished { .. } => Some("end"),
+                    _ => None,
+                };
+                if let Some(phase) = phase {
+                    lock(&transitions).push((
+                        phase,
+                        handle
+                            .latest_snapshot()
+                            .pending_tool_calls
+                            .iter()
+                            .map(|id| id.as_str().to_owned())
+                            .collect::<Vec<_>>(),
+                    ));
+                }
+                Box::pin(async {})
+            }
+        }))
+        .await
+        .unwrap();
+
+    let run = handle
+        .prompt_records([user("e2e-tool-user", "Use the echo tool.")])
+        .await
+        .unwrap();
+    assert!(matches!(
+        run.outcome().await.unwrap(),
+        RunOutcome::Completed { .. }
+    ));
+    assert_eq!(
+        lock(&transitions).as_slice(),
+        [
+            ("start", vec!["scripted-call-0".to_owned()]),
+            ("end", Vec::new())
+        ]
+    );
+    assert!(handle.latest_snapshot().pending_tool_calls.is_empty());
+    handle.shutdown().await.unwrap();
 }
 
 #[derive(Clone)]

@@ -910,8 +910,9 @@ fn convert_openai_completions_messages(
                             }
                         }
                     }
+                    let text = text.join("\n");
                     let content = if !text.is_empty() {
-                        text.join("\n")
+                        text
                     } else if has_images {
                         "(see attached image)".into()
                     } else {

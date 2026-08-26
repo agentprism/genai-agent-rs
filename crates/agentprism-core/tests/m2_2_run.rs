@@ -563,6 +563,137 @@ fn agent_continue_with_tools() {
     );
 }
 
+#[test]
+fn agent_e2e_multi_turn_context_is_preserved_pi_exact() {
+    // §10.9 Lifecycle/context phases. Pi basis:
+    // packages/agent/test/e2e.test.ts, "maintains context across multiple turns".
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let runtime = RecordingRuntime {
+        inner: ScriptedRuntime::new([
+            text_response("Nice to meet you, Alice."),
+            text_response("Your name is Alice."),
+        ]),
+        requests: requests.clone(),
+    };
+    let mut agent = Agent::new(Arc::new(runtime), state(), ToolRegistry::new()).unwrap();
+
+    collect(agent.prompt_records(
+        [user("user-name", "My name is Alice.")],
+        CancellationToken::new(),
+    ));
+    collect(agent.prompt_records(
+        [user("user-recall", "What is my name?")],
+        CancellationToken::new(),
+    ));
+
+    assert_eq!(agent.state().transcript.len(), 4);
+    let requests = lock(&requests);
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].context.messages.len(), 1);
+    assert_eq!(requests[1].context.messages.len(), 3);
+    assert!(matches!(
+        &requests[1].context.messages[0],
+        Message::User(message)
+            if matches!(&message.content[0], ContentBlock::Text { text, .. } if text == "My name is Alice.")
+    ));
+    assert!(matches!(
+        &requests[1].context.messages[1],
+        Message::Assistant(message)
+            if matches!(&message.content[0], ContentBlock::Text { text, .. } if text == "Nice to meet you, Alice.")
+    ));
+    assert!(matches!(
+        &requests[1].context.messages[2],
+        Message::User(message)
+            if matches!(&message.content[0], ContentBlock::Text { text, .. } if text == "What is my name?")
+    ));
+    assert!(matches!(
+        agent.state().transcript.last(),
+        Some(AgentRecord::Llm(Message::Assistant(message)))
+            if matches!(&message.content[0], ContentBlock::Text { text, .. } if text == "Your name is Alice.")
+    ));
+}
+
+#[test]
+fn agent_e2e_thinking_content_blocks_are_preserved_pi_exact() {
+    // §10.9 Lifecycle. Pi basis:
+    // packages/agent/test/e2e.test.ts, "preserves thinking content blocks".
+    let response = ScriptedResponse::completed_events(
+        [
+            AssistantEvent::MessageStarted {
+                message_id: MessageId::new("assistant-thinking"),
+                provider: ProviderId::new("scripted"),
+                api: ApiId::new("scripted"),
+                model: ModelId::new("test-model"),
+            },
+            AssistantEvent::ContentBlockStarted {
+                block_id: ContentBlockId::new("thinking"),
+                content_index: 0,
+                kind: ContentBlockKind::Thinking,
+            },
+            AssistantEvent::ThinkingDelta {
+                block_id: ContentBlockId::new("thinking"),
+                delta: "step by step".into(),
+            },
+            AssistantEvent::ContentBlockFinished {
+                block_id: ContentBlockId::new("thinking"),
+            },
+            AssistantEvent::ContentBlockStarted {
+                block_id: ContentBlockId::new("answer"),
+                content_index: 1,
+                kind: ContentBlockKind::Text,
+            },
+            AssistantEvent::TextDelta {
+                block_id: ContentBlockId::new("answer"),
+                delta: "4".into(),
+            },
+            AssistantEvent::ContentBlockFinished {
+                block_id: ContentBlockId::new("answer"),
+            },
+        ],
+        AssistantFinish {
+            reason: AssistantFinishReason::Stop,
+            raw_provider_reason: None,
+            error: None,
+        },
+    )
+    .unwrap();
+    let mut agent = agent([response]);
+    collect(agent.prompt_records(
+        [user("user-thinking", "What is 2+2?")],
+        CancellationToken::new(),
+    ));
+    let Some(AgentRecord::Llm(Message::Assistant(message))) = agent.state().transcript.get(1)
+    else {
+        panic!("expected committed assistant");
+    };
+    assert_eq!(
+        message.content,
+        [
+            ContentBlock::Thinking {
+                id: ContentBlockId::new("thinking"),
+                text: "step by step".into(),
+                redacted: false,
+                replay_item: None,
+            },
+            ContentBlock::Text {
+                id: ContentBlockId::new("answer"),
+                text: "4".into(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn agent_continue_rejects_empty_context_pi_exact() {
+    // §10.9 Failure. Pi basis: packages/agent/test/e2e.test.ts,
+    // Agent.continue() validation, "throws when no messages in context".
+    let mut agent = agent([text_response("unused")]);
+    assert!(matches!(
+        agent.continue_run(CancellationToken::new()),
+        Err(AgentError::ContinueWithoutMessages)
+    ));
+}
+
 #[derive(Clone)]
 struct RawEventRuntime {
     responses: Arc<Mutex<VecDeque<Vec<AssistantEvent>>>>,
