@@ -106,9 +106,9 @@ fn wire_openai_completions_pi_exact() {
 
 /// Architecture v2 part 2 §10.5 and §10.8; pinned Pi basis:
 /// `packages/ai/test/openai-completions-tool-choice.test.ts`,
-/// "omits toolChoice when no tools are provided".
+/// "includes toolChoice when no tools are provided".
 #[test]
-fn openai_tool_choice_is_omitted_without_active_tools_pi_exact() {
+fn openai_explicit_tool_choice_is_included_without_active_tools_pi_exact() {
     let model = base_fixture_model();
     let context = one_user_context();
     let options = lower_simple_options(
@@ -121,7 +121,7 @@ fn openai_tool_choice_is_omitted_without_active_tools_pi_exact() {
     );
     assert_eq!(
         encode_options(&model, &context, options),
-        br#"{"model":"fixture-openai-model","messages":[{"role":"user","content":"hello"}],"stream":true,"stream_options":{"include_usage":true},"max_tokens":8192,"reasoning_effort":"none"}"#
+        br#"{"model":"fixture-openai-model","messages":[{"role":"user","content":"hello"}],"stream":true,"stream_options":{"include_usage":true},"max_tokens":8192,"tool_choice":"none","reasoning_effort":"none"}"#
     );
 }
 

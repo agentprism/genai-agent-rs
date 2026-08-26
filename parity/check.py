@@ -84,7 +84,9 @@ def load_snapshot(path: Path, errors: list[str]) -> tuple[str, str, set[str]]:
     return repository, commit, set(paths)
 
 
-def candidate_upstream_checkout(root: Path, errors: list[str]) -> Path | None:
+def candidate_upstream_checkout(
+    root: Path, upstream_commit: Any, errors: list[str]
+) -> Path | None:
     configured = os.environ.get("PI_UPSTREAM_DIR")
     if configured is not None:
         candidate = Path(configured).expanduser().resolve()
@@ -93,10 +95,13 @@ def candidate_upstream_checkout(root: Path, errors: list[str]) -> Path | None:
             return None
         return candidate
 
-    candidates = (
-        Path("/home/vikash/pi-pin-8fa7eebd2"),
-        root.parent / "pi-pin-8fa7eebd2",
-    )
+    if not isinstance(upstream_commit, str) or re.fullmatch(
+        r"[0-9a-f]{40}", upstream_commit
+    ) is None:
+        return None
+
+    checkout_name = f"pi-pin-{upstream_commit[:9]}"
+    candidates = (Path.home() / checkout_name, root.parent / checkout_name)
     for candidate in candidates:
         if candidate.is_dir():
             return candidate.resolve()
@@ -274,7 +279,7 @@ def main() -> int:
             f"{manifest_commit!r} != {snapshot_commit!r}"
         )
 
-    checkout = candidate_upstream_checkout(root, errors)
+    checkout = candidate_upstream_checkout(root, manifest_commit, errors)
     upstream_source = f"snapshot {snapshot_path.relative_to(root)}"
     upstream_tests = snapshot_tests
     if checkout is not None:
