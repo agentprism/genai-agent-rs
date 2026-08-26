@@ -1,5 +1,6 @@
 # Parity inventory for architecture v2 part 2 §10, pinned to the source commit
-# below. M9.2 closes the inventory: no planned mappings remain.
+# below. Planned mappings are permitted again per the owner rulings of 2026-08-26
+# (M10 image generation; pi-sync additions for new upstream tests).
 upstream_repository = "earendil-works/pi"
 upstream_commit = "8fa7eebd235355522c8104166b4f1f959b4e2f10"
 

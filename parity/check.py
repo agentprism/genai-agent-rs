@@ -13,7 +13,9 @@ import tomllib
 from typing import Any
 
 
-VALID_STATUSES = {"semantic-parity", "deliberate-divergence"}
+VALID_STATUSES = {"semantic-parity", "deliberate-divergence", "planned"}
+# "planned" was re-authorized by the owner ruling of 2026-08-26: image generation is in
+# scope as Milestone 10, and pi-sync runs may add planned mappings for new upstream tests.
 UPSTREAM_TEST_RE = re.compile(r"^packages/(?:ai|agent)/test/.+\.test\.ts$")
 LISTED_RUST_TEST_RE = re.compile(r"^(.+): test$")
 SNAPSHOT_HEADER_RE = re.compile(
