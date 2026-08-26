@@ -1,0 +1,37 @@
+[package]
+name = "agentprism-ai"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/agentprism/genai-agent-rs"
+description = "agentprism-ai: canonical messages and model descriptors, replay envelope and stream assembly, API-family lowering and wire encoders, the Models registry (auth, catalogs, retry configuration), and provider registrations."
+publish = false
+
+[dependencies]
+arc-swap = "1.7.1"
+base64 = "0.22.1"
+fastrand = "2.3.0"
+futures-core = "0.3.31"
+futures-timer = { version = "3.0.3", features = ["wasm-bindgen"] }
+futures-util = "0.3.31"
+getrandom = { version = "0.3.4", features = ["wasm_js"] }
+http = "1.3.1"
+httpdate = "1.0.3"
+indexmap = { version = "2.11.4", features = ["serde"] }
+regex = "1.12.2"
+serde = { version = "1.0.228", features = ["derive", "rc"] }
+serde_json = { version = "1.0.145", features = ["arbitrary_precision", "preserve_order", "raw_value"] }
+ryu-js = { version = "1.0.3", features = ["small"] }
+sha2 = "0.10.9"
+url = { version = "2.5.7", features = ["serde"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tempfile = "3.27.0"
+
+[dev-dependencies]
+futures-executor = "0.3.31"
+static_assertions = "1.1.0"
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3.55"

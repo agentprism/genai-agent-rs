@@ -1,0 +1,16 @@
+[package]
+name = "agentprism-provider-common"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/agentprism/genai-agent-rs"
+description = "Internal shared construction support for agentprism-ai provider leaf crates."
+publish = false
+
+[dependencies]
+futures-util = "0.3.31"
+http = "1.3.1"
+agentprism-ai = { path = "../../crates/agentprism-ai" }
+serde_json = { version = "1.0.145", features = ["arbitrary_precision", "preserve_order"] }
+url = { version = "2.5.7", features = ["serde"] }

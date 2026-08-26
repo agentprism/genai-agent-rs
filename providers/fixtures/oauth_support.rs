@@ -9,8 +9,8 @@
     reason = "the test transport must implement the public transport error contract exactly"
 )]
 
+use agentprism_ai::*;
 use http::HeaderMap;
-use pi_ai::*;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 

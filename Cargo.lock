@@ -3,6 +3,659 @@
 version = 4
 
 [[package]]
+name = "agentprism-ai"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "base64",
+ "fastrand",
+ "futures-core",
+ "futures-executor",
+ "futures-timer",
+ "futures-util",
+ "getrandom 0.3.4",
+ "http",
+ "httpdate",
+ "indexmap",
+ "regex",
+ "ryu-js",
+ "serde",
+ "serde_json",
+ "sha2",
+ "static_assertions",
+ "tempfile",
+ "url",
+ "wasm-bindgen-test",
+]
+
+[[package]]
+name = "agentprism-ant-ling"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-anthropic"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "futures-executor",
+ "futures-util",
+ "http",
+ "rustix",
+ "serde",
+ "serde_json",
+ "url",
+ "windows-sys",
+]
+
+[[package]]
+name = "agentprism-azure-openai-responses"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+ "futures-executor",
+ "http",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "agentprism-baseten"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-bedrock"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "base64",
+ "futures-executor",
+ "futures-util",
+ "http",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "agentprism-cerebras"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-cloudflare-ai-gateway"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-anthropic",
+ "agentprism-openai",
+ "agentprism-provider-common",
+ "futures-executor",
+ "http",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "agentprism-cloudflare-workers-ai"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+ "futures-executor",
+ "http",
+ "url",
+]
+
+[[package]]
+name = "agentprism-compat-pi-jsonl"
+version = "0.1.0"
+
+[[package]]
+name = "agentprism-core"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "async-stream",
+ "futures-channel",
+ "futures-executor",
+ "futures-util",
+ "indexmap",
+ "jsonschema",
+ "num-bigint",
+ "num-traits",
+ "proptest",
+ "ryu-js",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "agentprism-deepseek"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-env"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "bytes",
+]
+
+[[package]]
+name = "agentprism-ffi"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-core",
+ "agentprism-runtime-tokio",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uniffi",
+ "url",
+]
+
+[[package]]
+name = "agentprism-fireworks"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-anthropic",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-github-copilot"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-anthropic",
+ "agentprism-openai",
+ "agentprism-provider-common",
+ "futures-executor",
+ "futures-timer",
+ "futures-util",
+ "http",
+ "httpdate",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "agentprism-google"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-google-vertex",
+ "base64",
+ "futures-executor",
+ "futures-util",
+ "http",
+ "rustix",
+ "serde",
+ "serde_json",
+ "url",
+ "windows-sys",
+]
+
+[[package]]
+name = "agentprism-google-vertex"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-google",
+ "agentprism-provider-common",
+ "base64",
+ "futures-util",
+ "http",
+ "rsa",
+ "serde",
+ "serde_json",
+ "sha2",
+ "url",
+]
+
+[[package]]
+name = "agentprism-groq"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-harness"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-core",
+ "agentprism-env",
+ "agentprism-session",
+ "async-stream",
+ "bytes",
+ "dashmap",
+ "futures-channel",
+ "futures-executor",
+ "futures-util",
+ "ignore",
+ "jsonschema",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "agentprism-huggingface"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-kimi-coding"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-anthropic",
+ "agentprism-provider-common",
+ "futures-executor",
+ "futures-util",
+ "http",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "agentprism-minimax"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-anthropic",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-minimax-cn"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-anthropic",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-mistral"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "futures-executor",
+ "futures-timer",
+ "futures-util",
+ "http",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "agentprism-moonshotai"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-moonshotai-cn"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-nvidia"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-openai"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-deepseek",
+ "agentprism-openai-codex",
+ "agentprism-openrouter",
+ "base64",
+ "futures-executor",
+ "futures-timer",
+ "futures-util",
+ "http",
+ "serde",
+ "serde_json",
+ "url",
+ "zstd",
+]
+
+[[package]]
+name = "agentprism-openai-codex"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+ "base64",
+ "futures-util",
+ "http",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "agentprism-opencode"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-anthropic",
+ "agentprism-google",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-opencode-go"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-anthropic",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-openrouter"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+ "futures-timer",
+ "futures-util",
+ "http",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "agentprism-pi-messages"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "base64",
+ "futures-executor",
+ "futures-util",
+ "http",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "agentprism-provider-common"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "futures-util",
+ "http",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "agentprism-providers-all"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-ant-ling",
+ "agentprism-anthropic",
+ "agentprism-azure-openai-responses",
+ "agentprism-baseten",
+ "agentprism-bedrock",
+ "agentprism-cerebras",
+ "agentprism-cloudflare-ai-gateway",
+ "agentprism-cloudflare-workers-ai",
+ "agentprism-deepseek",
+ "agentprism-fireworks",
+ "agentprism-github-copilot",
+ "agentprism-google",
+ "agentprism-google-vertex",
+ "agentprism-groq",
+ "agentprism-huggingface",
+ "agentprism-kimi-coding",
+ "agentprism-minimax",
+ "agentprism-minimax-cn",
+ "agentprism-mistral",
+ "agentprism-moonshotai",
+ "agentprism-moonshotai-cn",
+ "agentprism-nvidia",
+ "agentprism-openai",
+ "agentprism-openai-codex",
+ "agentprism-opencode",
+ "agentprism-opencode-go",
+ "agentprism-openrouter",
+ "agentprism-provider-common",
+ "agentprism-qwen-token-plan",
+ "agentprism-qwen-token-plan-cn",
+ "agentprism-qwen-token-plan-individual",
+ "agentprism-radius",
+ "agentprism-together",
+ "agentprism-vercel-ai-gateway",
+ "agentprism-xai",
+ "agentprism-xiaomi",
+ "agentprism-xiaomi-token-plan-ams",
+ "agentprism-xiaomi-token-plan-cn",
+ "agentprism-xiaomi-token-plan-sgp",
+ "agentprism-zai",
+ "agentprism-zai-coding-cn",
+ "futures-executor",
+ "serde_json",
+]
+
+[[package]]
+name = "agentprism-qwen-token-plan"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-qwen-token-plan-cn"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-qwen-token-plan-individual"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-radius"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-pi-messages",
+ "agentprism-provider-common",
+ "futures-executor",
+ "futures-util",
+ "http",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "agentprism-runtime-tokio"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-core",
+ "agentprism-env",
+ "async-stream",
+ "bytes",
+ "futures-util",
+ "libc",
+ "tempfile",
+ "tokio",
+ "url",
+ "windows-sys",
+]
+
+[[package]]
+name = "agentprism-session"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-core",
+ "futures-executor",
+ "serde",
+ "serde_json",
+ "static_assertions",
+]
+
+[[package]]
+name = "agentprism-together"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-vercel-ai-gateway"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-anthropic",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-xai"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+ "futures-executor",
+ "futures-util",
+ "http",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "agentprism-xiaomi"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-xiaomi-token-plan-ams"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-xiaomi-token-plan-cn"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-xiaomi-token-plan-sgp"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-zai"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
+name = "agentprism-zai-coding-cn"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-openai",
+ "agentprism-provider-common",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1193,659 +1846,6 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
-
-[[package]]
-name = "pi-agent-compat-pi-jsonl"
-version = "0.1.0"
-
-[[package]]
-name = "pi-agent-core"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "futures-channel",
- "futures-executor",
- "futures-util",
- "indexmap",
- "jsonschema",
- "num-bigint",
- "num-traits",
- "pi-ai",
- "proptest",
- "ryu-js",
- "schemars",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "pi-agent-env"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "pi-ai",
-]
-
-[[package]]
-name = "pi-agent-harness"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "bytes",
- "dashmap",
- "futures-channel",
- "futures-executor",
- "futures-util",
- "ignore",
- "jsonschema",
- "pi-agent-core",
- "pi-agent-env",
- "pi-agent-session",
- "pi-ai",
- "schemars",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "tempfile",
- "unicode-normalization",
-]
-
-[[package]]
-name = "pi-agent-runtime-tokio"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "bytes",
- "futures-util",
- "libc",
- "pi-agent-core",
- "pi-agent-env",
- "pi-ai",
- "tempfile",
- "tokio",
- "url",
- "windows-sys",
-]
-
-[[package]]
-name = "pi-agent-session"
-version = "0.1.0"
-dependencies = [
- "futures-executor",
- "pi-agent-core",
- "pi-ai",
- "serde",
- "serde_json",
- "static_assertions",
-]
-
-[[package]]
-name = "pi-ai"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "base64",
- "fastrand",
- "futures-core",
- "futures-executor",
- "futures-timer",
- "futures-util",
- "getrandom 0.3.4",
- "http",
- "httpdate",
- "indexmap",
- "regex",
- "ryu-js",
- "serde",
- "serde_json",
- "sha2",
- "static_assertions",
- "tempfile",
- "url",
- "wasm-bindgen-test",
-]
-
-[[package]]
-name = "pi-ai-ant-ling"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-anthropic"
-version = "0.1.0"
-dependencies = [
- "futures-executor",
- "futures-util",
- "http",
- "pi-ai",
- "rustix",
- "serde",
- "serde_json",
- "url",
- "windows-sys",
-]
-
-[[package]]
-name = "pi-ai-azure-openai-responses"
-version = "0.1.0"
-dependencies = [
- "futures-executor",
- "http",
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "pi-ai-baseten"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-bedrock"
-version = "0.1.0"
-dependencies = [
- "base64",
- "futures-executor",
- "futures-util",
- "http",
- "pi-ai",
- "serde",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "pi-ai-cerebras"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-cloudflare-ai-gateway"
-version = "0.1.0"
-dependencies = [
- "futures-executor",
- "http",
- "pi-ai",
- "pi-ai-anthropic",
- "pi-ai-openai",
- "pi-ai-provider-common",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "pi-ai-cloudflare-workers-ai"
-version = "0.1.0"
-dependencies = [
- "futures-executor",
- "http",
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
- "url",
-]
-
-[[package]]
-name = "pi-ai-deepseek"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-fireworks"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-anthropic",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-github-copilot"
-version = "0.1.0"
-dependencies = [
- "futures-executor",
- "futures-timer",
- "futures-util",
- "http",
- "httpdate",
- "pi-ai",
- "pi-ai-anthropic",
- "pi-ai-openai",
- "pi-ai-provider-common",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "pi-ai-google"
-version = "0.1.0"
-dependencies = [
- "base64",
- "futures-executor",
- "futures-util",
- "http",
- "pi-ai",
- "pi-ai-google-vertex",
- "rustix",
- "serde",
- "serde_json",
- "url",
- "windows-sys",
-]
-
-[[package]]
-name = "pi-ai-google-vertex"
-version = "0.1.0"
-dependencies = [
- "base64",
- "futures-util",
- "http",
- "pi-ai",
- "pi-ai-google",
- "pi-ai-provider-common",
- "rsa",
- "serde",
- "serde_json",
- "sha2",
- "url",
-]
-
-[[package]]
-name = "pi-ai-groq"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-huggingface"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-kimi-coding"
-version = "0.1.0"
-dependencies = [
- "futures-executor",
- "futures-util",
- "http",
- "pi-ai",
- "pi-ai-anthropic",
- "pi-ai-provider-common",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "pi-ai-minimax"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-anthropic",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-minimax-cn"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-anthropic",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-mistral"
-version = "0.1.0"
-dependencies = [
- "futures-executor",
- "futures-timer",
- "futures-util",
- "http",
- "pi-ai",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "pi-ai-moonshotai"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-moonshotai-cn"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-nvidia"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-openai"
-version = "0.1.0"
-dependencies = [
- "base64",
- "futures-executor",
- "futures-timer",
- "futures-util",
- "http",
- "pi-ai",
- "pi-ai-deepseek",
- "pi-ai-openai-codex",
- "pi-ai-openrouter",
- "serde",
- "serde_json",
- "url",
- "zstd",
-]
-
-[[package]]
-name = "pi-ai-openai-codex"
-version = "0.1.0"
-dependencies = [
- "base64",
- "futures-util",
- "http",
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "pi-ai-opencode"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-anthropic",
- "pi-ai-google",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-opencode-go"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-anthropic",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-openrouter"
-version = "0.1.0"
-dependencies = [
- "futures-timer",
- "futures-util",
- "http",
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "pi-ai-pi-messages"
-version = "0.1.0"
-dependencies = [
- "base64",
- "futures-executor",
- "futures-util",
- "http",
- "pi-ai",
- "serde",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "pi-ai-provider-common"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "http",
- "pi-ai",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "pi-ai-providers-all"
-version = "0.1.0"
-dependencies = [
- "futures-executor",
- "pi-ai",
- "pi-ai-ant-ling",
- "pi-ai-anthropic",
- "pi-ai-azure-openai-responses",
- "pi-ai-baseten",
- "pi-ai-bedrock",
- "pi-ai-cerebras",
- "pi-ai-cloudflare-ai-gateway",
- "pi-ai-cloudflare-workers-ai",
- "pi-ai-deepseek",
- "pi-ai-fireworks",
- "pi-ai-github-copilot",
- "pi-ai-google",
- "pi-ai-google-vertex",
- "pi-ai-groq",
- "pi-ai-huggingface",
- "pi-ai-kimi-coding",
- "pi-ai-minimax",
- "pi-ai-minimax-cn",
- "pi-ai-mistral",
- "pi-ai-moonshotai",
- "pi-ai-moonshotai-cn",
- "pi-ai-nvidia",
- "pi-ai-openai",
- "pi-ai-openai-codex",
- "pi-ai-opencode",
- "pi-ai-opencode-go",
- "pi-ai-openrouter",
- "pi-ai-provider-common",
- "pi-ai-qwen-token-plan",
- "pi-ai-qwen-token-plan-cn",
- "pi-ai-qwen-token-plan-individual",
- "pi-ai-radius",
- "pi-ai-together",
- "pi-ai-vercel-ai-gateway",
- "pi-ai-xai",
- "pi-ai-xiaomi",
- "pi-ai-xiaomi-token-plan-ams",
- "pi-ai-xiaomi-token-plan-cn",
- "pi-ai-xiaomi-token-plan-sgp",
- "pi-ai-zai",
- "pi-ai-zai-coding-cn",
- "serde_json",
-]
-
-[[package]]
-name = "pi-ai-qwen-token-plan"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-qwen-token-plan-cn"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-qwen-token-plan-individual"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-radius"
-version = "0.1.0"
-dependencies = [
- "futures-executor",
- "futures-util",
- "http",
- "pi-ai",
- "pi-ai-pi-messages",
- "pi-ai-provider-common",
- "serde",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "pi-ai-together"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-vercel-ai-gateway"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-anthropic",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-xai"
-version = "0.1.0"
-dependencies = [
- "futures-executor",
- "futures-util",
- "http",
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "pi-ai-xiaomi"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-xiaomi-token-plan-ams"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-xiaomi-token-plan-cn"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-xiaomi-token-plan-sgp"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-zai"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ai-zai-coding-cn"
-version = "0.1.0"
-dependencies = [
- "pi-ai",
- "pi-ai-openai",
- "pi-ai-provider-common",
-]
-
-[[package]]
-name = "pi-ffi"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "pi-agent-core",
- "pi-agent-runtime-tokio",
- "pi-ai",
- "serde",
- "serde_json",
- "tokio",
- "uniffi",
- "url",
-]
 
 [[package]]
 name = "pin-project-lite"

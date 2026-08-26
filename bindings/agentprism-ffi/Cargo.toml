@@ -1,0 +1,26 @@
+[package]
+name = "agentprism-ffi"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/agentprism/genai-agent-rs"
+description = "Opaque C and generated Swift bindings for agentprism-ai and agentprism-core."
+publish = false
+
+[lib]
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[dependencies]
+futures-util = { version = "0.3.31", default-features = false, features = ["alloc", "std"] }
+agentprism-core = { path = "../../crates/agentprism-core" }
+agentprism-runtime-tokio = { path = "../../crates/agentprism-runtime-tokio" }
+agentprism-ai = { path = "../../crates/agentprism-ai" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+tokio = { version = "1.47.1", features = ["rt-multi-thread", "sync"] }
+uniffi = { version = "0.32.0", default-features = false }
+url = "2.5.7"
+
+[dev-dependencies]
+uniffi = { version = "0.32.0", features = ["cli"] }
