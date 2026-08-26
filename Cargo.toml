@@ -7,7 +7,6 @@ members = [
     "crates/agentprism-harness",
     "crates/agentprism-env",
     "crates/agentprism-runtime-tokio",
-    "crates/agentprism-compat-pi-jsonl",
     "bindings/agentprism-ffi",
     "providers/agentprism-openai",
     "providers/agentprism-openai-codex",
@@ -60,7 +59,7 @@ members = [
 #
 # Workspace shape (part 1 §2, part 2 "Source baseline and revised architecture"):
 #   crates/      agentprism-ai, agentprism-core, agentprism-session, agentprism-harness, agentprism-env,
-#                agentprism-runtime-tokio, agentprism-compat-pi-jsonl
+#                agentprism-runtime-tokio
 #   providers/   one leaf crate per provider (agentprism-openai, agentprism-anthropic, …) plus
 #                agentprism-providers-all — added in Milestone 4
 #   bindings/    agentprism-ffi — added in Milestone 5

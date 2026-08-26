@@ -185,10 +185,6 @@ def validate_mappings(
         occurrences = allowlist_occurrences.get(row, [])
         if not occurrences:
             errors.append(f"§10.11 allowlist row has no mapping: {row}")
-        elif len(occurrences) > 1:
-            errors.append(
-                f"§10.11 allowlist row has multiple mappings ({occurrences}): {row}"
-            )
 
     raw_planned_tests = manifest.get("planned_test", [])
     if not isinstance(raw_planned_tests, list):

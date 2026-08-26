@@ -86,6 +86,23 @@ pub trait LocalCustomSessionEntryProjector: 'static {
     ) -> Result<Vec<AgentRecord>, CompactionError>;
 }
 
+/// Send-capable caller transform applied after the latest compaction boundary.
+///
+/// This is the Rust counterpart of pinned Pi's
+/// `SessionContextBuildOptions.entryTransforms`. Transforms run in registration
+/// order and affect normal model-context reconstruction only; compaction input
+/// selection deliberately continues to use the untransformed durable branch.
+pub trait SessionContextEntryTransform: Send + Sync + 'static {
+    /// Returns the complete entry sequence visible to the next transform.
+    fn transform(&self, entries: &[SessionEntry]) -> Result<Vec<SessionEntry>, CompactionError>;
+}
+
+/// Local-executor counterpart of [`SessionContextEntryTransform`].
+pub trait LocalSessionContextEntryTransform: 'static {
+    /// Returns the complete entry sequence visible to the next transform.
+    fn transform(&self, entries: &[SessionEntry]) -> Result<Vec<SessionEntry>, CompactionError>;
+}
+
 /// Pi-compatible default that omits unregistered custom session entries.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct OmitCustomSessionEntries;
@@ -120,6 +137,8 @@ pub struct HarnessContextPolicy {
     pub compaction: Arc<dyn CompactionPolicy>,
     /// Selected durable session lane.
     pub session: Arc<Session>,
+    /// Caller transforms applied after the latest durable compaction boundary.
+    pub entry_transforms: Vec<Arc<dyn SessionContextEntryTransform>>,
     /// Explicit projection for application-defined durable entries.
     pub custom_entry_projector: Arc<dyn CustomSessionEntryProjector>,
 }
@@ -328,9 +347,17 @@ impl HarnessContextPolicy {
         }
         let final_context = if compaction_entry_id.is_some() {
             let final_path = self.session.branch_entries().await?;
-            reconstruct_branch_context_send(&final_path, self.custom_entry_projector.as_ref())?
+            reconstruct_branch_context_send(
+                &final_path,
+                &self.entry_transforms,
+                self.custom_entry_projector.as_ref(),
+            )?
         } else {
-            reconstruct_branch_context_send(&path, self.custom_entry_projector.as_ref())?
+            reconstruct_branch_context_send(
+                &path,
+                &self.entry_transforms,
+                self.custom_entry_projector.as_ref(),
+            )?
         };
         let final_model = final_context.model.as_ref().unwrap_or(state.model);
         let final_reasoning = final_context.reasoning_override.unwrap_or(state.reasoning);
@@ -390,6 +417,8 @@ pub struct LocalHarnessContextPolicy {
     pub compaction: Rc<dyn LocalCompactionPolicy>,
     /// Selected durable session lane.
     pub session: Rc<LocalSession>,
+    /// Local caller transforms applied after the latest compaction boundary.
+    pub entry_transforms: Vec<Rc<dyn LocalSessionContextEntryTransform>>,
     /// Explicit local projection for application-defined durable entries.
     pub custom_entry_projector: Rc<dyn LocalCustomSessionEntryProjector>,
 }
@@ -598,9 +627,17 @@ impl LocalHarnessContextPolicy {
         }
         let final_context = if compaction_entry_id.is_some() {
             let final_path = self.session.branch_entries().await?;
-            reconstruct_branch_context_local(&final_path, self.custom_entry_projector.as_ref())?
+            reconstruct_branch_context_local(
+                &final_path,
+                &self.entry_transforms,
+                self.custom_entry_projector.as_ref(),
+            )?
         } else {
-            reconstruct_branch_context_local(&path, self.custom_entry_projector.as_ref())?
+            reconstruct_branch_context_local(
+                &path,
+                &self.entry_transforms,
+                self.custom_entry_projector.as_ref(),
+            )?
         };
         let final_model = final_context.model.as_ref().unwrap_or(state.model);
         let final_reasoning = final_context.reasoning_override.unwrap_or(state.reasoning);
@@ -982,29 +1019,89 @@ fn latest_compaction_details(path: &[SessionEntry]) -> Option<agentprism_ai::Ver
 pub fn reconstruct_branch_context(
     path: &[SessionEntry],
 ) -> Result<ReconstructedBranchContext, CompactionError> {
-    reconstruct_branch_context_with(path, |_entry, _index, _entries| Ok(Vec::new()))
+    reconstruct_branch_context_with(
+        path,
+        |entries| Ok(entries.to_vec()),
+        |_entry, _index, _entries| Ok(Vec::new()),
+    )
+}
+
+/// Reconstructs a chronological branch with an explicit custom-entry projector.
+///
+/// The projector receives the path after the latest-compaction transform,
+/// matching pinned Pi's `SessionContextBuildOptions.entryProjectors` phase.
+pub fn reconstruct_branch_context_with_projector(
+    path: &[SessionEntry],
+    projector: &dyn CustomSessionEntryProjector,
+) -> Result<ReconstructedBranchContext, CompactionError> {
+    reconstruct_branch_context_send(path, &[], projector)
+}
+
+/// Local-executor counterpart of [`reconstruct_branch_context_with_projector`].
+pub fn reconstruct_branch_context_with_local_projector(
+    path: &[SessionEntry],
+    projector: &dyn LocalCustomSessionEntryProjector,
+) -> Result<ReconstructedBranchContext, CompactionError> {
+    reconstruct_branch_context_local(path, &[], projector)
+}
+
+/// Reconstructs normal Send context with caller transforms and a custom projector.
+pub fn reconstruct_branch_context_with_options(
+    path: &[SessionEntry],
+    transforms: &[Arc<dyn SessionContextEntryTransform>],
+    projector: &dyn CustomSessionEntryProjector,
+) -> Result<ReconstructedBranchContext, CompactionError> {
+    reconstruct_branch_context_send(path, transforms, projector)
+}
+
+/// Local-executor counterpart of [`reconstruct_branch_context_with_options`].
+pub fn reconstruct_branch_context_with_local_options(
+    path: &[SessionEntry],
+    transforms: &[Rc<dyn LocalSessionContextEntryTransform>],
+    projector: &dyn LocalCustomSessionEntryProjector,
+) -> Result<ReconstructedBranchContext, CompactionError> {
+    reconstruct_branch_context_local(path, transforms, projector)
 }
 
 fn reconstruct_branch_context_send(
     path: &[SessionEntry],
+    transforms: &[Arc<dyn SessionContextEntryTransform>],
     projector: &dyn CustomSessionEntryProjector,
 ) -> Result<ReconstructedBranchContext, CompactionError> {
-    reconstruct_branch_context_with(path, |entry, index, entries| {
-        projector.project(entry, index, entries)
-    })
+    reconstruct_branch_context_with(
+        path,
+        |entries| {
+            let mut transformed = entries.to_vec();
+            for transform in transforms {
+                transformed = transform.transform(&transformed)?;
+            }
+            Ok(transformed)
+        },
+        |entry, index, entries| projector.project(entry, index, entries),
+    )
 }
 
 fn reconstruct_branch_context_local(
     path: &[SessionEntry],
+    transforms: &[Rc<dyn LocalSessionContextEntryTransform>],
     projector: &dyn LocalCustomSessionEntryProjector,
 ) -> Result<ReconstructedBranchContext, CompactionError> {
-    reconstruct_branch_context_with(path, |entry, index, entries| {
-        projector.project(entry, index, entries)
-    })
+    reconstruct_branch_context_with(
+        path,
+        |entries| {
+            let mut transformed = entries.to_vec();
+            for transform in transforms {
+                transformed = transform.transform(&transformed)?;
+            }
+            Ok(transformed)
+        },
+        |entry, index, entries| projector.project(entry, index, entries),
+    )
 }
 
 fn reconstruct_branch_context_with(
     path: &[SessionEntry],
+    transform_entries: impl FnOnce(&[SessionEntry]) -> Result<Vec<SessionEntry>, CompactionError>,
     mut project_custom: impl FnMut(
         &SessionEntry,
         usize,
@@ -1044,12 +1141,12 @@ fn reconstruct_branch_context_with(
         .iter()
         .rposition(|entry| matches!(entry, SessionEntry::Compaction { .. }));
     let start = latest.unwrap_or(0);
-    let context_entries = &path[start..];
+    let context_entries = transform_entries(&path[start..])?;
     let mut records = Vec::new();
     for (index, entry) in context_entries.iter().enumerate() {
         append_entry_records(entry, &mut records, true);
         if matches!(entry, SessionEntry::Custom { .. }) {
-            records.extend(project_custom(entry, index, context_entries)?);
+            records.extend(project_custom(entry, index, &context_entries)?);
         }
     }
     Ok(ReconstructedBranchContext {

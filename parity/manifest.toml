@@ -472,8 +472,8 @@ source = "packages/agent/src/harness/session/jsonl/codec.ts"
 rust = []
 status = "deliberate-divergence"
 allowlist_row = "pi-v4-only-session-format"
-replacement = "Native versioned log plus explicit Pi-v4 compatibility backend."
-reason = "The native log must represent replay completeness and other Rust state losslessly; the Pi-v4 writer rejects unrepresentable mutations."
+replacement = "Native versioned durable session log certified by the backend-generic storage/recovery conformance harness."
+reason = "Owner ruling 2026-08-25 — no backward compatibility is owed because there are no existing consumers; the native durable store ports serialized append, sequence validation, torn-tail recovery, atomic rewrite, and operation recovery, not the Pi-v4 byte format."
 
 [[mapping]]
 source = "packages/agent/test/harness/agent-harness-scaffold.test.ts"
@@ -1589,9 +1589,13 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/harness/session/context.test.ts"
-rust = []
-status = "planned"
-milestone = "M7"
+rust = [
+  "compaction_context_uses_latest_compaction_entry",
+  "session_context_caller_transform_after_compaction_boundary_on_both_backends",
+  "session_context_latest_compaction_behavior_on_both_backends",
+  "session_context_projector_and_deferred_behavior_on_both_backends",
+]
+status = "semantic-parity"
 
 [[mapping]]
 source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#7.7-7.8-and-10.10"
@@ -1714,32 +1718,57 @@ status = "semantic-parity"
 [[mapping]]
 source = "packages/agent/test/harness/session/jsonl-codec.test.ts"
 rust = []
-status = "planned"
-milestone = "M9"
+status = "deliberate-divergence"
+allowlist_row = "pi-v4-only-session-format"
+replacement = "Native versioned durable session format and backend-generic storage/recovery conformance."
+reason = "Owner ruling 2026-08-25 — no backward compatibility (no existing consumers); the native durable store ports the protocol semantics, not the Pi-v4 byte format."
 
 [[mapping]]
 source = "packages/agent/test/harness/session/jsonl-storage.test.ts"
 rust = []
-status = "planned"
-milestone = "M9"
+status = "deliberate-divergence"
+allowlist_row = "pi-v4-only-session-format"
+replacement = "Native file-backed SessionStorage/SessionRepository with serialized append, sequence validation, torn-tail repair, and atomic rewrite."
+reason = "Owner ruling 2026-08-25 — no backward compatibility (no existing consumers); the native durable store ports the protocol semantics, not the Pi-v4 byte format."
 
 [[mapping]]
 source = "packages/agent/test/harness/session/jsonl.test.ts"
 rust = []
-status = "planned"
-milestone = "M9"
+status = "deliberate-divergence"
+allowlist_row = "pi-v4-only-session-format"
+replacement = "Native file-backed repository and native session search source."
+reason = "Owner ruling 2026-08-25 — no backward compatibility (no existing consumers); the native durable store ports the protocol semantics, not the Pi-v4 byte format."
 
 [[mapping]]
 source = "packages/agent/test/harness/session/memory.test.ts"
-rust = []
-status = "planned"
-milestone = "M7"
+rust = [
+  "conformance::tests::memory_local_backend_storage_recovery_conformance",
+  "conformance::tests::memory_send_backend_storage_recovery_conformance",
+  "session_lane_views_share_injected_id_generator_on_both_backends",
+]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/harness/session/search.test.ts"
-rust = []
-status = "planned"
-milestone = "M7"
+rust = [
+  "session_search_scans_arbitrary_sources_on_both_backends",
+  "session_search_scans_repository_on_both_backends",
+]
+status = "semantic-parity"
+
+[[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#7.13-native-session-gate"
+rust = [
+  "conformance::tests::file_local_backend_storage_recovery_conformance",
+  "conformance::tests::file_send_backend_storage_recovery_conformance",
+  "session_atomic_fork_rewrite_publishes_complete_destination",
+  "session_concurrent_append_is_serialized",
+  "session_midfile_corruption_is_not_silently_repaired",
+  "session_native_records_carry_schema_versions",
+  "session_torn_tail_is_repaired_on_open",
+  "session_unterminated_valid_tail_is_repaired_on_open",
+]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/harness/skills.test.ts"

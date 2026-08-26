@@ -761,6 +761,7 @@ fn context_policy(
         base: Arc::new(DefaultContextPolicy),
         compaction: policy,
         session,
+        entry_transforms: Vec::new(),
         custom_entry_projector: Arc::new(OmitCustomSessionEntries),
     }
 }
@@ -773,6 +774,7 @@ fn local_context_policy(
         base: Rc::new(DefaultContextPolicy),
         compaction: policy,
         session,
+        entry_transforms: Vec::new(),
         custom_entry_projector: Rc::new(OmitCustomSessionEntries),
     }
 }
@@ -2462,6 +2464,7 @@ fn compaction_context_uses_latest_compaction_entry() {
             base: Arc::new(DefaultContextPolicy),
             compaction: Arc::new(FixedCompactionPolicy::only_forced()),
             session: harness_session(high_storage, "main"),
+            entry_transforms: Vec::new(),
             custom_entry_projector: Arc::new(OmitCustomSessionEntries),
         }
         .prepare_agent_records(
@@ -2505,6 +2508,7 @@ fn compaction_context_uses_latest_compaction_entry() {
             base: Arc::new(DefaultContextPolicy),
             compaction: Arc::new(FixedCompactionPolicy::only_forced()),
             session: harness_session(off_storage, "main"),
+            entry_transforms: Vec::new(),
             custom_entry_projector: Arc::new(OmitCustomSessionEntries),
         }
         .prepare_agent_records(
@@ -2578,6 +2582,7 @@ fn compaction_context_uses_latest_compaction_entry() {
             base: Arc::new(send_base),
             compaction: Arc::new(FixedCompactionPolicy::only_forced()),
             session: harness_session(send_authoritative_storage, "main"),
+            entry_transforms: Vec::new(),
             custom_entry_projector: Arc::new(OmitCustomSessionEntries),
         }
         .prepare_agent_records(
@@ -2625,6 +2630,7 @@ fn compaction_context_uses_latest_compaction_entry() {
                 base: Rc::new(local_base),
                 compaction: Rc::new(FixedCompactionPolicy::only_forced()),
                 session: local_harness_session(local_authoritative_storage, "main"),
+                entry_transforms: Vec::new(),
                 custom_entry_projector: Rc::new(OmitCustomSessionEntries),
             },
             state_view_with_options(&default_agent_state, &configured),

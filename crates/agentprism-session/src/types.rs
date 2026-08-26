@@ -94,7 +94,7 @@ pub struct EntryBase {
 
 /// One immutable branch-tree entry from Architecture v2 part 2 §7.2.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 #[allow(
     clippy::large_enum_variant,
     reason = "Architecture v2 part 2 §7.2 specifies SessionEntry::Message with AgentRecord directly"
@@ -215,7 +215,7 @@ impl SessionEntry {
 
 /// Entry content provisioned before a lane parent, sequence, and timestamp are assigned.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 #[allow(
     clippy::large_enum_variant,
     reason = "provisioned entries preserve the direct SessionEntry field shapes before base assignment"
@@ -384,7 +384,7 @@ pub struct OperationRecordBase {
 
 /// Persisted caller intent needed to resume an interrupted operation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum OperationIntent {
     /// Run the agent from normalized caller input.
     Run {
@@ -583,7 +583,7 @@ pub struct SignedUsageAdjustment {
 
 /// Lane-scoped operational record from Architecture v2 part 2 §7.2.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum OperationRecord {
     /// Durable operation start and resumable intent.
     Started {
@@ -768,7 +768,7 @@ pub enum SessionFact {
 
 /// One item in the authoritative native append log.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum SessionMutation {
     /// Immutable tree entry, optionally bound to and advancing a lane.
     Entry {

@@ -22,6 +22,10 @@ pub enum SessionErrorKind {
     InvalidQuery,
     /// A branch fork target is invalid.
     InvalidForkTarget,
+    /// A caller-supplied identifier or persisted value is invalid.
+    InvalidPayload,
+    /// An operation was cancelled before completion.
+    Cancelled,
     /// Backend I/O or synchronization failed.
     Storage,
 }

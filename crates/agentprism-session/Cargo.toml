@@ -8,12 +8,20 @@ repository = "https://github.com/agentprism/genai-agent-rs"
 description = "agentprism-session: immutable session entry tree, lanes and operation records, reducers and recovery, storage traits."
 publish = false
 
+[features]
+default = []
+conformance = []
+
 [dependencies]
 agentprism-core = { path = "../agentprism-core" }
 agentprism-ai = { path = "../agentprism-ai" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.145", features = ["raw_value"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 futures-executor = "0.3.31"
 static_assertions = "1.1.0"
+tempfile = "3.23.0"

@@ -124,10 +124,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentprism-compat-pi-jsonl"
-version = "0.1.0"
-
-[[package]]
 name = "agentprism-core"
 version = "0.1.0"
 dependencies = [
@@ -567,6 +563,8 @@ dependencies = [
  "serde",
  "serde_json",
  "static_assertions",
+ "tempfile",
+ "windows-sys",
 ]
 
 [[package]]
