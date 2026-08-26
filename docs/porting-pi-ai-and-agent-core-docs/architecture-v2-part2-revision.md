@@ -590,6 +590,8 @@ Pi remembers the field name in `thinkingSignature`.
 
 More importantly, endpoints such as OpenRouter can return a `reasoning_details` array. Pi appends each valid detail to an array, retains original order, and serializes the entire array into `thinkingSignature`. See `packages/ai/src/api/openai-completions.ts:500–790`.
 
+> Correction: At pin `8fa7eebd235355522c8104166b4f1f959b4e2f10`, Pi merges consecutive `reasoning.text` and consecutive `reasoning.summary` stream deltas into one logical detail before replay; encrypted details remain discrete. Text `signature` and common `id`/`format`/`index` metadata use Pi's `||=`/`??=` semantics, including omission after `JSON.stringify` when null/empty target metadata is followed by an omitted source field. The replay implementation therefore replaces the in-progress logical detail, completes it at a detail boundary or successful stream termination, and leaves it incomplete on failure. See `packages/ai/src/api/openai-completions.ts` (`appendOpenAIReasoningDetail` and the `reasoning_details` decoder branch) and `packages/ai/test/openai-completions-reasoning-details.test.ts`.
+
 On replay, Pi:
 
 1. first looks for structured reasoning details in a thinking block signature;

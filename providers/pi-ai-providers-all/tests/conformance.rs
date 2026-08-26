@@ -60,7 +60,7 @@ impl pi_ai_bedrock::LocalBedrockSigner for NoNetwork {
 #[test]
 fn pi_ai_providers_all_catalogs_match_pinned_publication() {
     // Pi basis: packages/ai/src/providers/all.ts and every imported generated
-    // `providers/data/*.json` catalog at c49906ec7.
+    // `providers/data/*.json` catalog at 8fa7eebd2.
     for provider in REMAINING_PROVIDER_IDS {
         let models = remaining_provider_models(provider).unwrap_or_else(|error| {
             panic!("{provider} catalog failed: {error}");
@@ -204,6 +204,29 @@ fn remaining_provider_catalogs_preserve_pinned_compat_and_headers_pi_exact() {
         copilot.common.headers.get("Editor-Version"),
         Some(&Some("vscode/1.107.0".into()))
     );
+}
+
+/// Architecture v2 part 2 §5.1, §5.2, and §10.7; pinned Pi basis:
+/// `packages/ai/test/zai-coding-plan-models.test.ts`,
+/// "uses API-equivalent reference costs for Coding Plan models".
+#[test]
+fn zai_coding_plan_catalog_costs_match_new_pin_pi_exact() {
+    for provider in ["zai", "zai-coding-cn"] {
+        let model = pinned_model(provider, "glm-5.3");
+        assert_eq!(
+            model.common.pricing.default.input,
+            MoneyRate::new(1_400_000)
+        );
+        assert_eq!(
+            model.common.pricing.default.output,
+            MoneyRate::new(4_400_000)
+        );
+        assert_eq!(
+            model.common.pricing.default.cache_read,
+            MoneyRate::new(260_000)
+        );
+        assert_eq!(model.common.pricing.default.cache_write, MoneyRate::new(0));
+    }
 }
 
 #[test]

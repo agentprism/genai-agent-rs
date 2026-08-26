@@ -12,6 +12,33 @@ use url::Url;
 mod support;
 use support::RecordingInteraction;
 
+/// Architecture v2 part 2 §5.1 and §10.7; pinned Pi basis:
+/// `packages/ai/scripts/generate-models.ts` and
+/// `packages/ai/src/providers/cloudflare-ai-gateway.ts`.
+#[test]
+fn cloudflare_gateway_catalog_mirrors_workers_ai_tool_models_pi_exact() {
+    let catalog = models().expect("Cloudflare AI Gateway catalog");
+    assert_eq!(catalog.len(), 60);
+    for id in [
+        "workers-ai/@cf/deepseek-ai/deepseek-v4-flash-0731",
+        "workers-ai/@cf/deepseek-ai/deepseek-v4-pro-0813",
+        "workers-ai/@cf/qwen/qwen3.8-27b",
+    ] {
+        let model = catalog
+            .iter()
+            .find(|model| model.common.model_ref.model.as_str() == id)
+            .unwrap_or_else(|| panic!("missing mirrored Workers AI model {id}"));
+        assert_eq!(
+            model.common.base_url.as_str(),
+            "https://gateway.ai.cloudflare.com/v1/%7BCLOUDFLARE_ACCOUNT_ID%7D/%7BCLOUDFLARE_GATEWAY_ID%7D/compat"
+        );
+        let ApiModelConfig::OpenAiCompletions(config) = &model.api else {
+            panic!("mirrored Workers AI model {id} must use OpenAI Completions")
+        };
+        assert_eq!(config.compat.send_session_affinity_headers, Some(true));
+    }
+}
+
 #[derive(Clone)]
 struct NoNetwork;
 

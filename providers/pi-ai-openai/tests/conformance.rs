@@ -103,6 +103,27 @@ fn wire_openai_completions_pi_exact() {
     assert_empty_assistant_omission_preserves_tool_result_bridge();
 }
 
+/// Architecture v2 part 2 §10.5 and §10.8; pinned Pi basis:
+/// `packages/ai/test/openai-completions-tool-choice.test.ts`,
+/// "omits toolChoice when no tools are provided".
+#[test]
+fn openai_tool_choice_is_omitted_without_active_tools_pi_exact() {
+    let model = base_fixture_model();
+    let context = one_user_context();
+    let options = lower_simple_options(
+        &model,
+        &context,
+        &SimpleGenerationOptions {
+            tool_choice: Some(ToolChoice::None),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        encode_options(&model, &context, options),
+        br#"{"model":"fixture-openai-model","messages":[{"role":"user","content":"hello"}],"stream":true,"stream_options":{"include_usage":true},"max_tokens":8192,"reasoning_effort":"none"}"#
+    );
+}
+
 /// Architecture v2 part 2 §10.2 and §10.8; pinned Pi basis:
 /// `packages/ai/test/openai-completions-reasoning-details.test.ts`.
 #[test]
@@ -182,6 +203,144 @@ data: [DONE]
     assert_eq!(
         items[1].json_bytes().expect("encrypted detail"),
         br#"{"type":"reasoning.encrypted","id":"e1","data":"cipher"}"#
+    );
+}
+
+/// Architecture v2 part 2 §10.2 and §10.8; pinned Pi basis:
+/// `packages/ai/test/openai-completions-reasoning-details.test.ts`,
+/// "merges consecutive text and summary reasoning_details deltas before replay".
+#[test]
+fn openai_chat_reasoning_detail_deltas_merge_before_replay_pi_exact() {
+    let events = decode_openai_completions_sse(
+        br#"data: {"id":"chat-merge","model":"fixture","choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","text":"The","index":0}]},"finish_reason":null}]}
+
+data: {"id":"chat-merge","model":"fixture","choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","text":" user wants the time.","signature":"sha256:text-signature","format":"openai-responses-v1","index":0}]},"finish_reason":null}]}
+
+data: {"id":"chat-merge","model":"fixture","choices":[{"delta":{"reasoning_details":[{"type":"reasoning.summary","summary":"Looked","index":0}]},"finish_reason":null}]}
+
+data: {"id":"chat-merge","model":"fixture","choices":[{"delta":{"reasoning_details":[{"type":"reasoning.summary","summary":" up time.","format":"openai-responses-v1","index":0}]},"finish_reason":null}]}
+
+data: {"id":"chat-merge","model":"fixture","choices":[{"delta":{"reasoning_details":[{"type":"reasoning.encrypted","id":"call_1","data":"encrypted-signature"}]},"finish_reason":null}]}
+
+data: {"id":"chat-merge","model":"fixture","choices":[{"delta":{"reasoning_details":[{"type":"reasoning.summary","summary":"After encrypted block.","format":"openai-responses-v1","index":0}]},"finish_reason":null}]}
+
+data: {"id":"chat-merge","model":"fixture","choices":[{"delta":{"content":"answer"},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+"#,
+        decode_context(),
+    );
+    let message = terminal_message(&events);
+    let expected = [
+        br#"{"type":"reasoning.text","text":"The user wants the time.","index":0,"signature":"sha256:text-signature","format":"openai-responses-v1"}"#.as_slice(),
+        br#"{"type":"reasoning.summary","summary":"Looked up time.","index":0,"format":"openai-responses-v1"}"#.as_slice(),
+        br#"{"type":"reasoning.encrypted","id":"call_1","data":"encrypted-signature"}"#.as_slice(),
+        br#"{"type":"reasoning.summary","summary":"After encrypted block.","format":"openai-responses-v1","index":0}"#.as_slice(),
+    ];
+    assert_eq!(message.replay.items.len(), expected.len());
+    for (item, expected) in message.replay.items.iter().zip(expected) {
+        assert_eq!(item.completeness, ReplayCompleteness::Complete);
+        assert_eq!(item.json_bytes().expect("reasoning detail"), expected);
+    }
+
+    let persisted = serde_json::to_vec(message).expect("persist merged assistant message");
+    let restored: AssistantMessage =
+        serde_json::from_slice(&persisted).expect("restore merged assistant message");
+    let mut turn_two = Context::new(None);
+    turn_two.messages.push(Message::Assistant(restored));
+    turn_two.messages.push(Message::User(UserMessage {
+        id: MessageId::new("user-2"),
+        content: vec![ContentBlock::Text {
+            id: ContentBlockId::new("user-text-2"),
+            text: "continue".into(),
+        }],
+        timestamp: Timestamp::from_unix_millis(1_700_000_000_001),
+    }));
+    let body = encode_direct(
+        &base_fixture_model(),
+        &turn_two,
+        OpenAiReasoningPlan::disabled(),
+        OrderedJsonObject::new(),
+    );
+    assert_eq!(
+        body,
+        br#"{"model":"fixture-openai-model","messages":[{"role":"assistant","content":"answer","reasoning_details":[{"type":"reasoning.text","text":"The user wants the time.","index":0,"signature":"sha256:text-signature","format":"openai-responses-v1"},{"type":"reasoning.summary","summary":"Looked up time.","index":0,"format":"openai-responses-v1"},{"type":"reasoning.encrypted","id":"call_1","data":"encrypted-signature"},{"type":"reasoning.summary","summary":"After encrypted block.","format":"openai-responses-v1","index":0}]},{"role":"user","content":"continue"}],"stream":true,"stream_options":{"include_usage":true},"reasoning_effort":"none"}"#
+    );
+}
+
+/// Architecture v2 part 2 §1.5, §10.2, and §10.8; pinned Pi basis:
+/// `appendOpenAIReasoningDetail` in `packages/ai/src/api/openai-completions.ts`.
+/// Null/empty target metadata followed by an omitted source field becomes
+/// JavaScript `undefined` and is therefore omitted by `JSON.stringify`.
+#[test]
+fn openai_chat_reasoning_detail_nullish_metadata_omission_survives_round_trip_pi_exact() {
+    let events = decode_openai_completions_sse(
+        br#"data: {"id":"chat-nullish","model":"fixture","choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","text":"A","id":null,"format":"","signature":null}]} ,"finish_reason":null}]}
+
+data: {"id":"chat-nullish","model":"fixture","choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","text":"B"}]},"finish_reason":null}]}
+
+data: {"id":"chat-nullish","model":"fixture","choices":[{"delta":{"content":"answer"},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+"#,
+        decode_context(),
+    );
+    let message = terminal_message(&events);
+    assert_eq!(message.replay.items.len(), 1);
+    assert_eq!(
+        message.replay.items[0].completeness,
+        ReplayCompleteness::Complete
+    );
+    assert_eq!(
+        message.replay.items[0]
+            .json_bytes()
+            .expect("merged reasoning detail"),
+        br#"{"type":"reasoning.text","text":"AB"}"#
+    );
+
+    let persisted = serde_json::to_vec(message).expect("persist assistant message");
+    let restored: AssistantMessage =
+        serde_json::from_slice(&persisted).expect("restore assistant message");
+    let mut turn_two = Context::new(None);
+    turn_two.messages.push(Message::Assistant(restored));
+    turn_two.messages.push(Message::User(UserMessage {
+        id: MessageId::new("user-2"),
+        content: vec![ContentBlock::Text {
+            id: ContentBlockId::new("user-text-2"),
+            text: "continue".into(),
+        }],
+        timestamp: Timestamp::from_unix_millis(1_700_000_000_001),
+    }));
+    assert_eq!(
+        encode_direct(
+            &base_fixture_model(),
+            &turn_two,
+            OpenAiReasoningPlan::disabled(),
+            OrderedJsonObject::new(),
+        ),
+        br#"{"model":"fixture-openai-model","messages":[{"role":"assistant","content":"answer","reasoning_details":[{"type":"reasoning.text","text":"AB"}]},{"role":"user","content":"continue"}],"stream":true,"stream_options":{"include_usage":true},"reasoning_effort":"none"}"#
+    );
+}
+
+/// Architecture v2 part 2 §10.2; an unterminated mergeable provider artifact
+/// remains incomplete and cannot be replayed after a transport failure.
+#[test]
+fn openai_chat_partial_reasoning_detail_is_not_replayable() {
+    let mut decoder = pi_ai_openai::OpenAiCompletionsSseDecoder::new(decode_context());
+    let mut events = decoder.take_events();
+    events.extend(decoder.push(
+        br#"data: {"id":"chat-partial","model":"fixture","choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","text":"partial","index":0}]},"finish_reason":null}]}
+
+"#,
+    ));
+    events.extend(decoder.fail_transport("body", "disconnected"));
+    let message = terminal_message(&events);
+    assert_eq!(message.replay.items.len(), 1);
+    assert_eq!(
+        message.replay.items[0].completeness,
+        ReplayCompleteness::Incomplete
     );
 }
 
@@ -421,6 +580,129 @@ fn openai_reasoning_format_matches_compat() {
             .expect("unmapped Ant Ling wire")
             .contains(r#""reasoning":"#)
     );
+}
+
+/// Architecture v2 part 2 §5.1, §10.5, and §10.7; pinned Pi basis:
+/// `packages/ai/test/openrouter-reasoning-options.test.ts`.
+#[test]
+fn openrouter_reasoning_metadata_and_payloads_pi_exact() {
+    let catalog = openrouter_models().expect("OpenRouter catalog");
+    let config = |id: &str| {
+        let model = catalog
+            .iter()
+            .find(|model| model.common.model_ref.model.as_str() == id)
+            .unwrap_or_else(|| panic!("missing OpenRouter model {id}"));
+        let ApiModelConfig::OpenAiCompletions(config) = &model.api else {
+            panic!("OpenRouter model {id} must use OpenAI Completions")
+        };
+        config
+    };
+
+    assert_eq!(
+        config("aion-labs/aion-2.0").thinking_levels,
+        ThinkingLevelMap {
+            off: Some(LevelSupport::Unsupported),
+            ..Default::default()
+        }
+    );
+    assert_eq!(
+        config("anthropic/claude-fable-5").thinking_levels,
+        ThinkingLevelMap {
+            off: Some(LevelSupport::Unsupported),
+            minimal: Some(LevelSupport::Unsupported),
+            low: Some(LevelSupport::Value(OpenAiThinkingValue::Effort(
+                "low".into()
+            ))),
+            medium: Some(LevelSupport::Value(OpenAiThinkingValue::Effort(
+                "medium".into()
+            ))),
+            high: Some(LevelSupport::Value(OpenAiThinkingValue::Effort(
+                "high".into()
+            ))),
+            xhigh: Some(LevelSupport::Value(OpenAiThinkingValue::Effort(
+                "xhigh".into()
+            ))),
+            max: Some(LevelSupport::Value(OpenAiThinkingValue::Effort(
+                "max".into()
+            ))),
+        }
+    );
+    assert_eq!(
+        config("bytedance-seed/seed-2.0-code").thinking_levels.off,
+        Some(LevelSupport::Value(OpenAiThinkingValue::Effort(
+            "none".into()
+        )))
+    );
+    assert_eq!(
+        config("openrouter/auto").thinking_levels,
+        ThinkingLevelMap::default()
+    );
+
+    let mut mandatory = base_fixture_model();
+    mandatory.common.base_url = Url::parse("https://openrouter.ai/api/v1").expect("URL");
+    let ApiModelConfig::OpenAiCompletions(mandatory_config) = &mut mandatory.api else {
+        unreachable!()
+    };
+    mandatory_config.compat.thinking_format = Some(OpenAiThinkingFormat::OpenRouter);
+    mandatory_config.thinking_levels = ThinkingLevelMap {
+        off: Some(LevelSupport::Unsupported),
+        minimal: Some(LevelSupport::Unsupported),
+        low: Some(LevelSupport::Value(OpenAiThinkingValue::Effort(
+            "low".into(),
+        ))),
+        medium: Some(LevelSupport::Unsupported),
+        high: Some(LevelSupport::Value(OpenAiThinkingValue::Effort(
+            "high".into(),
+        ))),
+        xhigh: Some(LevelSupport::Unsupported),
+        max: Some(LevelSupport::Value(OpenAiThinkingValue::Effort(
+            "max".into(),
+        ))),
+    };
+
+    let background = encode_options(
+        &mandatory,
+        &one_user_context(),
+        lower_simple_options(
+            &mandatory,
+            &one_user_context(),
+            &SimpleGenerationOptions::default(),
+        ),
+    );
+    let background: Value = serde_json::from_slice(&background).expect("background payload");
+    assert!(background.get("reasoning").is_none());
+
+    let explicit = encode_options(
+        &mandatory,
+        &one_user_context(),
+        lower_simple_options(
+            &mandatory,
+            &one_user_context(),
+            &SimpleGenerationOptions {
+                reasoning: Some(pi_ai::ReasoningLevel::Low),
+                ..Default::default()
+            },
+        ),
+    );
+    let explicit: Value = serde_json::from_slice(&explicit).expect("explicit payload");
+    assert_eq!(explicit["reasoning"], serde_json::json!({"effort":"low"}));
+
+    let mut optional = mandatory.clone();
+    let ApiModelConfig::OpenAiCompletions(optional_config) = &mut optional.api else {
+        unreachable!()
+    };
+    optional_config.thinking_levels = ThinkingLevelMap::default();
+    let optional = encode_options(
+        &optional,
+        &one_user_context(),
+        lower_simple_options(
+            &optional,
+            &one_user_context(),
+            &SimpleGenerationOptions::default(),
+        ),
+    );
+    let optional: Value = serde_json::from_slice(&optional).expect("optional payload");
+    assert_eq!(optional["reasoning"], serde_json::json!({"effort":"none"}));
 }
 
 /// Architecture v2 part 2 §10.5; pinned Pi basis:
@@ -1371,13 +1653,28 @@ fn openai_local_stream_body_error_preserves_partial_content() {
 fn openai_provider_catalogs_match_pinned_counts_and_profiles() {
     let deepseek = deepseek_models().expect("DeepSeek catalog");
     let openrouter = openrouter_models().expect("OpenRouter catalog");
-    assert_eq!(deepseek.len(), 2);
+    assert_eq!(deepseek.len(), 3);
     assert_eq!(openrouter.len(), 346);
     assert!(deepseek.iter().all(|model| matches!(
         &model.api,
         ApiModelConfig::OpenAiCompletions(config)
             if config.compat.thinking_format == Some(OpenAiThinkingFormat::DeepSeek)
     )));
+    let vision = deepseek
+        .iter()
+        .find(|model| model.common.model_ref.model.as_str() == "deepseek-v4-flash-vision-exp")
+        .expect("new-pin DeepSeek vision model");
+    assert_eq!(
+        vision.common.modalities.input,
+        [Modality::Text, Modality::Image].into_iter().collect()
+    );
+    assert_eq!(vision.common.pricing.default.input, MoneyRate::new(140_000));
+    assert_eq!(
+        vision.common.pricing.default.output,
+        MoneyRate::new(280_000)
+    );
+    assert_eq!(vision.common.limits.context_window, 1_000_000);
+    assert_eq!(vision.common.limits.max_output_tokens, 384_000);
     assert!(openrouter.iter().all(|model| matches!(
         &model.api,
         ApiModelConfig::OpenAiCompletions(config)
@@ -2595,7 +2892,11 @@ fn is_sensitive_header(name: &str) -> bool {
 
 fn assert_native_tool_choice_wire_bodies() {
     let model = base_fixture_model();
-    let context = one_user_context();
+    let mut context = one_user_context();
+    context
+        .tools
+        .push(tool_spec("read_file", object_schema(), None));
+    let tools = r#""tools":[{"type":"function","function":{"name":"read_file","description":"read_file tool","parameters":{"type":"object","properties":{},"required":[]},"strict":false}}],"#;
     let named_function = OrderedJsonObject::from_iter([
         ("type", OrderedJsonValue::from("function")),
         (
@@ -2606,34 +2907,34 @@ fn assert_native_tool_choice_wire_bodies() {
     let cases = [
         (
             OpenAiCompletionsToolChoice::Auto,
-            br#"{"model":"fixture-openai-model","messages":[{"role":"user","content":"hello"}],"stream":true,"stream_options":{"include_usage":true},"tool_choice":"auto","reasoning_effort":"none"}"#.as_slice(),
+            format!(r#"{{"model":"fixture-openai-model","messages":[{{"role":"user","content":"hello"}}],"stream":true,"stream_options":{{"include_usage":true}},{tools}"tool_choice":"auto","reasoning_effort":"none"}}"#).into_bytes(),
         ),
         (
             OpenAiCompletionsToolChoice::None,
-            br#"{"model":"fixture-openai-model","messages":[{"role":"user","content":"hello"}],"stream":true,"stream_options":{"include_usage":true},"tool_choice":"none","reasoning_effort":"none"}"#.as_slice(),
+            format!(r#"{{"model":"fixture-openai-model","messages":[{{"role":"user","content":"hello"}}],"stream":true,"stream_options":{{"include_usage":true}},{tools}"tool_choice":"none","reasoning_effort":"none"}}"#).into_bytes(),
         ),
         (
             OpenAiCompletionsToolChoice::Required,
-            br#"{"model":"fixture-openai-model","messages":[{"role":"user","content":"hello"}],"stream":true,"stream_options":{"include_usage":true},"tool_choice":"required","reasoning_effort":"none"}"#.as_slice(),
+            format!(r#"{{"model":"fixture-openai-model","messages":[{{"role":"user","content":"hello"}}],"stream":true,"stream_options":{{"include_usage":true}},{tools}"tool_choice":"required","reasoning_effort":"none"}}"#).into_bytes(),
         ),
         (
             OpenAiCompletionsToolChoice::Function {
                 name: "read_file".into(),
             },
-            br#"{"model":"fixture-openai-model","messages":[{"role":"user","content":"hello"}],"stream":true,"stream_options":{"include_usage":true},"tool_choice":{"type":"function","function":{"name":"read_file"}},"reasoning_effort":"none"}"#.as_slice(),
+            format!(r#"{{"model":"fixture-openai-model","messages":[{{"role":"user","content":"hello"}}],"stream":true,"stream_options":{{"include_usage":true}},{tools}"tool_choice":{{"type":"function","function":{{"name":"read_file"}}}},"reasoning_effort":"none"}}"#).into_bytes(),
         ),
         (
             OpenAiCompletionsToolChoice::Custom {
                 name: "grammar".into(),
             },
-            br#"{"model":"fixture-openai-model","messages":[{"role":"user","content":"hello"}],"stream":true,"stream_options":{"include_usage":true},"tool_choice":{"type":"custom","custom":{"name":"grammar"}},"reasoning_effort":"none"}"#.as_slice(),
+            format!(r#"{{"model":"fixture-openai-model","messages":[{{"role":"user","content":"hello"}}],"stream":true,"stream_options":{{"include_usage":true}},{tools}"tool_choice":{{"type":"custom","custom":{{"name":"grammar"}}}},"reasoning_effort":"none"}}"#).into_bytes(),
         ),
         (
             OpenAiCompletionsToolChoice::AllowedTools {
                 mode: OpenAiAllowedToolsMode::Required,
                 tools: OrderedJsonArray::from_iter([named_function]),
             },
-            br#"{"model":"fixture-openai-model","messages":[{"role":"user","content":"hello"}],"stream":true,"stream_options":{"include_usage":true},"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"required","tools":[{"type":"function","function":{"name":"read_file"}}]}},"reasoning_effort":"none"}"#.as_slice(),
+            format!(r#"{{"model":"fixture-openai-model","messages":[{{"role":"user","content":"hello"}}],"stream":true,"stream_options":{{"include_usage":true}},{tools}"tool_choice":{{"type":"allowed_tools","allowed_tools":{{"mode":"required","tools":[{{"type":"function","function":{{"name":"read_file"}}}}]}}}},"reasoning_effort":"none"}}"#).into_bytes(),
         ),
     ];
 

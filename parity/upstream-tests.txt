@@ -1,4 +1,4 @@
-# Generated from earendil-works/pi c49906ec77788625aacbdc53ebca6fbe65bd20f5.
+# Generated from earendil-works/pi 8fa7eebd235355522c8104166b4f1f959b4e2f10.
 # One pinned upstream test path per line, sorted bytewise for offline CI checks.
 packages/agent/test/agent-loop.test.ts
 packages/agent/test/agent.test.ts
@@ -127,6 +127,7 @@ packages/ai/test/openrouter-cache-control-models.test.ts
 packages/ai/test/openrouter-cache-write-repro.test.ts
 packages/ai/test/openrouter-images.test.ts
 packages/ai/test/openrouter-oauth.test.ts
+packages/ai/test/openrouter-reasoning-options.test.ts
 packages/ai/test/overflow.test.ts
 packages/ai/test/pi-messages.test.ts
 packages/ai/test/provider-error-body-passthrough.test.ts

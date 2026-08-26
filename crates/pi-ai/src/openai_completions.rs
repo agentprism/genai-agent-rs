@@ -685,6 +685,7 @@ pub fn encode_openai_completions(
         &tool_plan.grammar_input_properties,
     )?;
     let mut tools = tool_plan.tools;
+    let has_active_tools = tools.as_ref().is_some_and(|tools| !tools.is_empty());
     let cache_control = cache_control(context.compat, options.cache_retention);
     if let Some(cache_control) = cache_control.as_ref() {
         apply_cache_control(&mut messages, tools.as_mut(), cache_control);
@@ -736,13 +737,12 @@ pub fn encode_openai_completions(
         params.insert("temperature", temperature);
     }
     if let Some(tools) = tools {
-        let has_active_tools = !tools.is_empty();
         params.insert("tools", tools);
         if has_active_tools && context.compat.zai_tool_stream.unwrap_or(false) {
             params.insert("tool_stream", true);
         }
     }
-    if let Some(tool_choice) = options.tool_choice.as_ref() {
+    if has_active_tools && let Some(tool_choice) = options.tool_choice.as_ref() {
         params.insert("tool_choice", encode_openai_tool_choice(tool_choice));
     }
     encode_reasoning(

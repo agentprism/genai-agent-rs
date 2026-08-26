@@ -198,6 +198,18 @@ struct GrammarToolInputBuffer {
     closed: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MergeableReasoningDetailKind {
+    Text,
+    Summary,
+}
+
+struct PendingReasoningDetail {
+    item_id: ReplayItemId,
+    kind: MergeableReasoningDetailKind,
+    detail: Value,
+}
+
 struct DecodeState {
     context: OpenAiCompletionsDecodeContext,
     assembler: Option<AssistantAssembler>,
@@ -208,6 +220,7 @@ struct DecodeState {
     tools: Vec<ToolBlock>,
     tools_by_id: HashMap<String, usize>,
     reasoning_field_recorded: bool,
+    pending_reasoning_detail: Option<PendingReasoningDetail>,
     next_replay_ordinal: u32,
     response_id: Option<String>,
     response_model: Option<ModelId>,
@@ -228,6 +241,7 @@ impl DecodeState {
             tools: Vec::new(),
             tools_by_id: HashMap::new(),
             reasoning_field_recorded: false,
+            pending_reasoning_detail: None,
             next_replay_ordinal: 0,
             response_id: None,
             response_model: None,
@@ -371,21 +385,63 @@ impl DecodeState {
                 .iter()
                 .filter(|detail| valid_reasoning_detail(detail))
             {
-                let block_id = self.ensure_thinking_block()?;
-                let bytes = OrderedJsonWriter::to_vec(&OrderedJsonValue::from(detail.clone()))
-                    .map_err(|error| {
-                        OpenAiCompletionsDecodeError::new(format!(
-                            "failed to preserve reasoning detail: {error}"
-                        ))
-                    })?;
-                self.record_replay(
-                    ReplayTarget::ContentBlock(block_id.clone()),
-                    OPENAI_CHAT_REASONING_DETAIL_KIND,
-                    ReplayDataOperation::ReplaceJsonBytes(bytes),
-                )?;
+                self.preserve_reasoning_detail(detail)?;
             }
         }
         Ok(())
+    }
+
+    fn preserve_reasoning_detail(
+        &mut self,
+        detail: &Value,
+    ) -> Result<(), OpenAiCompletionsDecodeError> {
+        let kind = mergeable_reasoning_detail_kind(detail);
+        if let Some(kind) = kind
+            && self
+                .pending_reasoning_detail
+                .as_ref()
+                .is_some_and(|pending| pending.kind == kind)
+        {
+            let (item_id, bytes) = {
+                let pending = self
+                    .pending_reasoning_detail
+                    .as_mut()
+                    .expect("matching pending reasoning detail checked above");
+                merge_reasoning_detail(&mut pending.detail, detail, kind)?;
+                let bytes = reasoning_detail_bytes(&pending.detail)?;
+                (pending.item_id.clone(), bytes)
+            };
+            return self.emit(AssistantEvent::ReplayData {
+                item_id,
+                operation: ReplayDataOperation::ReplaceJsonBytes(bytes),
+            });
+        }
+
+        self.finish_pending_reasoning_detail()?;
+        let block_id = self.ensure_thinking_block()?;
+        let bytes = reasoning_detail_bytes(detail)?;
+        if let Some(kind) = kind {
+            let item_id = self.start_replay(
+                ReplayTarget::ContentBlock(block_id),
+                OPENAI_CHAT_REASONING_DETAIL_KIND,
+            )?;
+            self.emit(AssistantEvent::ReplayData {
+                item_id: item_id.clone(),
+                operation: ReplayDataOperation::ReplaceJsonBytes(bytes),
+            })?;
+            self.pending_reasoning_detail = Some(PendingReasoningDetail {
+                item_id,
+                kind,
+                detail: detail.clone(),
+            });
+            Ok(())
+        } else {
+            self.record_replay(
+                ReplayTarget::ContentBlock(block_id),
+                OPENAI_CHAT_REASONING_DETAIL_KIND,
+                ReplayDataOperation::ReplaceJsonBytes(bytes),
+            )
+        }
     }
 
     fn update_usage(&mut self, value: &Value) -> Result<(), OpenAiCompletionsDecodeError> {
@@ -615,6 +671,19 @@ impl DecodeState {
         kind: &str,
         operation: ReplayDataOperation,
     ) -> Result<(), OpenAiCompletionsDecodeError> {
+        let item_id = self.start_replay(target, kind)?;
+        self.emit(AssistantEvent::ReplayData {
+            item_id: item_id.clone(),
+            operation,
+        })?;
+        self.emit(AssistantEvent::ReplayItemFinished { item_id })
+    }
+
+    fn start_replay(
+        &mut self,
+        target: ReplayTarget,
+        kind: &str,
+    ) -> Result<ReplayItemId, OpenAiCompletionsDecodeError> {
         let ordinal = self.next_replay_ordinal;
         self.next_replay_ordinal = self.next_replay_ordinal.saturating_add(1);
         let item_id = ReplayItemId::new(format!(
@@ -628,11 +697,16 @@ impl DecodeState {
             kind: ReplayKind::new(kind),
             applicability: ReplayApplicability::ExactProviderApiModel,
         })?;
-        self.emit(AssistantEvent::ReplayData {
-            item_id: item_id.clone(),
-            operation,
-        })?;
-        self.emit(AssistantEvent::ReplayItemFinished { item_id })
+        Ok(item_id)
+    }
+
+    fn finish_pending_reasoning_detail(&mut self) -> Result<(), OpenAiCompletionsDecodeError> {
+        let Some(pending) = self.pending_reasoning_detail.take() else {
+            return Ok(());
+        };
+        self.emit(AssistantEvent::ReplayItemFinished {
+            item_id: pending.item_id,
+        })
     }
 
     fn finish(&mut self) {
@@ -642,6 +716,13 @@ impl DecodeState {
             } else {
                 AssistantFinishReason::ToolUse
             });
+        }
+        if self.finish_reason.is_some()
+            && self.finish_error.is_none()
+            && let Err(error) = self.finish_pending_reasoning_detail()
+        {
+            self.fail(error.to_string());
+            return;
         }
         for block_id in self.blocks.clone() {
             if let Some(position) = self.tools.iter().position(|tool| tool.block_id == block_id) {
@@ -867,6 +948,76 @@ fn valid_reasoning_detail(value: &Value) -> bool {
         }
         _ => false,
     }
+}
+
+fn mergeable_reasoning_detail_kind(value: &Value) -> Option<MergeableReasoningDetailKind> {
+    match value.get("type").and_then(Value::as_str) {
+        Some("reasoning.text") => Some(MergeableReasoningDetailKind::Text),
+        Some("reasoning.summary") => Some(MergeableReasoningDetailKind::Summary),
+        _ => None,
+    }
+}
+
+fn merge_reasoning_detail(
+    target: &mut Value,
+    incoming: &Value,
+    kind: MergeableReasoningDetailKind,
+) -> Result<(), OpenAiCompletionsDecodeError> {
+    let target = target.as_object_mut().ok_or_else(|| {
+        OpenAiCompletionsDecodeError::new("pending reasoning detail is not an object")
+    })?;
+    let incoming = incoming.as_object().ok_or_else(|| {
+        OpenAiCompletionsDecodeError::new("incoming reasoning detail is not an object")
+    })?;
+    let field = match kind {
+        MergeableReasoningDetailKind::Text => "text",
+        MergeableReasoningDetailKind::Summary => "summary",
+    };
+    let fragment = incoming
+        .get(field)
+        .and_then(Value::as_str)
+        .expect("validated reasoning detail string");
+    match target.get_mut(field) {
+        Some(Value::String(value)) => value.push_str(fragment),
+        _ => unreachable!("validated pending reasoning detail string"),
+    }
+
+    if kind == MergeableReasoningDetailKind::Text {
+        merge_reasoning_detail_common_field(target, incoming, "signature", |value| {
+            value.is_null() || value.as_str().is_some_and(str::is_empty)
+        });
+    }
+    merge_reasoning_detail_common_field(target, incoming, "id", |value| value.is_null());
+    merge_reasoning_detail_common_field(target, incoming, "format", |value| {
+        value.as_str().is_some_and(str::is_empty)
+    });
+    merge_reasoning_detail_common_field(target, incoming, "index", |value| value.is_null());
+    Ok(())
+}
+
+fn merge_reasoning_detail_common_field(
+    target: &mut Map<String, Value>,
+    incoming: &Map<String, Value>,
+    field: &str,
+    is_missing: impl FnOnce(&Value) -> bool,
+) {
+    if target.get(field).is_none_or(is_missing) {
+        if let Some(value) = incoming.get(field) {
+            target.insert(field.into(), value.clone());
+        } else {
+            // Pi's `??=` / `||=` assigns JavaScript `undefined` when the
+            // incoming detail omits the field. `JSON.stringify` then omits
+            // the key, so remove a prior null/empty value from the replay
+            // artifact rather than retaining it.
+            target.remove(field);
+        }
+    }
+}
+
+fn reasoning_detail_bytes(value: &Value) -> Result<Vec<u8>, OpenAiCompletionsDecodeError> {
+    OrderedJsonWriter::to_vec(&OrderedJsonValue::from(value.clone())).map_err(|error| {
+        OpenAiCompletionsDecodeError::new(format!("failed to preserve reasoning detail: {error}"))
+    })
 }
 
 fn usage_u64(usage: &Map<String, Value>, name: &str) -> u64 {
