@@ -1,7 +1,8 @@
 {
   "schemaVersion": 1,
-  "piCommit": "c49906ec77788625aacbdc53ebca6fbe65bd20f5",
-  "captureMode": "credential-backed-local-proxy",
+  "piCommit": "8fa7eebd235355522c8104166b4f1f959b4e2f10",
+  "providerResponseCapturedAtPiCommit": "c49906ec77788625aacbdc53ebca6fbe65bd20f5",
+  "captureMode": "hermetic-replay-of-credential-response",
   "results": [
     {
       "family": "openai-completions",
@@ -10,17 +11,17 @@
     },
     {
       "family": "openai-completions",
-      "case": "signed-thinking-replay",
-      "status": "captured"
-    },
-    {
-      "family": "openai-completions",
       "case": "one-tool-call",
       "status": "captured"
     },
     {
       "family": "openai-completions",
       "case": "tool-results",
+      "status": "captured"
+    },
+    {
+      "family": "openai-completions",
+      "case": "signed-thinking-replay",
       "status": "captured"
     },
     {
@@ -30,17 +31,17 @@
     },
     {
       "family": "anthropic-messages",
-      "case": "signed-thinking-replay",
-      "status": "captured"
-    },
-    {
-      "family": "anthropic-messages",
       "case": "one-tool-call",
       "status": "captured"
     },
     {
       "family": "anthropic-messages",
       "case": "tool-results",
+      "status": "captured"
+    },
+    {
+      "family": "anthropic-messages",
+      "case": "signed-thinking-replay",
       "status": "captured"
     }
   ]

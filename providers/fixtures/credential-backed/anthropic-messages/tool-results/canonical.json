@@ -3,7 +3,7 @@
   "family": "anthropic-messages",
   "case": "tool-results",
   "description": "Existing assistant tool call and text tool result.",
-  "piCommit": "c49906ec77788625aacbdc53ebca6fbe65bd20f5",
+  "piCommit": "8fa7eebd235355522c8104166b4f1f959b4e2f10",
   "model": {
     "id": "anthropic/claude-haiku-4.5",
     "name": "Credential-backed OpenRouter Anthropic fixture model",
@@ -124,7 +124,7 @@
       "authorization": "[REDACTED]"
     },
     "maxRetries": 0,
-    "timeoutMs": 60000
+    "timeoutMs": 10000
   },
   "entrypoint": "stream",
   "turnTwoAppend": [
@@ -138,5 +138,6 @@
     "timestamp": 1700000000000,
     "sessionId": "session-m4-00000000"
   },
-  "providerGeneratedValuesCapturedVerbatim": true
+  "providerGeneratedValuesCapturedVerbatim": true,
+  "providerResponseCapturedAtPiCommit": "c49906ec77788625aacbdc53ebca6fbe65bd20f5"
 }

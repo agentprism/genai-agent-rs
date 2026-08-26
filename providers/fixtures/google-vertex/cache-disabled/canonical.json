@@ -3,7 +3,7 @@
   "family": "google-vertex",
   "case": "cache-disabled",
   "description": "Prompt caching explicitly disabled.",
-  "piCommit": "c49906ec77788625aacbdc53ebca6fbe65bd20f5",
+  "piCommit": "8fa7eebd235355522c8104166b4f1f959b4e2f10",
   "model": {
     "id": "gemini-3-fixture",
     "name": "Fixture Google Model",

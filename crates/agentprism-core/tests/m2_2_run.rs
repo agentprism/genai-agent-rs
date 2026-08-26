@@ -3,7 +3,7 @@ use agentprism_core::*;
 use futures_executor::block_on;
 use futures_util::{StreamExt, stream};
 use serde_json::json;
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::rc::Rc;
 use std::sync::{
     Arc, Mutex, MutexGuard,
@@ -1215,6 +1215,68 @@ struct RecordingRuntime {
     requests: Arc<Mutex<Vec<ModelRequest>>>,
 }
 
+#[derive(Clone)]
+struct ProjectingRecordingRuntime {
+    inner: ScriptedRuntime,
+    requests: Arc<Mutex<Vec<ModelRequest>>>,
+    target: ModelDescriptor,
+}
+
+impl ModelRuntime for ProjectingRecordingRuntime {
+    fn stream(
+        &self,
+        mut request: ModelRequest,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<AssistantStream, RequestStartError>> {
+        Box::pin(async move {
+            request.context = transform_context_for_model(
+                &request.context,
+                &self.target,
+                &HandoffPolicy::default(),
+                &CanonicalApiFamilyHandoff,
+            )
+            .map_err(|error| {
+                RequestStartError::new(RequestStartErrorKind::InvalidRequest, error.to_string())
+                    .with_model(request.model.clone())
+            })?
+            .context;
+            lock(&self.requests).push(request.clone());
+            ModelRuntime::stream(&self.inner, request, cancellation).await
+        })
+    }
+}
+
+fn scripted_target_model() -> ModelDescriptor {
+    ModelDescriptor {
+        common: CommonModelDescriptor {
+            model_ref: ModelRef::new("scripted", "test-model"),
+            display_name: "Scripted test model".into(),
+            base_url: "https://scripted.invalid/v1".parse().unwrap(),
+            modalities: ModalityCapabilities {
+                input: BTreeSet::from([Modality::Text]),
+                output: BTreeSet::from([Modality::Text]),
+            },
+            limits: ModelLimits {
+                context_window: 16_384,
+                max_output_tokens: 4_096,
+            },
+            pricing: ModelPricing {
+                default: TokenPriceRates::default(),
+                request_wide_tiers: Vec::new(),
+                cache_write_retention: CacheWriteRetentionPricing::default(),
+            },
+            reasoning: true,
+            headers: HeaderMapSpec::new(),
+        },
+        api: ApiModelConfig::Custom(CustomApiModelConfig {
+            api: ApiId::new("scripted"),
+            schema_version: 1,
+            value: serde_json::value::to_raw_value(&json!({})).unwrap(),
+        }),
+        extensions: ExtensionMap::new(),
+    }
+}
+
 impl ModelRuntime for RecordingRuntime {
     fn stream(
         &self,
@@ -1244,6 +1306,60 @@ fn agent_retry_last_turn_reuses_last_valid_request_boundary() {
     collect(agent.retry_last_turn(CancellationToken::new()).unwrap());
     let requests = lock(&requests);
     assert_eq!(requests[0].context.messages, requests[1].context.messages);
+    assert!(agent.state().transcript.iter().any(|record| {
+        assistant_from(record)
+            .is_some_and(|message| message.finish.reason == AssistantFinishReason::Error)
+    }));
+}
+
+#[test]
+fn agent_failed_assistant_is_omitted_from_next_provider_projection() {
+    // Architecture v2 part 2 §§2.1, 2.2, 4.3, and exact §10.9 name.
+    // Pi basis at the governing pin: packages/agent/src/agent-loop.ts:166-225
+    // commits the failed terminal assistant before ending the run; then
+    // packages/ai/src/api/transform-messages.ts:185-197 omits that durable
+    // failed assistant from a later provider projection.
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let runtime = ProjectingRecordingRuntime {
+        inner: ScriptedRuntime::new([
+            text_response("partial").failing(error()),
+            text_response("recovered"),
+        ]),
+        requests: requests.clone(),
+        target: scripted_target_model(),
+    };
+    let mut agent = Agent::new(Arc::new(runtime), state(), ToolRegistry::new()).unwrap();
+
+    collect(agent.prompt_records([user("user-1", "first attempt")], CancellationToken::new()));
+    assert!(agent.state().transcript.iter().any(|record| {
+        assistant_from(record)
+            .is_some_and(|message| message.finish.reason == AssistantFinishReason::Error)
+    }));
+
+    collect(agent.prompt_records([user("user-2", "retry cleanly")], CancellationToken::new()));
+
+    let requests = lock(&requests);
+    assert_eq!(requests.len(), 2);
+    assert!(matches!(
+        requests[0].context.messages.as_slice(),
+        [Message::User(_)]
+    ));
+    assert_eq!(
+        requests[1]
+            .context
+            .messages
+            .iter()
+            .filter(|message| matches!(message, Message::User(_)))
+            .count(),
+        2
+    );
+    assert!(requests[1].context.messages.iter().all(|message| {
+        !matches!(
+            message,
+            Message::Assistant(assistant)
+                if assistant.finish.reason == AssistantFinishReason::Error
+        )
+    }));
     assert!(agent.state().transcript.iter().any(|record| {
         assistant_from(record)
             .is_some_and(|message| message.finish.reason == AssistantFinishReason::Error)

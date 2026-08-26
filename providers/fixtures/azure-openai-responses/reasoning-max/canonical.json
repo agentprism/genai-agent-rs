@@ -3,7 +3,7 @@
   "family": "azure-openai-responses",
   "case": "reasoning-max",
   "description": "Simple reasoning level max.",
-  "piCommit": "c49906ec77788625aacbdc53ebca6fbe65bd20f5",
+  "piCommit": "8fa7eebd235355522c8104166b4f1f959b4e2f10",
   "model": {
     "id": "fixture-openai-model",
     "name": "Fixture OpenAI Model",
@@ -52,7 +52,7 @@
   "options": {
     "reasoning": "max",
     "maxTokens": 4096,
-    "azureBaseUrl": "http://127.0.0.1:40689",
+    "azureBaseUrl": "http://127.0.0.1:9",
     "maxRetries": 0,
     "timeoutMs": 10000
   },

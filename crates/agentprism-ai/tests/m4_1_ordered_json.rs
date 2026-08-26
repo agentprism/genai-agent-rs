@@ -231,6 +231,22 @@ const FIXTURE_FILES: &[&str] = &[
     "request-turn-2.headers.json",
 ];
 
+const FIXTURE_FAMILIES: &[&str] = &[
+    "anthropic-messages",
+    "openai-completions",
+    "openai-responses",
+    "openai-codex-responses",
+    "azure-openai-responses",
+    "google-generative-ai",
+    "google-vertex",
+    "bedrock-converse-stream",
+    "mistral-conversations",
+    "pi-messages",
+];
+
+const GOVERNING_PI_COMMIT: &str = "8fa7eebd235355522c8104166b4f1f959b4e2f10";
+const CANONICAL_AZURE_BASE_URL: &str = "http://127.0.0.1:9";
+
 const SIMPLE_CASES: &[&str] = &[
     "thinking-disabled",
     "reasoning-minimal",
@@ -433,10 +449,7 @@ fn validate_fixture_family(family: &str) {
         assert_eq!(canonical["schemaVersion"], 1);
         assert_eq!(canonical["family"], family);
         assert_eq!(canonical["case"], *case);
-        assert_eq!(
-            canonical["piCommit"],
-            "c49906ec77788625aacbdc53ebca6fbe65bd20f5"
-        );
+        assert_eq!(canonical["piCommit"], GOVERNING_PI_COMMIT);
         assert_eq!(
             canonical["entrypoint"],
             if SIMPLE_CASES.contains(case) {
@@ -517,6 +530,63 @@ fn validate_fixture_family(family: &str) {
 }
 
 #[test]
+fn fixture_corpus_all_canonical_descriptors_use_governing_pi_pin() {
+    pi_basis();
+    let mut descriptor_count = 0;
+    for family in FIXTURE_FAMILIES {
+        for case in FIXTURE_CASES {
+            let canonical = read_json(
+                &fixture_root()
+                    .join(family)
+                    .join(case)
+                    .join("canonical.json"),
+            );
+            assert_eq!(
+                canonical["piCommit"], GOVERNING_PI_COMMIT,
+                "{family}/{case}"
+            );
+            descriptor_count += 1;
+        }
+    }
+    for family in ["openai-completions", "anthropic-messages"] {
+        for case in CREDENTIAL_CASES {
+            let canonical = read_json(
+                &fixture_root()
+                    .join("credential-backed")
+                    .join(family)
+                    .join(case)
+                    .join("canonical.json"),
+            );
+            assert_eq!(
+                canonical["piCommit"], GOVERNING_PI_COMMIT,
+                "credential-backed {family}/{case}"
+            );
+            descriptor_count += 1;
+        }
+    }
+    assert_eq!(descriptor_count, 288);
+}
+
+/// Architecture v2 part 2 §10.8 deterministic-injection contract.
+#[test]
+fn fixture_corpus_azure_regeneration_is_idempotent() {
+    pi_basis();
+    for case in FIXTURE_CASES {
+        let canonical = read_json(
+            &fixture_root()
+                .join("azure-openai-responses")
+                .join(case)
+                .join("canonical.json"),
+        );
+        let azure_base_url = canonical["options"]["azureBaseUrl"]
+            .as_str()
+            .expect("canonical Azure base URL");
+        assert_eq!(azure_base_url, CANONICAL_AZURE_BASE_URL, "{case}");
+        url::Url::parse(azure_base_url).expect("valid canonical Azure base URL");
+    }
+}
+
+#[test]
 fn fixture_corpus_openai_completions_cases_are_complete_and_canonical() {
     validate_fixture_family("openai-completions");
 }
@@ -578,11 +648,15 @@ fn fixture_credential_backed_m4_1_minimum_corpus_is_complete() {
     let root = fixture_root().join("credential-backed");
     let report = read_json(&root.join("report.json"));
     assert_eq!(report["schemaVersion"], 1);
+    assert_eq!(report["piCommit"], GOVERNING_PI_COMMIT);
     assert_eq!(
-        report["piCommit"],
+        report["captureMode"],
+        "hermetic-replay-of-credential-response"
+    );
+    assert_eq!(
+        report["providerResponseCapturedAtPiCommit"],
         "c49906ec77788625aacbdc53ebca6fbe65bd20f5"
     );
-    assert_eq!(report["captureMode"], "credential-backed-local-proxy");
     let results = report["results"].as_array().expect("credential results");
     assert_eq!(results.len(), 8);
     assert!(results.iter().all(|result| result["status"] == "captured"));
@@ -597,16 +671,25 @@ fn fixture_credential_backed_m4_1_minimum_corpus_is_complete() {
                 );
             }
             let canonical = read_json(&directory.join("canonical.json"));
+            assert_eq!(canonical["piCommit"], GOVERNING_PI_COMMIT);
+            assert_eq!(canonical["providerGeneratedValuesCapturedVerbatim"], true);
             assert_eq!(
-                canonical["piCommit"],
+                canonical["providerResponseCapturedAtPiCommit"],
                 "c49906ec77788625aacbdc53ebca6fbe65bd20f5"
             );
-            assert_eq!(canonical["providerGeneratedValuesCapturedVerbatim"], true);
             let metadata = read_json(&directory.join("metadata.json"));
-            assert_eq!(metadata["captureMode"], "credential-backed-local-proxy");
-            assert_eq!(metadata["credentialsUsed"], true);
+            assert_eq!(
+                metadata["captureMode"],
+                "hermetic-replay-of-credential-response"
+            );
+            assert_eq!(metadata["credentialsUsed"], false);
+            assert_eq!(metadata["providerFrameCredentialsUsed"], true);
+            assert_eq!(
+                metadata["providerResponseCapturedAtPiCommit"],
+                "c49906ec77788625aacbdc53ebca6fbe65bd20f5"
+            );
             assert_eq!(metadata["secretsRedacted"], true);
-            assert!(metadata["credentialSource"].as_str().is_some());
+            assert!(metadata["providerFrameCredentialSource"].as_str().is_some());
 
             let request_one = fs::read(directory.join("request-turn-1.body.json"))
                 .expect("credential turn-one body");

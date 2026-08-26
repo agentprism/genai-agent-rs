@@ -3,13 +3,19 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const PINNED_COMMIT = "c49906ec77788625aacbdc53ebca6fbe65bd20f5";
+const PINNED_COMMIT = "8fa7eebd235355522c8104166b4f1f959b4e2f10";
+const CREDENTIAL_FRAME_COMMIT = "c49906ec77788625aacbdc53ebca6fbe65bd20f5";
 const FIXTURE_TIMESTAMP = 1_700_000_000_000;
 // Provider decoders allocate assistant timestamps internally. Pin Date.now so
 // turn-two bodies are reproducible as well as the canonical input corpus.
 Date.now = () => FIXTURE_TIMESTAMP;
 const FIXTURE_SESSION_ID = "session-m4-00000000";
 const FIXTURE_API_KEY = "fixture-api-key-never-forwarded";
+// The live capture must use Bun's ephemeral loopback port, but canonical
+// provenance cannot retain that OS-assigned value. Port 9 is a stable,
+// syntactically valid non-listening loopback endpoint also used by Pi's Azure
+// hermetic tests.
+const CANONICAL_AZURE_BASE_URL = "http://127.0.0.1:9";
 const FIXTURE_CODEX_API_KEY =
 	"eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjb3VudC1maXh0dXJlIn19.signature";
 const TOOL_CALL_1 = "call_fixture_0001";
@@ -45,7 +51,7 @@ type Family =
 	| "mistral-conversations"
 	| "pi-messages";
 type ResponseKind = "text" | "tool" | "multiple-tools" | "signed-reasoning" | "redacted-reasoning";
-type CaptureMode = "hermetic" | "credential-backed";
+type CaptureMode = "hermetic" | "credential-backed" | "credential-replay";
 
 interface FixtureCase {
 	name: string;
@@ -92,6 +98,16 @@ interface CredentialCaptureResult {
 	status: "captured" | "not-captured";
 	reason?: string;
 }
+
+const CAPTURED_ARTIFACT_FILES = [
+	"canonical.json",
+	"metadata.json",
+	"request-turn-1.body.json",
+	"request-turn-1.headers.json",
+	"response-turn-1.sse",
+	"request-turn-2.body.json",
+	"request-turn-2.headers.json",
+] as const;
 
 function isOpenAiFamily(family: Family): boolean {
 	return family === "openai-completions" || family === "openai-responses" ||
@@ -1418,11 +1434,19 @@ function continuationFor(message: Record<string, unknown>): Record<string, unkno
 	return [user("Deterministic turn-two follow-up.")];
 }
 
-function serializableOptions(options: Record<string, unknown>): Record<string, unknown> {
+function serializableOptions(family: Family, options: Record<string, unknown>): Record<string, unknown> {
 	const copy = { ...options };
 	delete copy.apiKey;
 	delete copy.fetch;
 	delete copy.client;
+	if (family === "azure-openai-responses") {
+		if (typeof copy.azureBaseUrl !== "string") {
+			throw new Error("Azure fixture capture did not receive an executable azureBaseUrl");
+		}
+		// Validate the capture-time endpoint before replacing it in provenance.
+		new URL(copy.azureBaseUrl);
+		copy.azureBaseUrl = CANONICAL_AZURE_BASE_URL;
+	}
 	if (typeof copy.headers === "object" && copy.headers !== null && !Array.isArray(copy.headers)) {
 		copy.headers = Object.fromEntries(
 			Object.entries(copy.headers as Record<string, unknown>).map(([name, value]) => [
@@ -1432,6 +1456,31 @@ function serializableOptions(options: Record<string, unknown>): Record<string, u
 		);
 	}
 	return copy;
+}
+
+function captureArtifactSnapshot(outputRoot: string, family: Family, caseName: string): Map<string, Uint8Array> {
+	const directory = resolve(outputRoot, family, caseName);
+	return new Map(
+		CAPTURED_ARTIFACT_FILES.map((file) => [file, new Uint8Array(readFileSync(join(directory, file)))]),
+	);
+}
+
+function assertRegenerationIdempotent(
+	family: Family,
+	caseName: string,
+	first: ReadonlyMap<string, Uint8Array>,
+	second: ReadonlyMap<string, Uint8Array>,
+): void {
+	for (const file of CAPTURED_ARTIFACT_FILES) {
+		const firstBytes = first.get(file);
+		const secondBytes = second.get(file);
+		const equal = firstBytes !== undefined && secondBytes !== undefined &&
+			firstBytes.length === secondBytes.length &&
+			firstBytes.every((byte, index) => byte === secondBytes[index]);
+		if (!equal) {
+			throw new Error(`${family}/${caseName}/${file} changed across consecutive fixture regenerations`);
+		}
+	}
 }
 
 function canonicalModel(model: Record<string, unknown>): Record<string, unknown> {
@@ -1745,7 +1794,7 @@ async function captureCase(
 			piCommit: PINNED_COMMIT,
 			model: canonicalModel(model),
 			context: fixture.context,
-			options: serializableOptions(options),
+			options: serializableOptions(family, options),
 			entrypoint: fixture.simple ? "streamSimple" : "stream",
 			turnTwoAppend: continuation,
 			deterministicInjections: {
@@ -1790,6 +1839,116 @@ async function captureCase(
 	}
 }
 
+async function replayCredentialCase(
+	family: "openai-completions" | "anthropic-messages",
+	caseName: string,
+	apiModule: { stream: Function; streamSimple: Function },
+	outputRoot: string,
+): Promise<void> {
+	const directory = resolve(outputRoot, family, caseName);
+	const canonicalPath = join(directory, "canonical.json");
+	const metadataPath = join(directory, "metadata.json");
+	const canonical = JSON.parse(readFileSync(canonicalPath, "utf8")) as Record<string, unknown>;
+	const previousMetadata = JSON.parse(readFileSync(metadataPath, "utf8")) as Record<string, unknown>;
+	const responseOne = new Uint8Array(readFileSync(join(directory, "response-turn-1.sse")));
+	if (canonical.piCommit !== CREDENTIAL_FRAME_COMMIT && canonical.piCommit !== PINNED_COMMIT) {
+		throw new Error(`${family}/${caseName} has unexpected source provenance ${String(canonical.piCommit)}`);
+	}
+
+	const state: CaptureServerState = {
+		scriptedResponses: [
+			responseOne,
+			new TextEncoder().encode(responseFrames(family, "text", String((canonical.model as Record<string, unknown>).id), 2) as string),
+		],
+		requests: [],
+		responseBodies: [],
+	};
+	const server = startCaptureServer(state);
+	try {
+		const localBasePath = family === "openai-completions" ? "/v1" : "";
+		const baseUrl = `http://127.0.0.1:${server.port}${localBasePath}`;
+		const model = {
+			...(canonical.model as Record<string, unknown>),
+			baseUrl,
+		};
+		const storedOptions = structuredClone(canonical.options as Record<string, unknown>);
+		const storedHeaders = storedOptions.headers as Record<string, string> | undefined;
+		const options = {
+			...storedOptions,
+			...(storedHeaders
+				? {
+					headers: Object.fromEntries(
+						Object.entries(storedHeaders).map(([name, value]) => [
+							name,
+							value === "[REDACTED]" ? `Bearer ${FIXTURE_API_KEY}` : value,
+						]),
+					),
+				}
+				: {}),
+			...(family === "openai-completions" ? { apiKey: FIXTURE_API_KEY } : {}),
+		};
+		const context = structuredClone(canonical.context as Record<string, unknown>);
+		const streamFunction = canonical.entrypoint === "streamSimple" ? apiModule.streamSimple : apiModule.stream;
+		const turnOne = await streamFunction(model, structuredClone(context), options).result();
+		if (turnOne.stopReason === "error" || turnOne.stopReason === "aborted") {
+			throw new Error(`${family}/${caseName} replayed turn one failed: ${turnOne.errorMessage}`);
+		}
+		const continuation = continuationFor(turnOne);
+		const turnTwoContext = structuredClone(context) as { messages: unknown[] };
+		turnTwoContext.messages.push(turnOne, ...continuation);
+		const turnTwo = await streamFunction(model, turnTwoContext, options).result();
+		if (turnTwo.stopReason === "error" || turnTwo.stopReason === "aborted") {
+			throw new Error(`${family}/${caseName} replayed turn two failed: ${turnTwo.errorMessage}`);
+		}
+		if (state.requests.length !== 2 || state.responseBodies.length !== 2 || state.scriptedResponses.length !== 0) {
+			throw new Error(`${family}/${caseName} expected exactly two replayed requests`);
+		}
+
+		const [requestOne, requestTwo] = state.requests;
+		canonical.piCommit = PINNED_COMMIT;
+		canonical.providerResponseCapturedAtPiCommit = CREDENTIAL_FRAME_COMMIT;
+		canonical.model = canonicalModel(model);
+		canonical.options = serializableOptions(family, options);
+		canonical.turnTwoAppend = continuation;
+		await writeJson(canonicalPath, canonical);
+		await Bun.write(join(directory, "request-turn-1.body.json"), requestOne.body);
+		await writeJson(join(directory, "request-turn-1.headers.json"), {
+			schemaVersion: 1,
+			method: requestOne.method,
+			path: requestOne.path,
+			headers: requestOne.headers,
+			omittedRuntimeHeaders: requestOne.omittedRuntimeHeaders,
+		});
+		await Bun.write(join(directory, "request-turn-2.body.json"), requestTwo.body);
+		await writeJson(join(directory, "request-turn-2.headers.json"), {
+			schemaVersion: 1,
+			method: requestTwo.method,
+			path: requestTwo.path,
+			headers: requestTwo.headers,
+			omittedRuntimeHeaders: requestTwo.omittedRuntimeHeaders,
+		});
+		await writeJson(metadataPath, {
+			schemaVersion: 1,
+			captureMode: "hermetic-replay-of-credential-response",
+			credentialsUsed: false,
+			providerFrameCredentialsUsed: true,
+			providerFrameCredentialSource:
+				previousMetadata.providerFrameCredentialSource ??
+				previousMetadata.credentialSource ??
+				(family === "openai-completions"
+					? "OPENROUTER_API_KEY"
+					: "OPENROUTER_API_KEY (Anthropic Messages compatibility endpoint)"),
+			providerResponseCapturedAtPiCommit: CREDENTIAL_FRAME_COMMIT,
+			secretsRedacted: true,
+			requestTurnOneSha256: sha256(requestOne.body),
+			responseTurnOneSha256: sha256(responseOne),
+			requestTurnTwoSha256: sha256(requestTwo.body),
+		});
+	} finally {
+		server.stop(true);
+	}
+}
+
 function verifyPin(piRoot: string): void {
 	const gitFile = join(piRoot, ".git");
 	if (!existsSync(gitFile)) throw new Error(`PI checkout has no .git metadata: ${piRoot}`);
@@ -1808,7 +1967,7 @@ function verifyPin(piRoot: string): void {
 
 function captureModeFromEnvironment(): CaptureMode {
 	const value = process.env.PI_FIXTURE_CAPTURE_MODE ?? "hermetic";
-	if (value === "hermetic" || value === "credential-backed") return value;
+	if (value === "hermetic" || value === "credential-backed" || value === "credential-replay") return value;
 	throw new Error(`unsupported PI_FIXTURE_CAPTURE_MODE: ${value}`);
 }
 
@@ -1836,7 +1995,7 @@ async function main(): Promise<void> {
 	const toolRoot = import.meta.dir;
 	const outputRoot = resolve(toolRoot, "..");
 	const mode = captureModeFromEnvironment();
-	const piRoot = resolve(process.env.PI_PIN_DIR ?? "/home/vikash/pi-pin-c49906ec7");
+	const piRoot = resolve(process.env.PI_PIN_DIR ?? "/home/vikash/pi-pin-8fa7eebd2");
 	verifyPin(piRoot);
 	const workRoot = resolve(toolRoot, ".capture-work", "pi-ai");
 	rmSync(workRoot, { recursive: true, force: true });
@@ -1949,9 +2108,38 @@ async function main(): Promise<void> {
 	const selectedFamilies = selectedValues("PI_FIXTURE_FAMILIES", families.map((item) => item.family));
 	const credentialResults: CredentialCaptureResult[] = [];
 	const authStore = mode === "credential-backed" ? readPiAuthStore() : {};
-	const captureOutputRoot = mode === "credential-backed" ? resolve(outputRoot, "credential-backed") : outputRoot;
+	const captureOutputRoot = mode === "hermetic" ? outputRoot : resolve(outputRoot, "credential-backed");
 
 	try {
+		if (mode === "credential-replay") {
+			const replayFamilies = families.filter(
+				(family) => family.family === "openai-completions" || family.family === "anthropic-messages",
+			) as Array<{
+				family: "openai-completions" | "anthropic-messages";
+				module: { stream: Function; streamSimple: Function };
+			}>;
+			for (const family of replayFamilies) {
+				for (const caseName of defaultCredentialCases) {
+					await replayCredentialCase(family.family, caseName, family.module, captureOutputRoot);
+					console.log(`replayed ${family.family}/${caseName} credential response (${PINNED_COMMIT})`);
+				}
+			}
+			await writeJson(join(captureOutputRoot, "report.json"), {
+				schemaVersion: 1,
+				piCommit: PINNED_COMMIT,
+				providerResponseCapturedAtPiCommit: CREDENTIAL_FRAME_COMMIT,
+				captureMode: "hermetic-replay-of-credential-response",
+				results: replayFamilies.flatMap((family) =>
+					defaultCredentialCases.map((caseName) => ({
+						family: family.family,
+						case: caseName,
+						status: "captured",
+					})),
+				),
+			});
+			return;
+		}
+
 		for (const family of families) {
 			if (!selectedFamilies.has(family.family)) continue;
 			const fixtures = commonCases(family.family, family.provider, family.model)
@@ -1987,6 +2175,19 @@ async function main(): Promise<void> {
 						mode,
 						credentialTarget,
 					);
+					if (mode === "hermetic" && family.family === "azure-openai-responses") {
+						const first = captureArtifactSnapshot(captureOutputRoot, family.family, fixture.name);
+						await captureCase(
+							family.family,
+							fixture,
+							family.module,
+							captureOutputRoot,
+							mode,
+							credentialTarget,
+						);
+						const second = captureArtifactSnapshot(captureOutputRoot, family.family, fixture.name);
+						assertRegenerationIdempotent(family.family, fixture.name, first, second);
+					}
 					console.log(`captured ${family.family}/${fixture.name} (${mode})`);
 					if (mode === "credential-backed") {
 						credentialResults.push({ family: family.family, case: fixture.name, status: "captured" });

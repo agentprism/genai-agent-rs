@@ -1,10 +1,10 @@
 # Pi provider request fixture corpus
 
-This is the M4.1 capture corpus required by Architecture v2 part 2 §10.8. It was generated from Pi commit `c49906ec77788625aacbdc53ebca6fbe65bd20f5` on 2026-08-23.
+This is the M4.1 capture corpus required by Architecture v2 part 2 §10.8. The hermetic 10-family × 28-case corpus was generated from the governing Pi commit `8fa7eebd235355522c8104166b4f1f959b4e2f10` on 2026-08-26.
 
-The checked `openai-completions/`, `anthropic-messages/`, `openai-responses/`, and `openai-codex-responses/` trees are deterministic captures from Pi's real API-family modules. A local Bun server records the exact logical JSON request bytes and returns fixed SSE frames. Pi assembles turn one, the tool appends a fixed tool result or user message, and **the same logical entrypoint (`stream` or `streamSimple`) is invoked for turn two**. Capture-time assertions reject a turn-two request that loses simple-option reasoning/thinking, sampling overlays, or max-output clamping. Codex requests are captured with `transport: "sse"`; the server decompresses Pi's level-three Zstandard HTTP entity before recording the byte-exact logical JSON body.
+The checked `anthropic-messages/`, `openai-completions/`, `openai-responses/`, `openai-codex-responses/`, `azure-openai-responses/`, `google-generative-ai/`, `google-vertex/`, `bedrock-converse-stream/`, `mistral-conversations/`, and `pi-messages/` trees are deterministic captures from Pi's real API-family modules. A local Bun server records the exact logical JSON request bytes and returns fixed SSE or provider event-stream frames. Pi assembles turn one, the tool appends a fixed tool result or user message, and **the same logical entrypoint (`stream` or `streamSimple`) is invoked for turn two**. Capture-time assertions reject a turn-two request that loses simple-option reasoning/thinking, sampling overlays, or max-output clamping. Azure receives the live ephemeral loopback endpoint only while executing; canonical `azureBaseUrl` provenance uses the stable valid URL `http://127.0.0.1:9`, and every Azure case is captured twice with a byte-for-byte artifact comparison. Codex requests are captured with `transport: "sse"`; the server decompresses Pi's level-three Zstandard HTTP entity before recording the byte-exact logical JSON body.
 
-The additional `credential-backed/` tree was captured through the same local server acting as a reverse proxy to live endpoints. It proves that the tool can capture real provider frames with available credentials while keeping credentials out of the artifacts and tests.
+The additional `credential-backed/` tree retains provider frames originally captured through the same local server acting as a reverse proxy to live endpoints. Its request bodies are regenerated hermetically at the governing pin by replaying those stored, redacted frames; `providerResponseCapturedAtPiCommit` records the older frame-capture provenance separately. No live credential is needed to verify or refresh request-generation provenance.
 
 The Rust tests validate corpus provenance, completeness, redaction, digests, and canonical `JSON.stringify` form. The M6.1 Responses conformance suite additionally performs byte-exact family encoding and encrypted-reasoning turn-two replay checks; the earlier OpenAI Completions and Anthropic Messages exact family comparisons remain tracked separately in the parity manifest.
 
@@ -26,7 +26,7 @@ Hermetic deterministic inputs are timestamp `1700000000000`, session ID `session
 
 ## Hermetic cases captured
 
-All §10.8 cases are captured for each of the four families:
+All §10.8 cases are captured for each of the ten families:
 
 - text-only;
 - system/developer prompt;
@@ -74,15 +74,21 @@ From the capture-tool directory:
 ```sh
 cd providers/fixtures/capture-tool
 bun install --frozen-lockfile
-PI_PIN_DIR=/home/vikash/pi-pin-c49906ec7 bun run capture
+PI_PIN_DIR=/home/vikash/pi-pin-8fa7eebd2 bun run capture
 ```
 
 The tool verifies the pinned commit without spawning Git, copies only `packages/ai/src` into ignored scratch space, and loads the copy against the locked dependencies. It never modifies the Pi checkout.
 
-To repeat the credential-backed acceptance capture:
+To regenerate the request bodies around the checked credential-backed response frames without network or credentials:
 
 ```sh
-PI_PIN_DIR=/home/vikash/pi-pin-c49906ec7 bun run capture:credential
+PI_PIN_DIR=/home/vikash/pi-pin-8fa7eebd2 bun run capture:credential-replay
+```
+
+To perform a new live credential-backed acceptance capture instead:
+
+```sh
+PI_PIN_DIR=/home/vikash/pi-pin-8fa7eebd2 bun run capture:credential
 ```
 
 `PI_FIXTURE_FAMILIES` and `PI_FIXTURE_CASES` accept comma-separated selections. `PI_FIXTURE_ANTHROPIC_CREDENTIAL=github-copilot` selects the optional Pi auth-store route; the default is OpenRouter. Model IDs can be overridden with `PI_FIXTURE_OPENROUTER_MODEL`, `PI_FIXTURE_OPENROUTER_ANTHROPIC_MODEL`, and `PI_FIXTURE_COPILOT_ANTHROPIC_MODEL`.
@@ -90,7 +96,7 @@ PI_PIN_DIR=/home/vikash/pi-pin-c49906ec7 bun run capture:credential
 After regeneration, run:
 
 ```sh
-cargo test -p pi-ai --test m4_1_ordered_json
+cargo test -p agentprism-ai --test m4_1_ordered_json
 ```
 
-That test checks the case/file inventories, pinned provenance, compact ordered request bytes, retained turn-two lowering, replay markers, stable-header filtering, secret redaction, live-capture report, and every recorded digest.
+That test checks the case/file inventories, pinned provenance, compact ordered request bytes, retained turn-two lowering, replay markers, stable-header filtering, secret redaction, credential-replay report, and every recorded digest.

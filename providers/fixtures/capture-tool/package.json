@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "capture": "bun run capture.ts",
-    "capture:credential": "PI_FIXTURE_CAPTURE_MODE=credential-backed bun run capture.ts"
+    "capture:credential": "PI_FIXTURE_CAPTURE_MODE=credential-backed bun run capture.ts",
+    "capture:credential-replay": "PI_FIXTURE_CAPTURE_MODE=credential-replay bun run capture.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.91.1",

@@ -27,6 +27,8 @@ status = "semantic-parity"
 source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#10.8"
 rust = [
   "fixture_corpus_anthropic_messages_cases_are_complete_and_canonical",
+  "fixture_corpus_all_canonical_descriptors_use_governing_pi_pin",
+  "fixture_corpus_azure_regeneration_is_idempotent",
   "fixture_corpus_bedrock_converse_stream_cases_are_complete_and_canonical",
   "fixture_corpus_anthropic_redacted_turn_two_contains_replay_marker",
   "fixture_corpus_anthropic_signed_turn_two_contains_replay_marker",
@@ -1363,6 +1365,7 @@ rust = [
   "agent_event_replay_rejects_sequence_run_and_message_invariant_violations",
   "agent_failed_assistant_is_committed",
   "agent_failed_assistant_commit_replays",
+  "agent_failed_assistant_is_omitted_from_next_provider_projection",
   "handoff_failed_assistant_omitted",
   "agent_failed_turn_has_run_finished",
   "agent_failed_turn_has_turn_finished",

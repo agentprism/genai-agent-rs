@@ -3,7 +3,7 @@
   "family": "bedrock-converse-stream",
   "case": "images",
   "description": "User text followed by one deterministic PNG data block.",
-  "piCommit": "c49906ec77788625aacbdc53ebca6fbe65bd20f5",
+  "piCommit": "8fa7eebd235355522c8104166b4f1f959b4e2f10",
   "model": {
     "id": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
     "name": "Fixture Bedrock Claude Sonnet 4.5",

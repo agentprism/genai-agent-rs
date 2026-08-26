@@ -3,7 +3,7 @@
   "family": "openai-codex-responses",
   "case": "failed-turn-omission",
   "description": "Failed assistant remains canonical but is omitted from provider projection.",
-  "piCommit": "c49906ec77788625aacbdc53ebca6fbe65bd20f5",
+  "piCommit": "8fa7eebd235355522c8104166b4f1f959b4e2f10",
   "model": {
     "id": "fixture-codex-model",
     "name": "Fixture Codex Model",

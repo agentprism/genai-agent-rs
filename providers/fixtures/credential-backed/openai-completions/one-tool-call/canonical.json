@@ -3,7 +3,7 @@
   "family": "openai-completions",
   "case": "one-tool-call",
   "description": "One streamed function/tool call followed by its result on turn two.",
-  "piCommit": "c49906ec77788625aacbdc53ebca6fbe65bd20f5",
+  "piCommit": "8fa7eebd235355522c8104166b4f1f959b4e2f10",
   "model": {
     "id": "openai/gpt-oss-20b",
     "name": "Credential-backed OpenRouter fixture model",
@@ -81,7 +81,7 @@
       }
     },
     "maxRetries": 0,
-    "timeoutMs": 60000
+    "timeoutMs": 10000
   },
   "entrypoint": "streamSimple",
   "turnTwoAppend": [
@@ -103,5 +103,6 @@
     "timestamp": 1700000000000,
     "sessionId": "session-m4-00000000"
   },
-  "providerGeneratedValuesCapturedVerbatim": true
+  "providerGeneratedValuesCapturedVerbatim": true,
+  "providerResponseCapturedAtPiCommit": "c49906ec77788625aacbdc53ebca6fbe65bd20f5"
 }

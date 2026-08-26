@@ -1,8 +1,10 @@
 {
   "schemaVersion": 1,
-  "captureMode": "credential-backed-local-proxy",
-  "credentialsUsed": true,
-  "credentialSource": "OPENROUTER_API_KEY (Anthropic Messages compatibility endpoint)",
+  "captureMode": "hermetic-replay-of-credential-response",
+  "credentialsUsed": false,
+  "providerFrameCredentialsUsed": true,
+  "providerFrameCredentialSource": "OPENROUTER_API_KEY (Anthropic Messages compatibility endpoint)",
+  "providerResponseCapturedAtPiCommit": "c49906ec77788625aacbdc53ebca6fbe65bd20f5",
   "secretsRedacted": true,
   "requestTurnOneSha256": "0acdfbf1a8860f7a845db1cd8d9bc5a62d01253f7fd8158285052e6b4e83bc39",
   "responseTurnOneSha256": "5d61b3ce4e5045d6641941a397c0e3ad11c56c5fe104a26c964d547c426f0a0e",

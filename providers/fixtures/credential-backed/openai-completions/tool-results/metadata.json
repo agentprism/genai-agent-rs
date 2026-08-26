@@ -1,8 +1,10 @@
 {
   "schemaVersion": 1,
-  "captureMode": "credential-backed-local-proxy",
-  "credentialsUsed": true,
-  "credentialSource": "OPENROUTER_API_KEY",
+  "captureMode": "hermetic-replay-of-credential-response",
+  "credentialsUsed": false,
+  "providerFrameCredentialsUsed": true,
+  "providerFrameCredentialSource": "OPENROUTER_API_KEY",
+  "providerResponseCapturedAtPiCommit": "c49906ec77788625aacbdc53ebca6fbe65bd20f5",
   "secretsRedacted": true,
   "requestTurnOneSha256": "624a8ed9b0d17684140660605e4a737d5d141c5313c4afcc8647ebbce8979512",
   "responseTurnOneSha256": "aa8270f47bbe619b00ba3e87ff4fc9f479fd9f8a0627e82b4e2a74f8475221ea",

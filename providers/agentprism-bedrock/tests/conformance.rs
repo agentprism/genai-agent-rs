@@ -2328,7 +2328,7 @@ fn assert_bedrock_fixture_inventory() {
         assert_eq!(canonical["case"], case);
         assert_eq!(
             canonical["piCommit"],
-            "c49906ec77788625aacbdc53ebca6fbe65bd20f5"
+            "8fa7eebd235355522c8104166b4f1f959b4e2f10"
         );
     }
 }

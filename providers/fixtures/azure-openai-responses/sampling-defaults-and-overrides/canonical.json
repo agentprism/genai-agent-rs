@@ -3,7 +3,7 @@
   "family": "azure-openai-responses",
   "case": "sampling-defaults-and-overrides",
   "description": "Catalog sampling defaults overlaid by request sampling values.",
-  "piCommit": "c49906ec77788625aacbdc53ebca6fbe65bd20f5",
+  "piCommit": "8fa7eebd235355522c8104166b4f1f959b4e2f10",
   "model": {
     "id": "fixture-openai-model",
     "name": "Fixture OpenAI Model",
@@ -60,7 +60,7 @@
       "top_p": 0.6,
       "seed": 7
     },
-    "azureBaseUrl": "http://127.0.0.1:34227",
+    "azureBaseUrl": "http://127.0.0.1:9",
     "maxRetries": 0,
     "timeoutMs": 10000
   },
