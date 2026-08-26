@@ -1145,6 +1145,16 @@ dependencies = [
 [[package]]
 name = "pi-agent-harness"
 version = "0.1.0"
+dependencies = [
+ "futures-executor",
+ "futures-util",
+ "pi-agent-core",
+ "pi-agent-env",
+ "pi-agent-session",
+ "pi-ai",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "pi-agent-runtime-tokio"

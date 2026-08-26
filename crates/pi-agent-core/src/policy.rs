@@ -24,6 +24,11 @@ pub struct AgentStateView<'a> {
     pub model: &'a ModelRef,
     /// Reasoning selected for this request, including a run-local override.
     pub reasoning: ReasoningLevel,
+    /// Complete configured common generation options for this request.
+    ///
+    /// Policies that change one option must clone this value before producing
+    /// the complete replacement carried by `options_override`.
+    pub options: &'a SimpleGenerationOptions,
 }
 
 /// Complete run-local agent context used between model turns.

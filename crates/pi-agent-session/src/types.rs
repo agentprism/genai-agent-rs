@@ -149,7 +149,7 @@ pub enum SessionEntry {
     BranchSummary {
         /// Shared entry fields.
         base: EntryBase,
-        /// Entry at which the summarized abandoned segment began.
+        /// Navigation source leaf whose abandoned side was summarized.
         from_id: EntryId,
         /// Summary text.
         summary: String,
@@ -270,7 +270,7 @@ pub enum ProvisionedEntry {
     BranchSummary {
         /// Stable preallocated entry identifier.
         id: EntryId,
-        /// Entry at which the summarized abandoned segment began.
+        /// Navigation source leaf whose abandoned side was summarized.
         from_id: EntryId,
         /// Summary text.
         summary: String,

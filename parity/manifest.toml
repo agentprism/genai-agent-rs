@@ -1469,15 +1469,26 @@ milestone = "M8"
 
 [[mapping]]
 source = "packages/agent/test/harness/branch-summarization.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = [
+  "branch_summary_finds_common_ancestor",
+  "branch_summary_summarizes_abandoned_segment",
+]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/harness/compaction.test.ts"
-rust = []
-status = "planned"
-milestone = "M8"
+rust = [
+  "compaction_context_uses_latest_compaction_entry",
+  "compaction_failure_does_not_move_branch_head",
+  "compaction_last_entry_suppresses_manual_and_forced_requests",
+  "compaction_projection_empty_nonempty_path_invokes_summary_local",
+  "compaction_projection_empty_nonempty_path_invokes_summary_send",
+  "compaction_records_summary_usage",
+  "compaction_records_tokens_before",
+  "compaction_retains_configured_tail",
+  "compaction_threshold_decision",
+]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/harness/events.test.ts"
@@ -1533,6 +1544,32 @@ source = "packages/agent/test/harness/session/context.test.ts"
 rust = []
 status = "planned"
 milestone = "M7"
+
+[[mapping]]
+source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#7.7-7.8-and-10.10"
+rust = [
+  "branch_summary_failure_leaves_navigation_recoverable",
+  "branch_summary_finds_common_ancestor",
+  "branch_summary_navigation_is_durable",
+  "branch_summary_records_from_id",
+  "branch_summary_summarizes_abandoned_segment",
+  "branch_summary_uses_requested_model_after_response_echo",
+  "branch_summary_zero_context_window_uses_pi_fallback_budget",
+  "compaction_context_uses_latest_compaction_entry",
+  "compaction_context_uses_requested_model_after_response_echo",
+  "compaction_failure_does_not_move_branch_head",
+  "compaction_last_entry_suppresses_manual_and_forced_requests",
+  "compaction_manual_reason",
+  "compaction_operation_can_resume",
+  "compaction_overflow_reason",
+  "compaction_projection_empty_nonempty_path_invokes_summary_local",
+  "compaction_projection_empty_nonempty_path_invokes_summary_send",
+  "compaction_records_summary_usage",
+  "compaction_records_tokens_before",
+  "compaction_retains_configured_tail",
+  "compaction_threshold_decision",
+]
+status = "semantic-parity"
 
 [[mapping]]
 source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#7.2-7.6-and-10.10"

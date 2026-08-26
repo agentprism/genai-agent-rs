@@ -3706,6 +3706,8 @@ Preparation flow:
 7. Delegate final handoff projection to base ContextPolicy.
 ```
 
+> Correction: Pinned Pi's durable reducer corpus records automatic threshold compaction and overflow recovery as `step_attempt` records inside the already-open run operation; they do not start a nested compaction operation. Only standalone manual compaction owns its own `operation_started`/`operation_finished` pair. Rust therefore interprets step 6a as “ensure an owning operation”: reuse the open run for threshold/overflow compaction, and start a compaction operation only when no run already owns the work (`packages/agent/test/harness/reducer.test.ts`, `threshold auto-compaction`, `overflow compaction and retry`, and `manual compaction` valid prefixes).
+
 A failed compaction must not advance the branch head to a nonexistent or partial summary entry.
 
 ### Overflow retry
@@ -3746,6 +3748,10 @@ The summary input should include:
 * token budget.
 
 The result is a durable `BranchSummaryEntry`, not an ephemeral system-prompt string.
+
+> Correction: Pinned Pi records a branch summary's `fromId` as the navigation operation's `sourceLeafId`, not the first entry in the abandoned segment. The Rust `BranchSummaryEntry::from_id` therefore identifies the source leaf, including when the summary is appended under the empty root (`packages/agent/test/harness/reducer.test.ts`, navigation fixtures with `sourceLeafId: "source"` and `fromId: "source"`).
+
+> Correction: Pinned Pi permits `SessionContextBuildOptions.entryProjectors` to project a matching `custom` session entry into ordinary model context; each projector receives the entry's index and path after the latest-compaction transform. Compaction preparation is stricter: it calls `buildSessionContext(pathEntries)` without projector options and its independent entry conversion unconditionally omits `custom` session entries. Rust therefore exposes explicit Send and Local custom-entry projector seams for normal durable context reconstruction, passes them the transformed path and index, and never runs them while calculating compaction usage, choosing the retained tail, or building a summary prompt (`packages/agent/src/harness/session/context.ts:52–100`; `packages/agent/src/harness/compaction/compaction.ts:55–70,613–680`).
 
 ## 7.9 Skills and prompt templates
 

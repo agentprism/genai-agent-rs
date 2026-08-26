@@ -9,3 +9,13 @@ description = "pi-agent-harness: compaction and branch summarization, skills and
 publish = false
 
 [dependencies]
+futures-util = { version = "0.3.31", default-features = false, features = ["alloc", "async-await", "std"] }
+pi-agent-core = { path = "../pi-agent-core" }
+pi-agent-env = { path = "../pi-agent-env" }
+pi-agent-session = { path = "../pi-agent-session" }
+pi-ai = { path = "../pi-ai" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.145", features = ["raw_value"] }
+
+[dev-dependencies]
+futures-executor = "0.3.31"

@@ -1526,6 +1526,7 @@ impl crate::Agent {
                     tools: &tool_specs,
                     model,
                     reasoning,
+                    options: &self.options,
                 },
                 cancellation,
             )
@@ -1585,6 +1586,7 @@ impl LocalAgent {
                     tools: &tool_specs,
                     model,
                     reasoning,
+                    options: &self.options,
                 },
                 cancellation,
             )
