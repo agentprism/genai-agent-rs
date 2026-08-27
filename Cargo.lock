@@ -416,6 +416,7 @@ dependencies = [
  "agentprism-ai",
  "agentprism-openai",
  "agentprism-provider-common",
+ "futures-executor",
  "futures-timer",
  "futures-util",
  "http",

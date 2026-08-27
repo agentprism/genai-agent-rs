@@ -1060,6 +1060,7 @@ fn copilot_auth(credential: &OAuthCredential) -> Result<ResolvedAuth, AuthError>
             credential.access.expose_secret(),
             enterprise.as_deref(),
         )?),
+        environment: Default::default(),
         source: AuthSource::new("OAuth"),
     })
 }

@@ -1490,6 +1490,7 @@ impl ApiKeyAuth for EnvironmentApiKeyAuth {
                     api_key: Some(key),
                     headers: HeaderMap::new(),
                     transport_headers: HeaderMap::new(),
+                    environment: credential.environment,
                     base_url: None,
                     source: AuthSource::new("stored credential"),
                 }));
@@ -1514,6 +1515,7 @@ impl ApiKeyAuth for EnvironmentApiKeyAuth {
                         api_key: Some(SecretString::new(value)),
                         headers: HeaderMap::new(),
                         transport_headers: HeaderMap::new(),
+                        environment: BTreeMap::new(),
                         base_url: None,
                         source: AuthSource::new(variable),
                     }));
@@ -1575,6 +1577,7 @@ impl LocalApiKeyAuth for EnvironmentApiKeyAuth {
                     api_key: Some(key),
                     headers: HeaderMap::new(),
                     transport_headers: HeaderMap::new(),
+                    environment: credential.environment,
                     base_url: None,
                     source: AuthSource::new("stored credential"),
                 }));
@@ -1599,6 +1602,7 @@ impl LocalApiKeyAuth for EnvironmentApiKeyAuth {
                         api_key: Some(SecretString::new(value)),
                         headers: HeaderMap::new(),
                         transport_headers: HeaderMap::new(),
+                        environment: BTreeMap::new(),
                         base_url: None,
                         source: AuthSource::new(variable),
                     }));
@@ -1893,6 +1897,7 @@ fn configuration_only_oauth() -> ResolvedAuth {
         api_key: None,
         headers: HeaderMap::new(),
         transport_headers: HeaderMap::new(),
+        environment: BTreeMap::new(),
         base_url: None,
         source: AuthSource::new("OAuth"),
     }

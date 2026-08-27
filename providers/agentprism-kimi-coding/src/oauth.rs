@@ -553,6 +553,7 @@ fn bearer(credential: &OAuthCredential) -> Result<ResolvedAuth, AuthError> {
         headers,
         transport_headers: HeaderMap::new(),
         base_url: None,
+        environment: Default::default(),
         source: AuthSource::new("OAuth"),
     })
 }

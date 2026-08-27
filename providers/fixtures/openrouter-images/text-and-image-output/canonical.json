@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "family": "openrouter-images",
+  "case": "text-and-image-output",
+  "description": "A text-capable image model requests image and text modalities.",
+  "piCommit": "e86823096c5bad39e1ca282ec24bc5eb9bec745b",
+  "model": {
+    "id": "fixture/text-and-image-output",
+    "name": "Fixture text-and-image-output",
+    "api": "openrouter-images",
+    "provider": "openrouter",
+    "baseUrl": "http://127.0.0.1:<injected-port>/api/v1",
+    "input": [
+      "text",
+      "image"
+    ],
+    "output": [
+      "text",
+      "image"
+    ],
+    "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0
+    }
+  },
+  "context": {
+    "input": [
+      {
+        "type": "text",
+        "text": "Draw and caption a deterministic blue square."
+      }
+    ]
+  },
+  "options": {
+    "maxRetries": 0,
+    "timeoutMs": 10000,
+    "apiKey": "[REDACTED]"
+  },
+  "entrypoint": "generateImages",
+  "deterministicInjections": {
+    "timestamp": 1700000000000
+  }
+}

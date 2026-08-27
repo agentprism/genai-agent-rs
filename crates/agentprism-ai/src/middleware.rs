@@ -333,6 +333,19 @@ pub struct HeaderTransformContext<'a> {
     pub endpoint: &'a Url,
 }
 
+/// Borrowed identity available to a Models-level image header transform.
+#[derive(Clone, Copy)]
+pub struct ImageHeaderTransformContext<'a> {
+    /// Registered provider identity.
+    pub provider: &'a ProviderId,
+    /// Caller-supplied image model retained through dispatch.
+    pub model: &'a crate::ImageModelDescriptor,
+    /// Image API family selected by the descriptor.
+    pub api: &'a ApiId,
+    /// Endpoint resolved before provider dispatch.
+    pub endpoint: &'a Url,
+}
+
 /// Models-level logical-header transformation.
 pub trait HeaderTransform: Send + Sync + 'static {
     /// Mutates the case-insensitive logical header map. Calling
@@ -342,6 +355,16 @@ pub trait HeaderTransform: Send + Sync + 'static {
         context: HeaderTransformContext<'a>,
         headers: &'a mut HeaderMap,
     ) -> SendBoxFuture<'a, Result<(), MiddlewareError>>;
+
+    /// Mutates an image request's logical headers. Existing chat-only
+    /// transforms remain no-ops for the distinct image-model contract.
+    fn transform_image<'a>(
+        &'a self,
+        _context: ImageHeaderTransformContext<'a>,
+        _headers: &'a mut HeaderMap,
+    ) -> SendBoxFuture<'a, Result<(), MiddlewareError>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// Single-threaded Models-level logical-header transformation.
@@ -352,6 +375,15 @@ pub trait LocalHeaderTransform: 'static {
         context: HeaderTransformContext<'a>,
         headers: &'a mut HeaderMap,
     ) -> LocalBoxFuture<'a, Result<(), MiddlewareError>>;
+
+    /// Local counterpart of [`HeaderTransform::transform_image`].
+    fn transform_image<'a>(
+        &'a self,
+        _context: ImageHeaderTransformContext<'a>,
+        _headers: &'a mut HeaderMap,
+    ) -> LocalBoxFuture<'a, Result<(), MiddlewareError>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// Borrowed inputs available to a typed API-family payload transform.

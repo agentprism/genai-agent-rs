@@ -793,6 +793,7 @@ fn resolved_auth(source: &str, config: BedrockSigningConfig) -> Result<ResolvedA
         api_key: None,
         headers,
         transport_headers: HeaderMap::new(),
+        environment: std::collections::BTreeMap::new(),
         base_url: config.endpoint.clone(),
         source: AuthSource::new(source),
     };

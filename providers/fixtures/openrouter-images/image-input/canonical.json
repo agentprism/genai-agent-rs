@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "family": "openrouter-images",
+  "case": "image-input",
+  "description": "Text and a base64 image are lowered as ordered user content.",
+  "piCommit": "e86823096c5bad39e1ca282ec24bc5eb9bec745b",
+  "model": {
+    "id": "fixture/image-input",
+    "name": "Fixture image-input",
+    "api": "openrouter-images",
+    "provider": "openrouter",
+    "baseUrl": "http://127.0.0.1:<injected-port>/api/v1",
+    "input": [
+      "text",
+      "image"
+    ],
+    "output": [
+      "image"
+    ],
+    "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0
+    }
+  },
+  "context": {
+    "input": [
+      {
+        "type": "text",
+        "text": "Restyle this deterministic image."
+      },
+      {
+        "type": "image",
+        "mimeType": "image/png",
+        "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+      }
+    ]
+  },
+  "options": {
+    "maxRetries": 0,
+    "timeoutMs": 10000,
+    "apiKey": "[REDACTED]"
+  },
+  "entrypoint": "generateImages",
+  "deterministicInjections": {
+    "timestamp": 1700000000000
+  }
+}

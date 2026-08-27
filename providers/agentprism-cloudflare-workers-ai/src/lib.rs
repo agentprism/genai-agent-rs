@@ -235,6 +235,9 @@ fn resolved(
         api_key: Some(SecretString::new(key)),
         headers: HeaderMap::new(),
         transport_headers,
+        environment: [("CLOUDFLARE_ACCOUNT_ID".to_owned(), account)]
+            .into_iter()
+            .collect(),
         base_url: None,
         source: AuthSource::new(if stored {
             "stored credential"

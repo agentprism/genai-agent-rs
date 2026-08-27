@@ -126,6 +126,7 @@ impl OAuthAuth for FileOAuth {
                 api_key: Some(access),
                 headers: http::HeaderMap::new(),
                 transport_headers: http::HeaderMap::new(),
+                environment: Default::default(),
                 base_url: None,
                 source: AuthSource::new("OAuth"),
             })

@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "method": "POST",
+  "path": "/api/v1/chat/completions",
+  "headers": {
+    "accept": "application/json",
+    "accept-encoding": "gzip, deflate, br, zstd",
+    "connection": "keep-alive",
+    "content-type": "application/json"
+  },
+  "authentication": "[REDACTED]"
+}

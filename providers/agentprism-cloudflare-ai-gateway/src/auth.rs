@@ -188,26 +188,49 @@ async fn resolve_send(
     request: ApiKeyResolveRequest,
     cancellation: CancellationToken,
 ) -> Result<Option<ResolvedAuth>, AuthError> {
+    let environment = request
+        .credential
+        .as_ref()
+        .map(|credential| credential.environment.clone())
+        .unwrap_or_default();
     let key = value_send("CLOUDFLARE_API_KEY", &request, cancellation.clone()).await?;
     let account = value_send("CLOUDFLARE_ACCOUNT_ID", &request, cancellation.clone()).await?;
     let gateway = value_send("CLOUDFLARE_GATEWAY_ID", &request, cancellation).await?;
-    resolved(key, account, gateway, request.credential.is_some())
+    resolved(
+        key,
+        account,
+        gateway,
+        environment,
+        request.credential.is_some(),
+    )
 }
 
 async fn resolve_local(
     request: LocalApiKeyResolveRequest,
     cancellation: CancellationToken,
 ) -> Result<Option<ResolvedAuth>, AuthError> {
+    let environment = request
+        .credential
+        .as_ref()
+        .map(|credential| credential.environment.clone())
+        .unwrap_or_default();
     let key = value_local("CLOUDFLARE_API_KEY", &request, cancellation.clone()).await?;
     let account = value_local("CLOUDFLARE_ACCOUNT_ID", &request, cancellation.clone()).await?;
     let gateway = value_local("CLOUDFLARE_GATEWAY_ID", &request, cancellation).await?;
-    resolved(key, account, gateway, request.credential.is_some())
+    resolved(
+        key,
+        account,
+        gateway,
+        environment,
+        request.credential.is_some(),
+    )
 }
 
 fn resolved(
     key: Option<String>,
     account: Option<String>,
     gateway: Option<String>,
+    environment: BTreeMap<String, String>,
     stored: bool,
 ) -> Result<Option<ResolvedAuth>, AuthError> {
     let (Some(key), Some(account), Some(gateway)) =
@@ -229,6 +252,7 @@ fn resolved(
         headers,
         transport_headers,
         base_url: None,
+        environment,
         source: AuthSource::new(if stored {
             "stored credential"
         } else {

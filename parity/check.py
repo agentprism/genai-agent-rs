@@ -94,8 +94,8 @@ def candidate_upstream_checkout(root: Path, errors: list[str]) -> Path | None:
         return candidate
 
     candidates = (
-        Path("/home/vikash/pi-pin-8fa7eebd2"),
-        root.parent / "pi-pin-8fa7eebd2",
+        Path("/home/vikash/pi-pin-e86823096"),
+        root.parent / "pi-pin-e86823096",
     )
     for candidate in candidates:
         if candidate.is_dir():

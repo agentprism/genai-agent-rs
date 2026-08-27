@@ -256,11 +256,12 @@ impl AuthResolver for BearerAuth {
         request: ResolveAuthRequest,
         cancellation: CancellationToken,
     ) -> SendBoxFuture<'_, Result<Option<ResolvedAuth>, AuthError>> {
+        let retain_api_key = request.model.is_none();
         Box::pin(async move {
             let Some(mut resolved) = self.inner.resolve(request, cancellation).await? else {
                 return Ok(None);
             };
-            move_api_key_to_bearer(&mut resolved)?;
+            apply_api_key_as_bearer(&mut resolved, retain_api_key)?;
             Ok(Some(resolved))
         })
     }
@@ -284,11 +285,12 @@ impl LocalAuthResolver for LocalBearerAuth {
         request: LocalResolveAuthRequest,
         cancellation: CancellationToken,
     ) -> LocalBoxFuture<'_, Result<Option<ResolvedAuth>, AuthError>> {
+        let retain_api_key = request.model.is_none();
         Box::pin(async move {
             let Some(mut resolved) = self.inner.resolve(request, cancellation).await? else {
                 return Ok(None);
             };
-            move_api_key_to_bearer(&mut resolved)?;
+            apply_api_key_as_bearer(&mut resolved, retain_api_key)?;
             Ok(Some(resolved))
         })
     }
@@ -303,12 +305,22 @@ impl LocalAuthResolver for LocalBearerAuth {
 }
 
 fn move_api_key_to_bearer(resolved: &mut ResolvedAuth) -> Result<(), AuthError> {
-    let Some(key) = resolved.api_key.take() else {
+    apply_api_key_as_bearer(resolved, false)
+}
+
+fn apply_api_key_as_bearer(
+    resolved: &mut ResolvedAuth,
+    retain_api_key: bool,
+) -> Result<(), AuthError> {
+    let Some(key) = resolved.api_key.as_ref() else {
         return Ok(());
     };
     let value = HeaderValue::from_str(&format!("Bearer {}", key.expose_secret()))
         .map_err(|_| AuthError::new("invalid_api_key", "API key is not a valid header"))?;
     resolved.headers.insert(header::AUTHORIZATION, value);
+    if !retain_api_key {
+        resolved.api_key = None;
+    }
     Ok(())
 }
 

@@ -77,6 +77,7 @@ fn fetch_context_with_gateway(base_url: Option<Url>) -> CatalogFetchContext {
             api_key: None,
             headers,
             transport_headers: HeaderMap::new(),
+            environment: Default::default(),
             base_url,
             source: AuthSource::new("test"),
         },

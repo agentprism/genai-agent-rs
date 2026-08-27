@@ -573,7 +573,7 @@ impl DeferredAuth {
                 .api_key
                 .as_ref()
                 .map(|secret| secret.expose_secret().to_owned()),
-            environment,
+            environment: environment.clone(),
         });
 
         let mut headers = HeaderMap::new();
@@ -586,6 +586,7 @@ impl DeferredAuth {
                 .or_else(|| Some(SecretString::new("provider-secret"))),
             headers,
             transport_headers: HeaderMap::new(),
+            environment,
             base_url: Some(Url::parse("https://resolved.example/v1").unwrap()),
             source: AuthSource::new("fixture"),
         }

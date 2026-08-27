@@ -4,6 +4,8 @@
   "type": "module",
   "scripts": {
     "capture": "bun run capture.ts",
+    "capture:openrouter-images": "bun run capture-openrouter-images.ts",
+    "capture:openrouter-images:live": "PI_FIXTURE_OPENROUTER_IMAGES_LIVE=1 bun run capture-openrouter-images.ts",
     "capture:credential": "PI_FIXTURE_CAPTURE_MODE=credential-backed bun run capture.ts",
     "capture:credential-replay": "PI_FIXTURE_CAPTURE_MODE=credential-replay bun run capture.ts"
   },

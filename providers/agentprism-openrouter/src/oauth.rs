@@ -678,6 +678,7 @@ fn resolved_oauth(access: SecretString) -> ResolvedAuth {
         api_key: Some(access),
         headers: HeaderMap::new(),
         transport_headers: HeaderMap::new(),
+        environment: std::collections::BTreeMap::new(),
         base_url: None,
         source: AuthSource::new("OAuth"),
     }

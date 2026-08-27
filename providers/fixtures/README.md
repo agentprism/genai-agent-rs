@@ -8,6 +8,8 @@ The additional `credential-backed/` tree retains provider frames originally capt
 
 The Rust tests validate corpus provenance, completeness, redaction, digests, and canonical `JSON.stringify` form. The M6.1 Responses conformance suite additionally performs byte-exact family encoding and encrypted-reasoning turn-two replay checks; the earlier OpenAI Completions and Anthropic Messages exact family comparisons remain tracked separately in the parity manifest.
 
+The M10.1 `openrouter-images/` tree is a separate non-streaming corpus captured from Pi commit `e86823096c5bad39e1ca282ec24bc5eb9bec745b`. Its `text-only`, `image-input`, and `text-and-image-output` cases contain the exact single request body produced by Pi's real `generateImages` entrypoint, the fixed JSON response consumed by Pi, redacted stable headers, and SHA-256 provenance. `live-acceptance.json` records a successful credential-backed call through the same Pi entrypoint using `google/gemini-2.5-flash-image`; it retains only response identity and output media types, never generated image bytes or credentials.
+
 ## Artifact layout
 
 Each `<family>/<case>/` and `credential-backed/<family>/<case>/` directory contains:
@@ -90,6 +92,14 @@ To perform a new live credential-backed acceptance capture instead:
 ```sh
 PI_PIN_DIR=/home/vikash/pi-pin-8fa7eebd2 bun run capture:credential
 ```
+
+To regenerate the M10.1 OpenRouter image corpus and its published image-model data:
+
+```sh
+PI_PIN_DIR=/home/vikash/pi-pin-e86823096 bun run capture:openrouter-images
+```
+
+Add `PI_FIXTURE_OPENROUTER_IMAGES_LIVE=1` (or run `capture:openrouter-images:live`) to repeat its optional credential-backed acceptance. `PI_FIXTURE_OPENROUTER_IMAGE_MODEL` selects another model from the pinned image catalog.
 
 `PI_FIXTURE_FAMILIES` and `PI_FIXTURE_CASES` accept comma-separated selections. `PI_FIXTURE_ANTHROPIC_CREDENTIAL=github-copilot` selects the optional Pi auth-store route; the default is OpenRouter. Model IDs can be overridden with `PI_FIXTURE_OPENROUTER_MODEL`, `PI_FIXTURE_OPENROUTER_ANTHROPIC_MODEL`, and `PI_FIXTURE_COPILOT_ANTHROPIC_MODEL`.
 

@@ -1115,6 +1115,7 @@ fn resolved_codex_token(
         api_key: Some(token),
         headers,
         transport_headers: HeaderMap::new(),
+        environment: std::collections::BTreeMap::new(),
         base_url: None,
         source: AuthSource::new(source),
     })

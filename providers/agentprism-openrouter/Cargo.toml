@@ -17,3 +17,6 @@ agentprism-openai = { path = "../agentprism-openai" }
 agentprism-provider-common = { path = "../agentprism-provider-common" }
 serde_json = { version = "1.0.145", features = ["arbitrary_precision", "preserve_order"] }
 url = { version = "2.5.7", features = ["serde"] }
+
+[dev-dependencies]
+futures-executor = "0.3.31"

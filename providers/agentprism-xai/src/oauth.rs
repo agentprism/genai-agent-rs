@@ -405,6 +405,7 @@ fn resolved(credential: &OAuthCredential) -> Result<ResolvedAuth, AuthError> {
         api_key: Some(credential.access.clone()),
         headers: HeaderMap::new(),
         transport_headers: HeaderMap::new(),
+        environment: std::collections::BTreeMap::new(),
         base_url: None,
         source: AuthSource::new("OAuth"),
     })

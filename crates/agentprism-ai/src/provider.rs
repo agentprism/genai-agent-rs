@@ -30,7 +30,7 @@ use futures_util::{
 };
 use http::HeaderMap;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::rc::Rc;
 use std::sync::{
@@ -142,6 +142,9 @@ pub struct ResolvedAuth {
     /// values here never participate in model, explicit, or transform header
     /// precedence.
     pub transport_headers: HeaderMap,
+    /// Provider-resolved environment associated with the selected credential.
+    /// Request-scoped values are overlaid by `Models` after auth resolution.
+    pub environment: BTreeMap<String, String>,
     /// Credential-specific endpoint override.
     pub base_url: Option<Url>,
     /// Source label for status and diagnostics.
@@ -155,6 +158,7 @@ impl fmt::Debug for ResolvedAuth {
             .field("api_key", &self.api_key)
             .field("headers", &"<redacted logical headers>")
             .field("transport_headers", &"<redacted transport invariants>")
+            .field("environment", &"[REDACTED PROVIDER ENVIRONMENT]")
             .field(
                 "base_url",
                 &self.base_url.as_ref().map(|_| "<redacted endpoint>"),
@@ -363,6 +367,7 @@ impl AuthResolver for AnonymousAuthResolver {
                 api_key: None,
                 headers: HeaderMap::new(),
                 transport_headers: HeaderMap::new(),
+                environment: BTreeMap::new(),
                 base_url: None,
                 source: AuthSource::new("ambient"),
             }))
@@ -381,6 +386,7 @@ impl LocalAuthResolver for AnonymousAuthResolver {
                 api_key: None,
                 headers: HeaderMap::new(),
                 transport_headers: HeaderMap::new(),
+                environment: BTreeMap::new(),
                 base_url: None,
                 source: AuthSource::new("ambient"),
             }))
@@ -2366,6 +2372,12 @@ pub struct ProviderRegistration {
     pub filter_models: Option<Arc<ModelAvailabilityFilter>>,
     /// API-family dispatch table.
     pub apis: HashMap<ApiId, Arc<dyn ChatApi>>,
+    /// Immutable image-generation catalog, distinct from the chat catalog.
+    pub image_models: Arc<[crate::ImageModelDescriptor]>,
+    /// Optional provider-owned dynamic image catalog source.
+    pub image_model_source: Option<Arc<dyn crate::ImageModelCatalogSource>>,
+    /// Image API-family dispatch table.
+    pub image_apis: HashMap<ApiId, Arc<dyn crate::ImagesApi>>,
     /// Provider-default retry policy.
     pub retry_policy: RetryPolicy,
     /// Provider retry classifier override.
@@ -2381,6 +2393,9 @@ impl fmt::Debug for ProviderRegistration {
             .field("refreshable", &self.catalog.catalog_source().is_some())
             .field("credential_scoped", &self.filter_models.is_some())
             .field("apis", &self.apis.keys())
+            .field("image_models", &self.image_models.len())
+            .field("image_refreshable", &self.image_model_source.is_some())
+            .field("image_apis", &self.image_apis.keys())
             .field("retry_policy", &self.retry_policy)
             .finish_non_exhaustive()
     }
@@ -2409,6 +2424,20 @@ impl ProviderRegistration {
                 });
             }
         }
+        for model in self.image_models.iter() {
+            if model.model_ref.provider != self.descriptor.id {
+                return Err(ProviderRegistrationError::ModelProviderMismatch {
+                    registration: self.descriptor.id.clone(),
+                    model: model.model_ref.clone(),
+                });
+            }
+            if !self.image_apis.contains_key(&model.api) {
+                return Err(ProviderRegistrationError::MissingApi {
+                    provider: self.descriptor.id.clone(),
+                    api: model.api.clone(),
+                });
+            }
+        }
         Ok(())
     }
 }
@@ -2422,6 +2451,9 @@ pub struct ProviderRegistrationBuilder {
     filter_models: Option<Arc<ModelAvailabilityFilter>>,
     preserve_catalog: bool,
     apis: HashMap<ApiId, Arc<dyn ChatApi>>,
+    image_models: Arc<[crate::ImageModelDescriptor]>,
+    image_model_source: Option<Arc<dyn crate::ImageModelCatalogSource>>,
+    image_apis: HashMap<ApiId, Arc<dyn crate::ImagesApi>>,
     retry_policy: RetryPolicy,
     retry_classifier: Arc<dyn RetryClassifier>,
 }
@@ -2437,6 +2469,9 @@ impl ProviderRegistrationBuilder {
             filter_models: None,
             preserve_catalog: false,
             apis: HashMap::new(),
+            image_models: Arc::from(Vec::new()),
+            image_model_source: None,
+            image_apis: HashMap::new(),
             retry_policy: RetryPolicy::default(),
             retry_classifier: Arc::new(DefaultRetryClassifier::default()),
         }
@@ -2503,6 +2538,28 @@ impl ProviderRegistrationBuilder {
         self
     }
 
+    /// Sets the provider's static image-generation catalog.
+    pub fn image_models(mut self, models: Vec<crate::ImageModelDescriptor>) -> Self {
+        self.image_models = Arc::from(models);
+        self
+    }
+
+    /// Sets a provider-owned dynamic image-model source.
+    pub fn image_model_source(mut self, source: Arc<dyn crate::ImageModelCatalogSource>) -> Self {
+        self.image_model_source = Some(source);
+        self
+    }
+
+    /// Registers one image-generation API implementation.
+    pub fn image_api(
+        mut self,
+        api: impl Into<ApiId>,
+        implementation: Arc<dyn crate::ImagesApi>,
+    ) -> Self {
+        self.image_apis.insert(api.into(), implementation);
+        self
+    }
+
     /// Sets provider-default retry policy.
     pub fn retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
         self.retry_policy = retry_policy;
@@ -2525,6 +2582,9 @@ impl ProviderRegistrationBuilder {
             filter_models,
             preserve_catalog,
             apis,
+            image_models,
+            image_model_source,
+            image_apis,
             retry_policy,
             retry_classifier,
         } = self;
@@ -2553,6 +2613,9 @@ impl ProviderRegistrationBuilder {
             catalog,
             filter_models,
             apis,
+            image_models,
+            image_model_source,
+            image_apis,
             retry_policy,
             retry_classifier,
         };
@@ -2629,6 +2692,12 @@ pub struct LocalProviderRegistration {
     pub filter_models: Option<Rc<LocalModelAvailabilityFilter>>,
     /// Local API-family dispatch table.
     pub apis: HashMap<ApiId, Rc<dyn LocalChatApi>>,
+    /// Immutable local image-generation catalog.
+    pub image_models: Rc<[crate::ImageModelDescriptor]>,
+    /// Optional local dynamic image catalog source.
+    pub image_model_source: Option<Rc<dyn crate::LocalImageModelCatalogSource>>,
+    /// Local image API-family dispatch table.
+    pub image_apis: HashMap<ApiId, Rc<dyn crate::LocalImagesApi>>,
     /// Provider-default retry policy.
     pub retry_policy: RetryPolicy,
     /// Provider local retry classifier override.
@@ -2644,6 +2713,9 @@ impl fmt::Debug for LocalProviderRegistration {
             .field("refreshable", &self.catalog.catalog_source().is_some())
             .field("credential_scoped", &self.filter_models.is_some())
             .field("apis", &self.apis.keys())
+            .field("image_models", &self.image_models.len())
+            .field("image_refreshable", &self.image_model_source.is_some())
+            .field("image_apis", &self.image_apis.keys())
             .field("retry_policy", &self.retry_policy)
             .finish_non_exhaustive()
     }
@@ -2672,6 +2744,20 @@ impl LocalProviderRegistration {
                 });
             }
         }
+        for model in self.image_models.iter() {
+            if model.model_ref.provider != self.descriptor.id {
+                return Err(ProviderRegistrationError::ModelProviderMismatch {
+                    registration: self.descriptor.id.clone(),
+                    model: model.model_ref.clone(),
+                });
+            }
+            if !self.image_apis.contains_key(&model.api) {
+                return Err(ProviderRegistrationError::MissingApi {
+                    provider: self.descriptor.id.clone(),
+                    api: model.api.clone(),
+                });
+            }
+        }
         Ok(())
     }
 }
@@ -2685,6 +2771,9 @@ pub struct LocalProviderRegistrationBuilder {
     filter_models: Option<Rc<LocalModelAvailabilityFilter>>,
     preserve_catalog: bool,
     apis: HashMap<ApiId, Rc<dyn LocalChatApi>>,
+    image_models: Rc<[crate::ImageModelDescriptor]>,
+    image_model_source: Option<Rc<dyn crate::LocalImageModelCatalogSource>>,
+    image_apis: HashMap<ApiId, Rc<dyn crate::LocalImagesApi>>,
     retry_policy: RetryPolicy,
     retry_classifier: Rc<dyn LocalRetryClassifier>,
 }
@@ -2700,6 +2789,9 @@ impl LocalProviderRegistrationBuilder {
             filter_models: None,
             preserve_catalog: false,
             apis: HashMap::new(),
+            image_models: Rc::from(Vec::new()),
+            image_model_source: None,
+            image_apis: HashMap::new(),
             retry_policy: RetryPolicy::default(),
             retry_classifier: Rc::new(LocalDefaultRetryClassifier::default()),
         }
@@ -2765,6 +2857,31 @@ impl LocalProviderRegistrationBuilder {
         self
     }
 
+    /// Sets the provider's static local image-generation catalog.
+    pub fn image_models(mut self, models: Vec<crate::ImageModelDescriptor>) -> Self {
+        self.image_models = Rc::from(models);
+        self
+    }
+
+    /// Sets a provider-owned local dynamic image-model source.
+    pub fn image_model_source(
+        mut self,
+        source: Rc<dyn crate::LocalImageModelCatalogSource>,
+    ) -> Self {
+        self.image_model_source = Some(source);
+        self
+    }
+
+    /// Registers one local image-generation API implementation.
+    pub fn image_api(
+        mut self,
+        api: impl Into<ApiId>,
+        implementation: Rc<dyn crate::LocalImagesApi>,
+    ) -> Self {
+        self.image_apis.insert(api.into(), implementation);
+        self
+    }
+
     /// Sets provider-default retry policy.
     pub fn retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
         self.retry_policy = retry_policy;
@@ -2787,6 +2904,9 @@ impl LocalProviderRegistrationBuilder {
             filter_models,
             preserve_catalog,
             apis,
+            image_models,
+            image_model_source,
+            image_apis,
             retry_policy,
             retry_classifier,
         } = self;
@@ -2814,6 +2934,9 @@ impl LocalProviderRegistrationBuilder {
             catalog,
             filter_models,
             apis,
+            image_models,
+            image_model_source,
+            image_apis,
             retry_policy,
             retry_classifier,
         };

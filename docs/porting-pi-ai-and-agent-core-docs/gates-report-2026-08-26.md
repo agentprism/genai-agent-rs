@@ -287,3 +287,7 @@ Acceptance commands:
 - `git diff --check` — PASS
 
 No command or file access was denied by the sandbox.
+
+## M10.1 wire-gate addendum — 2026-08-26
+
+The wire gate now includes the `openrouter-images` API family at pi pin `e86823096c5bad39e1ca282ec24bc5eb9bec745b`. The deterministic corpus contains the text-only, image-input, and text-and-image-output scenarios; `wire_openrouter_images_pi_exact` byte-compares their ordered request bodies and passed. The separate OpenRouter image catalog contains the 45 models published by pi at that pin. Credential-backed acceptance ran with `google/gemini-2.5-flash-image`; it returned text plus a PNG image, and the artifact persists neither the credential nor image bytes. The final parity inventory has zero planned mappings: 154 semantic-parity and 6 deliberate-divergence upstream files, represented by 237 semantic-parity and 15 deliberate-divergence manifest entries.

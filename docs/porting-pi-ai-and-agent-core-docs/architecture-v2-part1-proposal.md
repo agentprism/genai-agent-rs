@@ -715,6 +715,8 @@ pub struct ResolvedAuth {
 }
 ```
 
+> Correction: Pinned Pi keeps provider-scoped environment/config values on the outer `AuthResult.env`, separate from `ModelAuth`, and carries request authentication plus that environment through the same resolution operation. The Rust object-safe resolver returns one owned `ResolvedAuth`, so its chosen representation flattens `environment: BTreeMap<String, String>` onto `ResolvedAuth`; `Models` overlays request-scoped environment values only after resolution. `ResolvedAuth` also carries a private `transport_headers: HeaderMap` channel for credential-derived signer/SDK invariants required by Part 2 §2.4. Neither addition is serialized or exposed as model auth, and ordinary logical header precedence remains unchanged (`packages/ai/src/auth/types.ts`; `packages/ai/src/auth/resolve.ts`; `packages/ai/src/images-models.ts:183–212`).
+
 Do not derive ordinary `Debug` or `Serialize` for secret-bearing types. Use redacted wrappers.
 
 ### Credential store transaction

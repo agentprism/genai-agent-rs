@@ -1,6 +1,6 @@
 # Parity inventory for architecture v2 part 2 §10, pinned to the source commit
-# below. Planned mappings are permitted again per the owner rulings of 2026-08-26
-# (M10 image generation; pi-sync additions for new upstream tests).
+# below. M10 completes the image-generation mappings introduced by the
+# 2026-08-26 owner ruling.
 upstream_repository = "earendil-works/pi"
 upstream_commit = "e86823096c5bad39e1ca282ec24bc5eb9bec745b"
 
@@ -49,6 +49,7 @@ rust = [
   "wire_json_serde_absent_fields_are_omitted",
   "wire_json_string_escaping_matches_pi",
   "wire_json_surrogate_sanitation_matches_pi",
+  "wire_openrouter_images_pi_exact",
 ]
 status = "semantic-parity"
 
@@ -796,12 +797,8 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/fetch-option.test.ts"
-rust = ["injected_http_transport_receives_final_request", "local_provider_components_accept_rc_state"]
-status = "planned"
-milestone = "M10"
-owner_ruling = "provider-api-implementations.mdx#not-ported"
-replacement = "Every chat API uses the injected Send/Local HttpTransport capability; the standalone image-generation fetch scenario has no Rust surface."
-reason = "Owner ruling 2026-08-26: image generation is in scope and ports as Milestone 10 after the core delivery; chat scenarios in this file that already have parity keep their listed Rust tests, and the image scenarios complete in M10."
+rust = ["injected_http_transport_receives_final_request", "injected_image_http_transport_receives_final_request", "local_provider_components_accept_rc_state", "openrouter_images_header_and_payload_middleware_send_and_local_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/fireworks-models.test.ts"
@@ -875,12 +872,8 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/image-model-data.test.ts"
-rust = []
-status = "planned"
-milestone = "M10"
-owner_ruling = "provider-api-implementations.mdx#not-ported"
-replacement = "Chat-model image input/output remains supported through canonical ContentBlock values and the §10.8 provider fixture corpus; the separate image-generation control plane is not shipped."
-reason = "Owner ruling 2026-08-26: image generation is in scope and ports as Milestone 10 after the core delivery; chat scenarios in this file that already have parity keep their listed Rust tests, and the image scenarios complete in M10."
+rust = ["openrouter_image_catalog_ignores_incomplete_non_image_records_pi_exact", "openrouter_image_catalog_matches_pi_published_data", "openrouter_image_catalog_parser_is_strict"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/image-tool-result.test.ts"
@@ -889,21 +882,13 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/images-models.test.ts"
-rust = []
-status = "planned"
-milestone = "M10"
-owner_ruling = "provider-api-implementations.mdx#not-ported"
-replacement = "Models remains the chat model/provider/auth/catalog control plane; no parallel ImagesModels control plane is exposed."
-reason = "Owner ruling 2026-08-26: image generation is in scope and ports as Milestone 10 after the core delivery; chat scenarios in this file that already have parity keep their listed Rust tests, and the image scenarios complete in M10."
+rust = ["models_builtin_openrouter_image_provider_catalog_and_auth_send_and_local_pi_exact", "models_image_auth_resolver_triggered_cancellation_send_and_local_pi_exact", "models_image_catalog_refresh_deduplicates_and_is_best_effort_send_and_local_pi_exact", "models_image_metadata_reaches_provider_send_and_local_pi_exact", "models_image_pending_auth_cancellation_send_and_local_pi_exact", "models_image_refresh_replacement_and_cleanup_are_generation_scoped_send_and_local_pi_exact", "models_image_registers_providers_and_reads_models_synchronously_send_and_local_pi_exact", "models_image_resolves_auth_and_merges_environment_send_and_local_pi_exact", "models_image_unknown_provider_and_unconfigured_auth_are_in_band_send_and_local_pi_exact", "openrouter_images_auth_eligibility_ignores_final_authorization_send_and_local_pi_exact", "openrouter_images_header_precedence_send_and_local_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/images.test.ts"
-rust = []
-status = "planned"
-milestone = "M10"
-owner_ruling = "provider-api-implementations.mdx#not-ported"
-replacement = "Canonical image blocks are supported for chat requests, responses, tool results, and handoff; standalone image generation is not exposed."
-reason = "Owner ruling 2026-08-26: image generation is in scope and ports as Milestone 10 after the core delivery; chat scenarios in this file that already have parity keep their listed Rust tests, and the image scenarios complete in M10."
+rust = ["openrouter_images_hermetic_generation_scenarios", "wire_openrouter_images_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/interleaved-thinking.test.ts"
@@ -1130,12 +1115,8 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/openrouter-images.test.ts"
-rust = []
-status = "planned"
-milestone = "M10"
-owner_ruling = "provider-api-implementations.mdx#not-ported"
-replacement = "No standalone OpenRouter Images API is exposed; OpenRouter chat image blocks remain covered by the OpenAI-compatible wire and handoff suites."
-reason = "Owner ruling 2026-08-26: image generation is in scope and ports as Milestone 10 after the core delivery; chat scenarios in this file that already have parity keep their listed Rust tests, and the image scenarios complete in M10."
+rust = ["openrouter_images::tests::openrouter_images_decoder_extracts_text_and_valid_data_urls", "openrouter_images::tests::openrouter_images_decoder_preserves_null_usage_and_rejects_malformed_shapes", "openrouter_images::tests::openrouter_images_json_replacement_decodes_invalid_utf8_pi_exact", "openrouter_images::tests::openrouter_images_lowering_preserves_modalities_and_data_urls", "openrouter_images_abort_is_in_band", "openrouter_images_already_aborted_direct_adapter_send_and_local_pi_exact", "openrouter_images_auth_eligibility_ignores_final_authorization_send_and_local_pi_exact", "openrouter_images_data_url_extraction_send_and_local_pi_exact", "openrouter_images_deleted_logical_authorization_reveals_sdk_default_send_and_local_pi_exact", "openrouter_images_direct_sdk_authorization_send_and_local_pi_exact", "openrouter_images_header_and_payload_middleware_send_and_local_pi_exact", "openrouter_images_header_precedence_send_and_local_pi_exact", "openrouter_images_hermetic_generation_scenarios", "openrouter_images_missing_api_key_is_in_band", "openrouter_images_non_success_body_failure_retries_send_and_local_pi_exact", "openrouter_images_observer_precedes_semantic_projection_send_and_local_pi_exact", "openrouter_images_payload_callback_error_after_cancellation_is_aborted_send_and_local_pi_exact", "openrouter_images_projection_error_after_observer_cancellation_is_aborted_send_and_local_pi_exact", "openrouter_images_projection_failure_retains_assigned_fields_send_and_local_pi_exact", "openrouter_images_provider_errors_retry_send_and_local_pi_exact", "openrouter_images_response_callback_error_after_cancellation_is_aborted_send_and_local_pi_exact", "openrouter_images_sdk_content_type_and_204_parsing_send_and_local_pi_exact", "openrouter_images_success_body_and_json_fail_once_send_and_local_pi_exact", "openrouter_images_transport_and_body_errors_are_redacted_send_and_local_pi_exact", "wire_openrouter_images_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/openrouter-oauth.test.ts"
@@ -1159,12 +1140,8 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/provider-error-body-passthrough.test.ts"
-rust = []
-status = "planned"
-milestone = "M10"
-owner_ruling = "provider-api-implementations.mdx#not-ported"
-replacement = "Supported chat providers preserve structured HTTP status/body diagnostics in their family conformance suites; the standalone OpenRouter Images call is absent."
-reason = "Owner ruling 2026-08-26: image generation is in scope and ports as Milestone 10 after the core delivery; chat scenarios in this file that already have parity keep their listed Rust tests, and the image scenarios complete in M10."
+rust = ["openrouter_images_provider_error_body_passthrough", "openrouter_images_transport_and_body_errors_are_redacted_send_and_local_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/provider-error-body-regression.test.ts"
@@ -1253,12 +1230,8 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/telemetry-options.test.ts"
-rust = ["deferred_models_request_options_reach_handler_send_and_local", "telemetry_context_survives_models_dispatch_send_and_local_pi_exact", "telemetry_context_survives_simple_option_conversion_pi_exact"]
-status = "planned"
-milestone = "M10"
-owner_ruling = "provider-api-implementations.mdx#not-ported"
-replacement = "Chat and deferred request telemetry contexts use the opaque non-persisted TelemetryContextHandle; the separately excluded image-generation dispatch has no Rust surface."
-reason = "Owner ruling 2026-08-26: image generation is in scope and ports as Milestone 10 after the core delivery; chat scenarios in this file that already have parity keep their listed Rust tests, and the image scenarios complete in M10."
+rust = ["deferred_models_request_options_reach_handler_send_and_local", "image_telemetry_context_survives_direct_and_models_dispatch_send_and_local_pi_exact", "telemetry_context_survives_models_dispatch_send_and_local_pi_exact", "telemetry_context_survives_simple_option_conversion_pi_exact"]
+status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/text.test.ts"

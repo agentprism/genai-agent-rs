@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "family": "openrouter-images",
+  "case": "text-only",
+  "description": "Text prompt requesting image-only output.",
+  "piCommit": "e86823096c5bad39e1ca282ec24bc5eb9bec745b",
+  "model": {
+    "id": "fixture/text-only",
+    "name": "Fixture text-only",
+    "api": "openrouter-images",
+    "provider": "openrouter",
+    "baseUrl": "http://127.0.0.1:<injected-port>/api/v1",
+    "input": [
+      "text",
+      "image"
+    ],
+    "output": [
+      "image"
+    ],
+    "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0
+    }
+  },
+  "context": {
+    "input": [
+      {
+        "type": "text",
+        "text": "Draw a deterministic blue square."
+      }
+    ]
+  },
+  "options": {
+    "maxRetries": 0,
+    "timeoutMs": 10000,
+    "apiKey": "[REDACTED]"
+  },
+  "entrypoint": "generateImages",
+  "deterministicInjections": {
+    "timestamp": 1700000000000
+  }
+}

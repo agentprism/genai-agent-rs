@@ -756,6 +756,7 @@ fn radius_auth(credential: &OAuthCredential) -> Result<ResolvedAuth, AuthError> 
         api_key: None,
         headers,
         transport_headers: HeaderMap::new(),
+        environment: std::collections::BTreeMap::new(),
         base_url: Some(gateway_url.clone()),
         source: AuthSource::new("OAuth"),
     })

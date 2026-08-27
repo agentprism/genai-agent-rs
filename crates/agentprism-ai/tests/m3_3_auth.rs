@@ -141,6 +141,7 @@ impl OAuthAuth for FakeOAuth {
                 api_key: Some(access),
                 headers: http::HeaderMap::new(),
                 transport_headers: http::HeaderMap::new(),
+                environment: Default::default(),
                 base_url: None,
                 source: AuthSource::new("OAuth"),
             })
@@ -202,6 +203,7 @@ impl LocalOAuthAuth for FakeLocalOAuth {
                 api_key: Some(access),
                 headers: http::HeaderMap::new(),
                 transport_headers: http::HeaderMap::new(),
+                environment: Default::default(),
                 base_url: None,
                 source: AuthSource::new("OAuth"),
             })
@@ -315,6 +317,7 @@ impl LocalAuthResolver for CapturingLocalAuth {
                 api_key: key,
                 headers: http::HeaderMap::new(),
                 transport_headers: http::HeaderMap::new(),
+                environment: Default::default(),
                 base_url: None,
                 source: AuthSource::new("local explicit override"),
             }))

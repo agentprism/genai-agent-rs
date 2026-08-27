@@ -7,27 +7,28 @@ use crate::{
     CancellationToken, CatalogError, CatalogFetchContext, CatalogSnapshot, Context, Credential,
     CredentialInfo, CredentialStore, DeferredCancelOptions, DeferredFetchOptions, DeferredHandle,
     DeferredModelRuntime, EmptyAuthContext, ErasedApiFullOptions, ErasedPayloadTransform,
-    HeaderTransform, HeaderTransformContext, InMemoryCredentialStore, InMemoryModelOverrideStore,
-    InMemoryModelsStore, LocalAssistantStream, LocalAttemptMiddleware, LocalAuthContext,
-    LocalAuthInteraction, LocalBoxFuture, LocalCredentialStore, LocalDeferredModelRuntime,
-    LocalErasedPayloadTransform, LocalHeaderTransform, LocalInMemoryCredentialStore,
-    LocalInMemoryModelOverrideStore, LocalInMemoryModelsStore, LocalModelOverrideStore,
-    LocalModelRuntime, LocalModelsStore, LocalPayloadTransform, LocalPayloadTransformAdapter,
-    LocalProviderCatalogState, LocalProviderRefreshCoordination, LocalProviderRegistration,
-    LocalResolvedApiRequest, LocalResolvedDeferredRequest, LocalResponseObserver, ModelDescriptor,
-    ModelOverride, ModelOverrideStore, ModelRef, ModelRequest, ModelRuntime, ModelsStore,
-    PayloadTransform, PayloadTransformAdapter, ProviderCatalogLayers, ProviderCatalogState,
-    ProviderRefreshCoordination, ProviderRefreshResult, ProviderRegistration,
-    ProviderRegistrationError, RefreshGeneration, RefreshReport, RefreshRequest, RequestStartError,
-    RequestStartErrorKind, ResolvedApiRequest, ResolvedDeferredRequest, ResponseObserver,
-    SendBoxFuture, SimpleGenerationOptions, apply_anthropic_messages_default_headers,
-    apply_header_spec, apply_openai_codex_responses_session_affinity_headers,
+    HeaderTransform, HeaderTransformContext, ImageHeaderTransformContext, InMemoryCredentialStore,
+    InMemoryModelOverrideStore, InMemoryModelsStore, LocalAssistantStream, LocalAttemptMiddleware,
+    LocalAuthContext, LocalAuthInteraction, LocalBoxFuture, LocalCredentialStore,
+    LocalDeferredModelRuntime, LocalErasedPayloadTransform, LocalHeaderTransform,
+    LocalInMemoryCredentialStore, LocalInMemoryModelOverrideStore, LocalInMemoryModelsStore,
+    LocalModelOverrideStore, LocalModelRuntime, LocalModelsStore, LocalPayloadTransform,
+    LocalPayloadTransformAdapter, LocalProviderCatalogState, LocalProviderRefreshCoordination,
+    LocalProviderRegistration, LocalResolvedApiRequest, LocalResolvedDeferredRequest,
+    LocalResponseObserver, ModelDescriptor, ModelOverride, ModelOverrideStore, ModelRef,
+    ModelRequest, ModelRuntime, ModelsStore, PayloadTransform, PayloadTransformAdapter,
+    ProviderCatalogLayers, ProviderCatalogState, ProviderRefreshCoordination,
+    ProviderRefreshResult, ProviderRegistration, ProviderRegistrationError, RefreshGeneration,
+    RefreshReport, RefreshRequest, RequestStartError, RequestStartErrorKind, ResolvedApiRequest,
+    ResolvedDeferredRequest, ResponseObserver, SendBoxFuture, SimpleGenerationOptions,
+    apply_anthropic_messages_default_headers, apply_header_spec,
+    apply_openai_codex_responses_session_affinity_headers,
     apply_openai_completions_session_affinity_headers,
     apply_openai_responses_session_affinity_headers, local_provider_default_headers,
     merge_header_map, provider_default_headers, publish_candidate, publish_local_candidate,
     restore_local_persisted_candidate, restore_persisted_candidate,
 };
-use futures_util::future::{Either, join_all, select};
+use futures_util::future::{Either, FutureExt, Shared, join_all, select};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use indexmap::IndexMap;
 use std::cell::RefCell;
@@ -43,6 +44,19 @@ pub type ProviderSnapshot = Arc<[Arc<ProviderRegistration>]>;
 
 /// Immutable flattened model snapshot in provider registration order.
 pub type ModelSnapshot = Arc<[ModelDescriptor]>;
+
+/// Immutable flattened image-model snapshot in provider registration order.
+pub type ImageModelSnapshot = Arc<[crate::ImageModelDescriptor]>;
+
+type ImageRefreshFuture = Shared<
+    futures_util::future::BoxFuture<'static, Result<ImageModelSnapshot, crate::ImageCatalogError>>,
+>;
+
+type ImageRefreshKey = (crate::ProviderId, u64);
+
+struct ImageRefreshTask {
+    future: ImageRefreshFuture,
+}
 
 /// Concrete cloneable model/provider/auth control-plane handle.
 #[derive(Clone)]
@@ -60,6 +74,7 @@ struct ModelsInner {
     payload_transforms: Arc<[Arc<dyn ErasedPayloadTransform>]>,
     response_observers: Arc<[Arc<dyn ResponseObserver>]>,
     attempt_middleware: Arc<[Arc<dyn AttemptMiddleware>]>,
+    image_refreshes: std::sync::Mutex<BTreeMap<ImageRefreshKey, Arc<ImageRefreshTask>>>,
 }
 
 struct ProviderSlot {
@@ -69,6 +84,7 @@ struct ProviderSlot {
     // merely because the provider was temporarily removed.
     registration: Option<Arc<ProviderRegistration>>,
     coordination: Arc<ProviderRefreshCoordination>,
+    image_registration_generation: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -143,6 +159,370 @@ impl Models {
             })
             .collect::<Vec<_>>();
         Arc::from(models)
+    }
+
+    /// Returns the distinct image-generation catalog in provider order.
+    pub fn image_models(&self) -> ImageModelSnapshot {
+        Arc::from(
+            self.providers()
+                .iter()
+                .flat_map(|provider| provider.image_models.iter().cloned())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// Returns one provider's current image-model snapshot synchronously.
+    ///
+    /// Like Pi's `ImagesModels.getModels(provider)`, this never initiates a
+    /// refresh. Unknown providers produce an empty snapshot.
+    pub fn image_models_for(&self, provider_id: &crate::ProviderId) -> ImageModelSnapshot {
+        self.provider(provider_id).map_or_else(
+            || Arc::from(Vec::new()),
+            |provider| Arc::clone(&provider.image_models),
+        )
+    }
+
+    /// Looks up one image-generation model synchronously.
+    pub fn image_model(&self, model_ref: &ModelRef) -> Option<crate::ImageModelDescriptor> {
+        self.provider(&model_ref.provider)?
+            .image_models
+            .iter()
+            .find(|model| model.model_ref == *model_ref)
+            .cloned()
+    }
+
+    /// Explicitly refreshes dynamic image-model providers.
+    ///
+    /// A selected provider's failure is returned. Refreshing all providers is
+    /// best-effort and never fails because one provider fails. Static and
+    /// unknown providers are no-ops, matching Pi's `ImagesModels.refresh`.
+    pub fn refresh_image_models(
+        &self,
+        provider_id: Option<crate::ProviderId>,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, Result<(), crate::ImageCatalogError>> {
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                return if provider_id.is_some() {
+                    Err(crate::ImageCatalogError::new(
+                        "image catalog refresh cancelled",
+                    ))
+                } else {
+                    Ok(())
+                };
+            }
+            if let Some(provider_id) = provider_id {
+                let Some((provider, generation)) =
+                    self.image_provider_with_generation(&provider_id)
+                else {
+                    return Ok(());
+                };
+                self.refresh_image_provider(provider, generation, cancellation)
+                    .await?;
+                return Ok(());
+            }
+            let _ = join_all(self.image_providers_with_generations().into_iter().map(
+                |(provider, generation)| {
+                    let cancellation = cancellation.clone();
+                    async move {
+                        self.refresh_image_provider(provider, generation, cancellation)
+                            .await
+                    }
+                },
+            ))
+            .await;
+            Ok(())
+        })
+    }
+
+    async fn refresh_image_provider(
+        &self,
+        provider: Arc<ProviderRegistration>,
+        registration_generation: u64,
+        cancellation: CancellationToken,
+    ) -> Result<ImageModelSnapshot, crate::ImageCatalogError> {
+        let Some(source) = provider.image_model_source.as_ref().map(Arc::clone) else {
+            return Ok(Arc::clone(&provider.image_models));
+        };
+        let provider_id = provider.descriptor.id.clone();
+        let key = (provider_id.clone(), registration_generation);
+        let refresh = {
+            let mut refreshes = self
+                .inner
+                .image_refreshes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Arc::clone(refreshes.entry(key.clone()).or_insert_with(|| {
+                let source = Arc::clone(&source);
+                Arc::new(ImageRefreshTask {
+                    future:
+                        async move { source.fetch(CancellationToken::new()).await.map(Arc::from) }
+                            .boxed()
+                            .shared(),
+                })
+            }))
+        };
+        let result = match select(
+            Box::pin(refresh.future.clone()),
+            Box::pin(cancellation.cancelled()),
+        )
+        .await
+        {
+            Either::Left((result, _)) => result,
+            Either::Right(((), _)) => {
+                return Err(crate::ImageCatalogError::new(
+                    "image catalog refresh cancelled",
+                ));
+            }
+        };
+        let mut refreshes = self
+            .inner
+            .image_refreshes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if refreshes
+            .get(&key)
+            .is_some_and(|current| Arc::ptr_eq(current, &refresh))
+        {
+            refreshes.remove(&key);
+        }
+        drop(refreshes);
+        let snapshot = result?;
+        self.publish_image_snapshot_if_current(
+            &provider,
+            registration_generation,
+            Arc::clone(&snapshot),
+        )?;
+        Ok(snapshot)
+    }
+
+    fn image_provider_with_generation(
+        &self,
+        provider: &crate::ProviderId,
+    ) -> Option<(Arc<ProviderRegistration>, u64)> {
+        let providers = read_unpoisoned(&self.inner.providers);
+        let slot = providers.get(provider)?;
+        Some((
+            Arc::clone(slot.registration.as_ref()?),
+            slot.image_registration_generation,
+        ))
+    }
+
+    fn image_providers_with_generations(&self) -> Vec<(Arc<ProviderRegistration>, u64)> {
+        read_unpoisoned(&self.inner.providers)
+            .values()
+            .filter_map(|slot| {
+                slot.registration
+                    .as_ref()
+                    .map(|provider| (Arc::clone(provider), slot.image_registration_generation))
+            })
+            .collect()
+    }
+
+    fn publish_image_snapshot_if_current(
+        &self,
+        provider: &Arc<ProviderRegistration>,
+        registration_generation: u64,
+        snapshot: ImageModelSnapshot,
+    ) -> Result<(), crate::ImageCatalogError> {
+        let mut replacement = (**provider).clone();
+        replacement.image_models = snapshot;
+        replacement.validate().map_err(|error| {
+            crate::ImageCatalogError::new(format!("invalid image catalog: {error}"))
+        })?;
+        let replacement = Arc::new(replacement);
+        let mut providers = write_unpoisoned(&self.inner.providers);
+        let Some(slot) = providers.get_mut(&provider.descriptor.id) else {
+            return Ok(());
+        };
+        if slot.image_registration_generation != registration_generation
+            || !slot
+                .registration
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, provider))
+        {
+            return Ok(());
+        }
+        slot.registration = Some(replacement);
+        slot.image_registration_generation = slot.image_registration_generation.saturating_add(1);
+        Ok(())
+    }
+
+    /// Generates images through the registered provider capability.
+    ///
+    /// Like Pi's `ImagesModels.generate`, provider and configuration failures
+    /// are returned in-band as [`crate::AssistantImages`].
+    pub fn generate_images(
+        &self,
+        model: crate::ImageModelDescriptor,
+        context: crate::ImageGenerationContext,
+        options: crate::ImageGenerationOptions,
+        cancellation: CancellationToken,
+    ) -> SendBoxFuture<'_, crate::AssistantImages> {
+        Box::pin(async move {
+            let failure_model = model.model_ref.clone();
+            let failure_api = model.api.clone();
+            let failure = |reason, message: String| {
+                crate::AssistantImages::failure(
+                    &failure_model,
+                    failure_api.clone(),
+                    reason,
+                    message,
+                )
+            };
+            if cancellation.is_cancelled() {
+                return failure(
+                    crate::ImageGenerationStopReason::Error,
+                    "Request aborted".into(),
+                );
+            }
+            let Some(provider) = self.provider(&model.model_ref.provider) else {
+                return failure(
+                    crate::ImageGenerationStopReason::Error,
+                    format!("Unknown provider: {}", model.model_ref.provider),
+                );
+            };
+            let Some(api) = provider.image_apis.get(&model.api).cloned() else {
+                return failure(
+                    crate::ImageGenerationStopReason::Error,
+                    format!(
+                        "provider {} has no image API for {}",
+                        provider.descriptor.id, model.api
+                    ),
+                );
+            };
+
+            let crate::ImageGenerationOptions {
+                request: request_options,
+                auth: auth_overrides,
+                metadata,
+            } = options;
+            let request_environment = auth_overrides.environment.clone();
+
+            let auth = match await_or_cancelled(
+                provider.auth.resolve(
+                    crate::ResolveAuthRequest {
+                        provider: provider.descriptor.clone(),
+                        model: None,
+                        purpose: AuthResolutionPurpose::Request,
+                        credential_store: Arc::clone(&self.inner.credentials),
+                        auth_context: Arc::clone(&self.inner.auth_context),
+                        overrides: auth_overrides,
+                    },
+                    cancellation.clone(),
+                ),
+                &cancellation,
+            )
+            .await
+            {
+                Ok(auth) => auth,
+                Err(_) => {
+                    return failure(
+                        crate::ImageGenerationStopReason::Error,
+                        "Request aborted".into(),
+                    );
+                }
+            };
+            let auth = match auth {
+                Ok(Some(auth)) => auth,
+                Ok(None) => crate::ResolvedAuth {
+                    api_key: None,
+                    headers: http::HeaderMap::new(),
+                    transport_headers: http::HeaderMap::new(),
+                    environment: std::collections::BTreeMap::new(),
+                    base_url: None,
+                    source: crate::AuthSource::new("unconfigured"),
+                },
+                Err(error) => {
+                    return failure(crate::ImageGenerationStopReason::Error, error.to_string());
+                }
+            };
+            if cancellation.is_cancelled() {
+                return failure(
+                    crate::ImageGenerationStopReason::Error,
+                    "Request aborted".into(),
+                );
+            }
+
+            let endpoint = auth
+                .base_url
+                .clone()
+                .or_else(|| provider.descriptor.base_url.clone())
+                .unwrap_or_else(|| model.base_url.clone());
+            let mut auth_headers = auth.transport_headers.clone();
+            merge_header_map(&mut auth_headers, &auth.headers);
+            let mut headers = match provider_default_headers(provider.as_ref()) {
+                Ok(headers) => headers,
+                Err(error) => {
+                    return failure(crate::ImageGenerationStopReason::Error, error.to_string());
+                }
+            };
+            if let Err(error) = apply_header_spec(&mut headers, &model.headers) {
+                return failure(crate::ImageGenerationStopReason::Error, error.to_string());
+            }
+            merge_header_map(&mut headers, &auth.headers);
+            if let Err(error) = apply_header_spec(&mut headers, &request_options.headers) {
+                return failure(crate::ImageGenerationStopReason::Error, error.to_string());
+            }
+            for transform in self.inner.header_transforms.iter() {
+                match await_or_cancelled(
+                    transform.transform_image(
+                        ImageHeaderTransformContext {
+                            provider: &provider.descriptor.id,
+                            model: &model,
+                            api: &model.api,
+                            endpoint: &endpoint,
+                        },
+                        &mut headers,
+                    ),
+                    &cancellation,
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        return failure(crate::ImageGenerationStopReason::Error, error.to_string());
+                    }
+                    Err(_) => {
+                        return failure(
+                            crate::ImageGenerationStopReason::Error,
+                            "Request aborted".into(),
+                        );
+                    }
+                }
+            }
+            let mut environment = auth.environment;
+            environment.extend(request_environment);
+            let mut retry_policy = provider.retry_policy.clone();
+            if let Some(max_retries) = request_options.max_retries {
+                retry_policy.max_retries = max_retries;
+            }
+            if let Some(max_delay_ms) = request_options.max_retry_delay_ms {
+                retry_policy.max_server_delay = Some(Duration::from_millis(max_delay_ms));
+            }
+            let timeout = request_options.timeout_ms.map(Duration::from_millis);
+            api.generate(
+                crate::ResolvedImageRequest {
+                    model,
+                    context,
+                    request_options,
+                    endpoint,
+                    headers,
+                    auth_headers,
+                    environment,
+                    metadata,
+                    api_key: auth.api_key,
+                    payload_transforms: Arc::clone(&self.inner.payload_transforms),
+                    retry_policy,
+                    timeout,
+                    retry_classifier: Arc::clone(&provider.retry_classifier),
+                    response_observers: Arc::clone(&self.inner.response_observers),
+                    attempt_middleware: Arc::clone(&self.inner.attempt_middleware),
+                },
+                cancellation,
+            )
+            .await
+        })
     }
 
     /// Applies one provider's credential-scoped availability policy without
@@ -427,6 +807,8 @@ impl Models {
                 state.bind_coordination(Arc::clone(&slot.coordination));
             }
             let previous = slot.registration.replace(provider);
+            slot.image_registration_generation =
+                slot.image_registration_generation.saturating_add(1);
             if previous.is_none() {
                 // Map deletion followed by re-addition appends the provider to
                 // registration order while retaining its separate coordinator.
@@ -447,6 +829,7 @@ impl Models {
             ProviderSlot {
                 registration: Some(provider),
                 coordination,
+                image_registration_generation: 1,
             },
         );
         Ok(None)
@@ -460,7 +843,10 @@ impl Models {
         let mut providers = write_unpoisoned(&self.inner.providers);
         if let Some(slot) = providers.get_mut(provider) {
             slot.coordination.supersede_refresh();
-            return slot.registration.take();
+            let previous = slot.registration.take();
+            slot.image_registration_generation =
+                slot.image_registration_generation.saturating_add(1);
+            return previous;
         }
         let coordination = Arc::new(ProviderRefreshCoordination::new());
         coordination.supersede_refresh();
@@ -469,6 +855,7 @@ impl Models {
             ProviderSlot {
                 registration: None,
                 coordination,
+                image_registration_generation: 1,
             },
         );
         None
@@ -483,7 +870,10 @@ impl Models {
             }
         }
         for slot in providers.values_mut() {
-            slot.registration = None;
+            if slot.registration.take().is_some() {
+                slot.image_registration_generation =
+                    slot.image_registration_generation.saturating_add(1);
+            }
         }
     }
 
@@ -1038,6 +1428,7 @@ impl Models {
                 api_key: None,
                 headers: http::HeaderMap::new(),
                 transport_headers: http::HeaderMap::new(),
+                environment: std::collections::BTreeMap::new(),
                 base_url: None,
                 source: crate::AuthSource::new("explicit_header"),
             },
@@ -1235,6 +1626,7 @@ impl Models {
                     api_key: None,
                     headers: http::HeaderMap::new(),
                     transport_headers: http::HeaderMap::new(),
+                    environment: std::collections::BTreeMap::new(),
                     base_url: None,
                     source: crate::AuthSource::new("explicit_header"),
                 },
@@ -1592,6 +1984,8 @@ impl ModelsBuilder {
                     state.bind_coordination(Arc::clone(&slot.coordination));
                 }
                 slot.registration = Some(provider);
+                slot.image_registration_generation =
+                    slot.image_registration_generation.saturating_add(1);
             } else {
                 let coordination = Arc::new(ProviderRefreshCoordination::new());
                 if let Some(state) = provider.catalog.catalog_state() {
@@ -1602,6 +1996,7 @@ impl ModelsBuilder {
                     ProviderSlot {
                         registration: Some(provider),
                         coordination,
+                        image_registration_generation: 1,
                     },
                 );
             }
@@ -1617,6 +2012,7 @@ impl ModelsBuilder {
                 payload_transforms: Arc::from(self.payload_transforms),
                 response_observers: Arc::from(self.response_observers),
                 attempt_middleware: Arc::from(self.attempt_middleware),
+                image_refreshes: std::sync::Mutex::new(BTreeMap::new()),
             }),
         })
     }
@@ -1627,6 +2023,17 @@ pub type LocalProviderSnapshot = Rc<[Rc<LocalProviderRegistration>]>;
 
 /// Immutable flattened local model snapshot.
 pub type LocalModelSnapshot = Rc<[ModelDescriptor]>;
+
+/// Immutable flattened local image-model snapshot.
+pub type LocalImageModelSnapshot = Rc<[crate::ImageModelDescriptor]>;
+
+type LocalImageRefreshFuture = Shared<
+    crate::LocalBoxFuture<'static, Result<LocalImageModelSnapshot, crate::ImageCatalogError>>,
+>;
+
+struct LocalImageRefreshTask {
+    future: LocalImageRefreshFuture,
+}
 
 /// Cloneable single-threaded model/provider/auth control-plane handle.
 ///
@@ -1648,6 +2055,7 @@ struct LocalModelsInner {
     payload_transforms: Rc<[Rc<dyn LocalErasedPayloadTransform>]>,
     response_observers: Rc<[Rc<dyn LocalResponseObserver>]>,
     attempt_middleware: Rc<[Rc<dyn LocalAttemptMiddleware>]>,
+    image_refreshes: RefCell<BTreeMap<ImageRefreshKey, Rc<LocalImageRefreshTask>>>,
 }
 
 struct LocalProviderSlot {
@@ -1655,6 +2063,7 @@ struct LocalProviderSlot {
     // generation/publication coordination.
     registration: Option<Rc<LocalProviderRegistration>>,
     coordination: Rc<LocalProviderRefreshCoordination>,
+    image_registration_generation: u64,
 }
 
 impl fmt::Debug for LocalModels {
@@ -1718,6 +2127,352 @@ impl LocalModels {
                 })
                 .collect::<Vec<_>>(),
         )
+    }
+
+    /// Returns the distinct local image-generation catalog in provider order.
+    pub fn image_models(&self) -> LocalImageModelSnapshot {
+        Rc::from(
+            self.providers()
+                .iter()
+                .flat_map(|provider| provider.image_models.iter().cloned())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// Returns one local provider's current image-model snapshot
+    /// synchronously without initiating a refresh.
+    pub fn image_models_for(&self, provider_id: &crate::ProviderId) -> LocalImageModelSnapshot {
+        self.provider(provider_id).map_or_else(
+            || Rc::from(Vec::new()),
+            |provider| Rc::clone(&provider.image_models),
+        )
+    }
+
+    /// Looks up one local image-generation model synchronously.
+    pub fn image_model(&self, model_ref: &ModelRef) -> Option<crate::ImageModelDescriptor> {
+        self.provider(&model_ref.provider)?
+            .image_models
+            .iter()
+            .find(|model| model.model_ref == *model_ref)
+            .cloned()
+    }
+
+    /// Local counterpart of [`Models::refresh_image_models`].
+    pub fn refresh_image_models(
+        &self,
+        provider_id: Option<crate::ProviderId>,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, Result<(), crate::ImageCatalogError>> {
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                return if provider_id.is_some() {
+                    Err(crate::ImageCatalogError::new(
+                        "image catalog refresh cancelled",
+                    ))
+                } else {
+                    Ok(())
+                };
+            }
+            if let Some(provider_id) = provider_id {
+                let Some((provider, generation)) =
+                    self.image_provider_with_generation(&provider_id)
+                else {
+                    return Ok(());
+                };
+                self.refresh_image_provider(provider, generation, cancellation)
+                    .await?;
+                return Ok(());
+            }
+            let _ = join_all(self.image_providers_with_generations().into_iter().map(
+                |(provider, generation)| {
+                    let cancellation = cancellation.clone();
+                    async move {
+                        self.refresh_image_provider(provider, generation, cancellation)
+                            .await
+                    }
+                },
+            ))
+            .await;
+            Ok(())
+        })
+    }
+
+    async fn refresh_image_provider(
+        &self,
+        provider: Rc<LocalProviderRegistration>,
+        registration_generation: u64,
+        cancellation: CancellationToken,
+    ) -> Result<LocalImageModelSnapshot, crate::ImageCatalogError> {
+        let Some(source) = provider.image_model_source.as_ref().map(Rc::clone) else {
+            return Ok(Rc::clone(&provider.image_models));
+        };
+        let provider_id = provider.descriptor.id.clone();
+        let key = (provider_id.clone(), registration_generation);
+        let refresh = {
+            let mut refreshes = self.inner.image_refreshes.borrow_mut();
+            Rc::clone(refreshes.entry(key.clone()).or_insert_with(|| {
+                let source = Rc::clone(&source);
+                Rc::new(LocalImageRefreshTask {
+                    future:
+                        async move { source.fetch(CancellationToken::new()).await.map(Rc::from) }
+                            .boxed_local()
+                            .shared(),
+                })
+            }))
+        };
+        let result = match select(
+            Box::pin(refresh.future.clone()),
+            Box::pin(cancellation.cancelled()),
+        )
+        .await
+        {
+            Either::Left((result, _)) => result,
+            Either::Right(((), _)) => {
+                return Err(crate::ImageCatalogError::new(
+                    "image catalog refresh cancelled",
+                ));
+            }
+        };
+        let mut refreshes = self.inner.image_refreshes.borrow_mut();
+        if refreshes
+            .get(&key)
+            .is_some_and(|current| Rc::ptr_eq(current, &refresh))
+        {
+            refreshes.remove(&key);
+        }
+        drop(refreshes);
+        let snapshot = result?;
+        self.publish_image_snapshot_if_current(
+            &provider,
+            registration_generation,
+            Rc::clone(&snapshot),
+        )?;
+        Ok(snapshot)
+    }
+
+    fn image_provider_with_generation(
+        &self,
+        provider: &crate::ProviderId,
+    ) -> Option<(Rc<LocalProviderRegistration>, u64)> {
+        let providers = self.inner.providers.borrow();
+        let slot = providers.get(provider)?;
+        Some((
+            Rc::clone(slot.registration.as_ref()?),
+            slot.image_registration_generation,
+        ))
+    }
+
+    fn image_providers_with_generations(&self) -> Vec<(Rc<LocalProviderRegistration>, u64)> {
+        self.inner
+            .providers
+            .borrow()
+            .values()
+            .filter_map(|slot| {
+                slot.registration
+                    .as_ref()
+                    .map(|provider| (Rc::clone(provider), slot.image_registration_generation))
+            })
+            .collect()
+    }
+
+    fn publish_image_snapshot_if_current(
+        &self,
+        provider: &Rc<LocalProviderRegistration>,
+        registration_generation: u64,
+        snapshot: LocalImageModelSnapshot,
+    ) -> Result<(), crate::ImageCatalogError> {
+        let mut replacement = (**provider).clone();
+        replacement.image_models = snapshot;
+        replacement.validate().map_err(|error| {
+            crate::ImageCatalogError::new(format!("invalid image catalog: {error}"))
+        })?;
+        let replacement = Rc::new(replacement);
+        let mut providers = self.inner.providers.borrow_mut();
+        let Some(slot) = providers.get_mut(&provider.descriptor.id) else {
+            return Ok(());
+        };
+        if slot.image_registration_generation != registration_generation
+            || !slot
+                .registration
+                .as_ref()
+                .is_some_and(|current| Rc::ptr_eq(current, provider))
+        {
+            return Ok(());
+        }
+        slot.registration = Some(replacement);
+        slot.image_registration_generation = slot.image_registration_generation.saturating_add(1);
+        Ok(())
+    }
+
+    /// Generates images through a local provider capability.
+    pub fn generate_images(
+        &self,
+        model: crate::ImageModelDescriptor,
+        context: crate::ImageGenerationContext,
+        options: crate::ImageGenerationOptions,
+        cancellation: CancellationToken,
+    ) -> LocalBoxFuture<'_, crate::AssistantImages> {
+        Box::pin(async move {
+            let failure_model = model.model_ref.clone();
+            let failure_api = model.api.clone();
+            let failure = |reason, message: String| {
+                crate::AssistantImages::failure(
+                    &failure_model,
+                    failure_api.clone(),
+                    reason,
+                    message,
+                )
+            };
+            if cancellation.is_cancelled() {
+                return failure(
+                    crate::ImageGenerationStopReason::Error,
+                    "Request aborted".into(),
+                );
+            }
+            let Some(provider) = self.provider(&model.model_ref.provider) else {
+                return failure(
+                    crate::ImageGenerationStopReason::Error,
+                    format!("Unknown provider: {}", model.model_ref.provider),
+                );
+            };
+            let Some(api) = provider.image_apis.get(&model.api).cloned() else {
+                return failure(
+                    crate::ImageGenerationStopReason::Error,
+                    format!(
+                        "provider {} has no image API for {}",
+                        provider.descriptor.id, model.api
+                    ),
+                );
+            };
+            let crate::ImageGenerationOptions {
+                request: request_options,
+                auth: auth_overrides,
+                metadata,
+            } = options;
+            let request_environment = auth_overrides.environment.clone();
+            let auth = match await_or_cancelled(
+                provider.auth.resolve(
+                    crate::LocalResolveAuthRequest {
+                        provider: provider.descriptor.clone(),
+                        model: None,
+                        purpose: AuthResolutionPurpose::Request,
+                        credential_store: Rc::clone(&self.inner.credentials),
+                        auth_context: Rc::clone(&self.inner.auth_context),
+                        overrides: auth_overrides,
+                    },
+                    cancellation.clone(),
+                ),
+                &cancellation,
+            )
+            .await
+            {
+                Ok(auth) => auth,
+                Err(_) => {
+                    return failure(
+                        crate::ImageGenerationStopReason::Error,
+                        "Request aborted".into(),
+                    );
+                }
+            };
+            let auth = match auth {
+                Ok(Some(auth)) => auth,
+                Ok(None) => crate::ResolvedAuth {
+                    api_key: None,
+                    headers: http::HeaderMap::new(),
+                    transport_headers: http::HeaderMap::new(),
+                    environment: std::collections::BTreeMap::new(),
+                    base_url: None,
+                    source: crate::AuthSource::new("unconfigured"),
+                },
+                Err(error) => {
+                    return failure(crate::ImageGenerationStopReason::Error, error.to_string());
+                }
+            };
+            if cancellation.is_cancelled() {
+                return failure(
+                    crate::ImageGenerationStopReason::Error,
+                    "Request aborted".into(),
+                );
+            }
+            let endpoint = auth
+                .base_url
+                .clone()
+                .or_else(|| provider.descriptor.base_url.clone())
+                .unwrap_or_else(|| model.base_url.clone());
+            let mut auth_headers = auth.transport_headers.clone();
+            merge_header_map(&mut auth_headers, &auth.headers);
+            let mut headers = match local_provider_default_headers(provider.as_ref()) {
+                Ok(headers) => headers,
+                Err(error) => {
+                    return failure(crate::ImageGenerationStopReason::Error, error.to_string());
+                }
+            };
+            if let Err(error) = apply_header_spec(&mut headers, &model.headers) {
+                return failure(crate::ImageGenerationStopReason::Error, error.to_string());
+            }
+            merge_header_map(&mut headers, &auth.headers);
+            if let Err(error) = apply_header_spec(&mut headers, &request_options.headers) {
+                return failure(crate::ImageGenerationStopReason::Error, error.to_string());
+            }
+            for transform in self.inner.header_transforms.iter() {
+                match await_or_cancelled(
+                    transform.transform_image(
+                        ImageHeaderTransformContext {
+                            provider: &provider.descriptor.id,
+                            model: &model,
+                            api: &model.api,
+                            endpoint: &endpoint,
+                        },
+                        &mut headers,
+                    ),
+                    &cancellation,
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        return failure(crate::ImageGenerationStopReason::Error, error.to_string());
+                    }
+                    Err(_) => {
+                        return failure(
+                            crate::ImageGenerationStopReason::Error,
+                            "Request aborted".into(),
+                        );
+                    }
+                }
+            }
+            let mut environment = auth.environment;
+            environment.extend(request_environment);
+            let mut retry_policy = provider.retry_policy.clone();
+            if let Some(max_retries) = request_options.max_retries {
+                retry_policy.max_retries = max_retries;
+            }
+            if let Some(max_delay_ms) = request_options.max_retry_delay_ms {
+                retry_policy.max_server_delay = Some(Duration::from_millis(max_delay_ms));
+            }
+            let timeout = request_options.timeout_ms.map(Duration::from_millis);
+            api.generate(
+                crate::LocalResolvedImageRequest {
+                    model,
+                    context,
+                    request_options,
+                    endpoint,
+                    headers,
+                    auth_headers,
+                    environment,
+                    metadata,
+                    api_key: auth.api_key,
+                    payload_transforms: Rc::clone(&self.inner.payload_transforms),
+                    retry_policy,
+                    timeout,
+                    retry_classifier: Rc::clone(&provider.retry_classifier),
+                    response_observers: Rc::clone(&self.inner.response_observers),
+                    attempt_middleware: Rc::clone(&self.inner.attempt_middleware),
+                },
+                cancellation,
+            )
+            .await
+        })
     }
 
     /// Applies one local provider's credential-scoped availability policy.
@@ -1995,6 +2750,8 @@ impl LocalModels {
                 state.bind_coordination(Rc::clone(&slot.coordination));
             }
             let previous = slot.registration.replace(provider);
+            slot.image_registration_generation =
+                slot.image_registration_generation.saturating_add(1);
             if previous.is_none() {
                 let slot = providers
                     .shift_remove(&provider_id)
@@ -2013,6 +2770,7 @@ impl LocalModels {
             LocalProviderSlot {
                 registration: Some(provider),
                 coordination,
+                image_registration_generation: 1,
             },
         );
         Ok(None)
@@ -2026,7 +2784,10 @@ impl LocalModels {
         let mut providers = self.inner.providers.borrow_mut();
         if let Some(slot) = providers.get_mut(provider) {
             slot.coordination.supersede_refresh();
-            return slot.registration.take();
+            let previous = slot.registration.take();
+            slot.image_registration_generation =
+                slot.image_registration_generation.saturating_add(1);
+            return previous;
         }
         let coordination = Rc::new(LocalProviderRefreshCoordination::new());
         coordination.supersede_refresh();
@@ -2035,6 +2796,7 @@ impl LocalModels {
             LocalProviderSlot {
                 registration: None,
                 coordination,
+                image_registration_generation: 1,
             },
         );
         None
@@ -2049,7 +2811,10 @@ impl LocalModels {
             }
         }
         for slot in providers.values_mut() {
-            slot.registration = None;
+            if slot.registration.take().is_some() {
+                slot.image_registration_generation =
+                    slot.image_registration_generation.saturating_add(1);
+            }
         }
     }
 
@@ -2588,6 +3353,7 @@ impl LocalModels {
                 api_key: None,
                 headers: http::HeaderMap::new(),
                 transport_headers: http::HeaderMap::new(),
+                environment: std::collections::BTreeMap::new(),
                 base_url: None,
                 source: crate::AuthSource::new("explicit_header"),
             },
@@ -2784,6 +3550,7 @@ impl LocalModels {
                     api_key: None,
                     headers: http::HeaderMap::new(),
                     transport_headers: http::HeaderMap::new(),
+                    environment: std::collections::BTreeMap::new(),
                     base_url: None,
                     source: crate::AuthSource::new("explicit_header"),
                 },
@@ -3122,6 +3889,8 @@ impl LocalModelsBuilder {
                     state.bind_coordination(Rc::clone(&slot.coordination));
                 }
                 slot.registration = Some(provider);
+                slot.image_registration_generation =
+                    slot.image_registration_generation.saturating_add(1);
             } else {
                 let coordination = Rc::new(LocalProviderRefreshCoordination::new());
                 if let Some(state) = provider.catalog.catalog_state() {
@@ -3132,6 +3901,7 @@ impl LocalModelsBuilder {
                     LocalProviderSlot {
                         registration: Some(provider),
                         coordination,
+                        image_registration_generation: 1,
                     },
                 );
             }
@@ -3147,6 +3917,7 @@ impl LocalModelsBuilder {
                 payload_transforms: Rc::from(self.payload_transforms),
                 response_observers: Rc::from(self.response_observers),
                 attempt_middleware: Rc::from(self.attempt_middleware),
+                image_refreshes: RefCell::new(BTreeMap::new()),
             }),
         })
     }

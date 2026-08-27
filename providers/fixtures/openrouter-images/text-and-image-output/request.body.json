@@ -1,0 +1,1 @@
+{"model":"fixture/text-and-image-output","messages":[{"role":"user","content":[{"type":"text","text":"Draw and caption a deterministic blue square."}]}],"stream":false,"modalities":["image","text"]}

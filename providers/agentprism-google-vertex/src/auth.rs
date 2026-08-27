@@ -441,6 +441,7 @@ fn vertex_auth_check(source: &str) -> ResolvedAuth {
         api_key: None,
         headers: HeaderMap::new(),
         transport_headers: HeaderMap::new(),
+        environment: std::collections::BTreeMap::new(),
         base_url: None,
         source: AuthSource::new(source),
     }
@@ -605,6 +606,9 @@ async fn resolve_vertex_send(
                 api_key: Some(SecretString::new(value)),
                 headers: HeaderMap::new(),
                 transport_headers: HeaderMap::new(),
+                environment: credential.map_or_else(std::collections::BTreeMap::new, |value| {
+                    value.environment.clone()
+                }),
                 // The Google SDK uses Vertex Express's global endpoint when
                 // an API key is supplied, independently of project/location.
                 base_url: Some(vertex_api_key_base_url()),
@@ -742,6 +746,9 @@ async fn resolve_vertex_local(
                 api_key: Some(SecretString::new(value)),
                 headers: HeaderMap::new(),
                 transport_headers: HeaderMap::new(),
+                environment: credential.map_or_else(std::collections::BTreeMap::new, |value| {
+                    value.environment.clone()
+                }),
                 base_url: Some(vertex_api_key_base_url()),
                 source: AuthSource::new(source),
             }));
@@ -1274,6 +1281,7 @@ fn finish_vertex_resolution(
         api_key: None,
         headers,
         transport_headers: HeaderMap::new(),
+        environment: std::collections::BTreeMap::new(),
         base_url: Some(endpoint),
         source: AuthSource::new(if stored {
             "stored credential"
