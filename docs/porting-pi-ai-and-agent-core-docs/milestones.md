@@ -1305,3 +1305,84 @@ The commitment-gate subsets were re-exercised as follows:
 G.1 added no correction note to either architecture document. Its full pinned
 source audit found no architecture/Pi behavior disagreement outside the §10.11
 allowlist, so there are no GATES correction notes to enumerate.
+
+## 2026-08-26 — M10: standalone image generation
+
+M10 ports the owner-approved standalone image-generation surface at the current
+Pi pin `e86823096c5bad39e1ca282ec24bc5eb9bec745b`. It adds the provider-neutral
+image contracts and Send/Local control plane, the `openrouter-images` API family,
+the published OpenRouter image-model catalog, deterministic request/response
+fixtures, and hermetic coverage of lowering, decoding, authentication,
+middleware, retry, cancellation, telemetry, catalog refresh, and persistence-safe
+result projection. All M10-planned upstream mappings are now implemented.
+
+### Approved packages
+
+- M10.1 — `openrouter-images` family and decoder, image-model control plane and
+  catalog, deterministic fixtures, 40 new Rust tests, and parity-manifest
+  completion — `64951ff007d4c9cbca4837513bcb27ddcb56a894`
+
+### Architecture v2 Part 2 §10 conformance now passing
+
+The M10 tree continues to pass all 345 exact §10.1–§10.10 conformance names
+recorded at commitment-gate closeout. The seven required §10.8 turn-two replay
+goldens, the ten originally listed byte-exact API-family wire tests, all 82
+§10.9 agent names, and all 16 §10.10 reducer/session-tree names remain green.
+
+M10.1 adds the owner-approved image-generation extension to the §10.8 wire
+standard:
+
+```text
+wire_openrouter_images_pi_exact
+```
+
+That test byte-compares all three deterministic OpenRouter Images request-body
+fixtures: text-only, image-input, and text-and-image-output. The remaining 39
+new tests cover the published 45-model image catalog; provider registration and
+refresh; Send and Local dispatch; auth eligibility, environment propagation,
+and header precedence; payload and response middleware; injected transports;
+SDK-compatible response parsing; retry eligibility; cancellation; secret
+redaction; telemetry propagation; in-band failures; and partial-result
+retention. Every test is hermetic and uses captured fixtures or scripted
+transports.
+
+### Final gate verification
+
+The closeout run observed every required command pass on the M10.1 final tree:
+
+- `cargo fmt --all -- --check`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo build --workspace`
+- `cargo test --workspace`
+- `cargo doc --workspace --no-deps`
+- `bash parity/check.sh`
+- `git diff --check`
+
+No command or file access was denied by the sandbox.
+
+### Parity manifest coverage
+
+- Pinned upstream test files mapped: 160/160 — 154 `semantic-parity`, 6
+  `deliberate-divergence`, and 0 `planned`.
+- Status-bearing mappings: 252 total — 237 `semantic-parity`, 15
+  `deliberate-divergence`, and 0 `planned`.
+- Future named conformance tests: 0 `planned_test` entries.
+- Architecture §10.11 allowlist rows mapped: 10/10.
+- Rust test inventory discovered by the parity checker: 981 unique tests.
+
+### Architecture correction notes
+
+M10.1 added three correction notes: one to Architecture v2 Part 1 and two to
+Architecture v2 Part 2.
+
+- Part 1 §3.8 now records that pinned Pi keeps provider-scoped environment
+  values separate from model auth. Rust carries them on `ResolvedAuth`, overlays
+  request-scoped values afterward, and retains credential-derived signer/SDK
+  invariants through a private non-serialized transport-header channel.
+- Part 2 §2.4 now records OpenRouter Images' exact non-streaming SDK retry,
+  response parsing, observer ordering, cancellation, and partial-projection
+  boundaries, including which body and JSON failures remain single-attempt.
+- Part 2 §2.6 now records OpenRouter Images' family-specific logical-header
+  order and separate API-key eligibility: provider defaults, model headers,
+  resolved auth headers, explicit headers, then final transforms; a final
+  `Authorization` overlay cannot make a keyless request eligible.
