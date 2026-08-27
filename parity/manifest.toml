@@ -55,7 +55,7 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "docs/porting-pi-ai-and-agent-core-docs/architecture-v2-part2-revision.md#10.8-openai-completions"
-rust = ["openai_chat_reasoning_detail_deltas_merge_before_replay_pi_exact", "openai_chat_reasoning_detail_nullish_metadata_omission_survives_round_trip_pi_exact", "openai_chat_reasoning_details_turn_two_pi_exact", "openai_tool_choice_is_omitted_without_active_tools_pi_exact", "wire_openai_completions_pi_exact"]
+rust = ["openai_chat_reasoning_detail_deltas_merge_before_replay_pi_exact", "openai_chat_reasoning_detail_nullish_metadata_omission_survives_round_trip_pi_exact", "openai_chat_reasoning_details_turn_two_pi_exact", "openai_explicit_tool_choice_is_included_without_active_tools_pi_exact", "wire_openai_completions_pi_exact"]
 status = "semantic-parity"
 
 [[mapping]]
@@ -195,7 +195,7 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/src/api/openai-completions.ts"
-rust = ["openai_chat_block_signature_precedes_legacy_tool_signature", "openai_chat_finish_reason_contract", "openai_chat_incomplete_reasoning_detail_is_not_replayed", "openai_chat_legacy_tool_signature_imports_as_replay_item", "openai_chat_partial_reasoning_detail_is_not_replayable", "openai_chat_raw_stop_reason_is_preserved", "openai_chat_reasoning_content_required_compat", "openai_chat_reasoning_detail_deltas_merge_before_replay_pi_exact", "openai_chat_reasoning_detail_nullish_metadata_omission_survives_round_trip_pi_exact", "openai_chat_reasoning_details_preserve_array_order", "openai_chat_reasoning_details_replay_exact_json", "openai_chat_reasoning_details_survive_round_trip", "openai_chat_reasoning_field_name_is_preserved", "openai_chat_template_budget_variable_uses_clamped_simple_budget", "openai_chat_thinking_as_text_compat", "openai_grammar_constrained_tool_uses_custom_wire_shape", "openai_grammar_custom_input_escapes_json_string_deltas", "openai_grammar_custom_input_fragments_are_append_only_json", "openai_grammar_custom_terminal_events_follow_content_order", "openai_invalid_reasoning_details_rejected", "openai_kimi_deferred_tools_are_filtered_then_reintroduced", "openai_local_stream_body_error_preserves_partial_content", "openai_max_tokens_field_matches_compat", "openai_reasoning_format_matches_compat", "openai_sampling_params_merge_after_named_fields", "openai_strict_schema_normalization_and_error_policy_match_pi", "openai_thinking_budget_field_matches_compat", "openai_tool_choice_is_omitted_without_active_tools_pi_exact", "openai_tool_delta_correlation_by_index_then_id", "openai_usage_cache_subtraction_and_reasoning_subset", "openai_usage_null_chunk_falls_back_and_explicit_cached_zero_wins", "persisted_openai_chat_reasoning_detail_json_matches_architecture", "stream_cancellation_is_terminal_message", "stream_cancellation_preserves_partial_tool_arguments", "stream_failure_is_terminal_message", "stream_failure_preserves_partial_tool_arguments", "stream_failure_preserves_partial_tool_with_incomplete_metadata", "stream_length_preserves_truncated_tool_arguments", "stream_response_id_is_preserved", "stream_response_model_is_preserved"]
+rust = ["openai_chat_block_signature_precedes_legacy_tool_signature", "openai_chat_finish_reason_contract", "openai_chat_incomplete_reasoning_detail_is_not_replayed", "openai_chat_legacy_tool_signature_imports_as_replay_item", "openai_chat_partial_reasoning_detail_is_not_replayable", "openai_chat_raw_stop_reason_is_preserved", "openai_chat_reasoning_content_required_compat", "openai_chat_reasoning_detail_deltas_merge_before_replay_pi_exact", "openai_chat_reasoning_detail_nullish_metadata_omission_survives_round_trip_pi_exact", "openai_chat_reasoning_details_preserve_array_order", "openai_chat_reasoning_details_replay_exact_json", "openai_chat_reasoning_details_survive_round_trip", "openai_chat_reasoning_field_name_is_preserved", "openai_chat_template_budget_variable_uses_clamped_simple_budget", "openai_chat_thinking_as_text_compat", "openai_grammar_constrained_tool_uses_custom_wire_shape", "openai_grammar_custom_input_escapes_json_string_deltas", "openai_grammar_custom_input_fragments_are_append_only_json", "openai_grammar_custom_terminal_events_follow_content_order", "openai_invalid_reasoning_details_rejected", "openai_kimi_deferred_tools_are_filtered_then_reintroduced", "openai_local_stream_body_error_preserves_partial_content", "openai_max_tokens_field_matches_compat", "openai_reasoning_format_matches_compat", "openai_sampling_params_merge_after_named_fields", "openai_strict_schema_normalization_and_error_policy_match_pi", "openai_thinking_budget_field_matches_compat", "openai_explicit_tool_choice_is_included_without_active_tools_pi_exact", "openai_tool_delta_correlation_by_index_then_id", "openai_usage_cache_subtraction_and_reasoning_subset", "openai_usage_null_chunk_falls_back_and_explicit_cached_zero_wins", "persisted_openai_chat_reasoning_detail_json_matches_architecture", "stream_cancellation_is_terminal_message", "stream_cancellation_preserves_partial_tool_arguments", "stream_failure_is_terminal_message", "stream_failure_preserves_partial_tool_arguments", "stream_failure_preserves_partial_tool_with_incomplete_metadata", "stream_length_preserves_truncated_tool_arguments", "stream_response_id_is_preserved", "stream_response_model_is_preserved"]
 status = "semantic-parity"
 
 [[mapping]]
@@ -1027,7 +1027,6 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/ai/test/openai-completions-tool-choice.test.ts"
-needs_reverification = "SYNC-2026-08-26: upstream changed the no-tools case to require explicit toolChoice; owner decision pending in docs/pi-sync/report-2026-08-26.md."
 rust = [
   "openai_chat_finish_reason_contract",
   "openai_chat_reasoning_content_required_compat",
@@ -1038,7 +1037,7 @@ rust = [
   "openai_provider_catalogs_match_pinned_counts_and_profiles",
   "openai_reasoning_format_matches_compat",
   "openai_strict_schema_normalization_and_error_policy_match_pi",
-  "openai_tool_choice_is_omitted_without_active_tools_pi_exact",
+  "openai_explicit_tool_choice_is_included_without_active_tools_pi_exact",
   "openai_tool_delta_correlation_by_index_then_id",
   "openai_usage_cache_subtraction_and_reasoning_subset",
   "openai_usage_null_chunk_falls_back_and_explicit_cached_zero_wins",
@@ -1496,7 +1495,6 @@ status = "semantic-parity"
 
 [[mapping]]
 source = "packages/agent/test/harness/nodejs-env.test.ts"
-needs_reverification = "SYNC-2026-08-26: upstream added missing-taskkill abort coverage; reviewed as already conforming, pending mapping re-verification."
 rust = [
   "capability_unavailable_process_spawner_is_explicit",
   "env_atomic_replace",

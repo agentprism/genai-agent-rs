@@ -742,7 +742,7 @@ pub fn encode_openai_completions(
             params.insert("tool_stream", true);
         }
     }
-    if has_active_tools && let Some(tool_choice) = options.tool_choice.as_ref() {
+    if let Some(tool_choice) = options.tool_choice.as_ref() {
         params.insert("tool_choice", encode_openai_tool_choice(tool_choice));
     }
     encode_reasoning(
