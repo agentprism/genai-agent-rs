@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/agentprism-ai",
+    "crates/agentprism-native",
     "crates/agentprism-core",
     "crates/agentprism-session",
     "crates/agentprism-harness",

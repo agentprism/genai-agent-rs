@@ -345,6 +345,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentprism-native"
+version = "0.1.0"
+dependencies = [
+ "agentprism-ai",
+ "agentprism-bedrock",
+ "agentprism-core",
+ "agentprism-providers-all",
+ "agentprism-runtime-tokio",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "agentprism-nvidia"
 version = "0.1.0"
 dependencies = [
